@@ -72,23 +72,37 @@ type Bot struct {
 	username string
 	store    *access.Store
 	notifier Notifier
+	router   RouterView
 
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
 }
 
 func New(token string, store *access.Store, notifier Notifier) (*Bot, error) {
+	return NewWithRouter(token, store, notifier, nil)
+}
+
+// NewWithRouter is the daemon-mode constructor: rv carries the active Router.
+// Embedded mode goes through New() with rv == nil, and the session commands
+// degrade to a friendly "daemon mode only" message.
+func NewWithRouter(token string, store *access.Store, notifier Notifier, rv RouterView) (*Bot, error) {
 	api, err := telego.NewBot(token, telego.WithDefaultDebugLogger())
 	if err != nil {
 		return nil, err
 	}
 
-	return &Bot{api: api, token: token, store: store, notifier: notifier}, nil
+	return &Bot{api: api, token: token, store: store, notifier: notifier, router: rv}, nil
 }
 
 // NewFromAPI builds a Bot with a custom telego API server URL (for tests).
 // Production code uses New(); tests use this to point at httptest.
 func NewFromAPI(token string, store *access.Store, notifier Notifier, apiURL string) (*Bot, error) {
+	return NewFromAPIWithRouter(token, store, notifier, apiURL, nil)
+}
+
+// NewFromAPIWithRouter is the router-aware test constructor: pairs with
+// NewWithRouter to let session-command tests stub a RouterView.
+func NewFromAPIWithRouter(token string, store *access.Store, notifier Notifier, apiURL string, rv RouterView) (*Bot, error) {
 	opts := []telego.BotOption{telego.WithDefaultDebugLogger()}
 	if apiURL != "" {
 		opts = append(opts, telego.WithAPIServer(apiURL))
@@ -99,7 +113,7 @@ func NewFromAPI(token string, store *access.Store, notifier Notifier, apiURL str
 		return nil, err
 	}
 
-	return &Bot{api: api, token: token, store: store, notifier: notifier}, nil
+	return &Bot{api: api, token: token, store: store, notifier: notifier, router: rv}, nil
 }
 
 // Poll runs the long-poller until ctx is cancelled or an unrecoverable error
