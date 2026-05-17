@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,6 +14,11 @@ import (
 // ErrPermissionIDInUse is returned when a shim tries to register a permission
 // request_id that another (still-connected) shim already holds.
 var ErrPermissionIDInUse = errors.New("permission request_id already in use")
+
+var (
+	ErrShimNotFound        = errors.New("shim not found")
+	ErrAmbiguousShimPrefix = errors.New("shim prefix is ambiguous")
+)
 
 // Shim is the daemon-side handle for a connected shim. ID is stable for the
 // connection's lifetime; the Notify function pushes daemon→shim notifications.
@@ -133,6 +139,11 @@ func (r *Router) RecordOutbound(shimID, chatID string) {
 	r.chatOwners[chatID] = shimID
 	r.lastOutbound[shimID] = time.Now()
 
+	if p, ok := r.pins[chatID]; ok && p.shimID != shimID {
+		delete(r.pins, chatID)
+		slog.Info("router pin cleared by other shim outbound", "chat_id", chatID, "old_pin_shim", p.shimID, "new_owner", shimID)
+	}
+
 	slog.Info("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "prev_owner", prev)
 }
 
@@ -170,15 +181,77 @@ func (r *Router) Snapshot() []ShimInfo {
 	return out
 }
 
-func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
+// Pin overrides the chat→shim routing decision for ttl. A negative or zero ttl
+// is treated as already-expired (test fixture). Outbound by a different shim or
+// elapsed TTL clears the pin transparently in RouteInbound/RecordOutbound.
+func (r *Router) Pin(chatID, shimID string, ttl time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.shims[shimID]; !ok {
+		return ErrShimNotFound
+	}
+
+	r.pins[chatID] = pin{shimID: shimID, expiresAt: time.Now().Add(ttl)}
+	slog.Info("router pin set", "chat_id", chatID, "shim_id", shimID, "ttl_sec", int(ttl.Seconds()))
+	return nil
+}
+
+func (r *Router) Unpin(chatID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.pins[chatID]; ok {
+		delete(r.pins, chatID)
+		slog.Info("router pin cleared", "chat_id", chatID)
+	}
+}
+
+// ResolveShimByPrefix returns the unique shim whose ID starts with prefix.
+// Empty prefix is rejected (would match every shim).
+func (r *Router) ResolveShimByPrefix(prefix string) (*Shim, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	if prefix == "" {
+		return nil, ErrShimNotFound
+	}
+
+	var found *Shim
+	for id, s := range r.shims {
+		if strings.HasPrefix(id, prefix) {
+			if found != nil {
+				return nil, ErrAmbiguousShimPrefix
+			}
+			found = s
+		}
+	}
+	if found == nil {
+		return nil, ErrShimNotFound
+	}
+	return found, nil
+}
+
+func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	return r.routeInboundLocked(chatID)
 }
 
-// routeInboundLocked is the owner→LRU resolver. Caller holds r.mu.
+// routeInboundLocked is the pin→owner→LRU resolver. Caller holds r.mu (write
+// lock — pin expiry may mutate r.pins).
 func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
+	if p, ok := r.pins[chatID]; ok {
+		if time.Now().After(p.expiresAt) {
+			delete(r.pins, chatID)
+			slog.Info("router pin expired", "chat_id", chatID)
+		} else if s, ok := r.shims[p.shimID]; ok {
+			slog.Info("RouteInbound pin", "chat_id", chatID, "shim_id", s.ID)
+			return s, true
+		}
+	}
+
 	if owner, ok := r.chatOwners[chatID]; ok {
 		if s, ok := r.shims[owner]; ok {
 			slog.Info("RouteInbound owner", "chat_id", chatID, "shim_id", s.ID)
@@ -208,8 +281,8 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 func (r *Router) RouteInboundMulti(chatID, content string) []*Shim {
 	mentions := parseMentions(content)
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	if len(mentions) > 0 {
 		targets := r.resolveMentionsLocked(chatID, mentions)
