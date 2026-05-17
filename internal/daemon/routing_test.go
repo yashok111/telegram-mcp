@@ -234,7 +234,9 @@ func TestRouteInboundMultiMentionDoesNotChangeOwner(t *testing.T) {
 func TestRouterRegisterRecordsConnectedAt(t *testing.T) {
 	r := NewRouter()
 	before := time.Now()
+
 	r.Register(&Shim{ID: "s1", Workdir: "/tmp/wd", CCSessionID: "cc-1"})
+
 	after := time.Now()
 
 	infos := r.Snapshot()
@@ -250,7 +252,9 @@ func TestRouterRecordOutboundSetsLastOutbound(t *testing.T) {
 	r.Register(&Shim{ID: "s1"})
 
 	before := time.Now()
+
 	r.RecordOutbound("s1", "chat-1")
+
 	after := time.Now()
 
 	infos := r.Snapshot()
@@ -338,11 +342,11 @@ func TestRouterResolveShimByPrefix(t *testing.T) {
 	assert.Equal(t, "abcdef012345", s.ID)
 
 	_, err = r.ResolveShimByPrefix("abcd")
-	assert.ErrorIs(t, err, ErrAmbiguousShimPrefix)
+	require.ErrorIs(t, err, ErrAmbiguousShimPrefix)
 
 	_, err = r.ResolveShimByPrefix("zz")
-	assert.ErrorIs(t, err, ErrShimNotFound)
+	require.ErrorIs(t, err, ErrShimNotFound)
 
 	_, err = r.ResolveShimByPrefix("")
-	assert.ErrorIs(t, err, ErrShimNotFound)
+	require.ErrorIs(t, err, ErrShimNotFound)
 }

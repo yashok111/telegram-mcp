@@ -53,6 +53,7 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 			"content_len": len(p.Content),
 			"pid":         os.Getpid(),
 		}
+
 		if stats, ok := sink.(StatsSink); ok {
 			r, i := stats.SessionStats()
 			preFields["mcp_sessions_registered"] = r
@@ -67,6 +68,7 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 			"chat_id": p.Meta["chat_id"],
 			"pid":     os.Getpid(),
 		}
+
 		if stats, ok := sink.(StatsSink); ok {
 			r, i := stats.SessionStats()
 			postFields["mcp_sessions_registered"] = r

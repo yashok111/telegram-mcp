@@ -104,6 +104,7 @@ func (s *Server) Listen(ctx context.Context) error {
 			if errors.Is(err, net.ErrClosed) {
 				slog.Info("ipc server stopping", "socket", s.socketPath)
 				s.closeAllConns()
+
 				return nil
 			}
 

@@ -22,6 +22,7 @@ func (s ShimInfo) IDPrefix() string {
 	if len(s.ID) <= n {
 		return s.ID
 	}
+
 	return s.ID[:n]
 }
 
@@ -32,5 +33,6 @@ func (s ShimInfo) IdleFor(now time.Time) time.Duration {
 	if t.IsZero() {
 		t = s.ConnectedAt
 	}
+
 	return now.Sub(t)
 }

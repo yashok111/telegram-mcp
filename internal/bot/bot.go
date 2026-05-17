@@ -551,6 +551,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 	if m == nil {
 		slog.Info("callback unknown pattern", "data", q.Data, "user_id", q.From.ID)
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
+
 		return nil
 	}
 

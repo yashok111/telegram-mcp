@@ -278,12 +278,14 @@ func TestHandleHelloRecordsWorkdirAndSession(t *testing.T) {
 		"cc_session_id": "sess-xyz",
 	}))
 	require.Nil(t, rpcErr)
+
 	m, ok := res.(map[string]any)
 	require.True(t, ok)
 	assert.NotEmpty(t, m["shim_id"])
 
 	wd, _ := c.Meta.Load(metaWorkdir)
 	assert.Equal(t, "/home/u/code", wd)
+
 	sid, _ := c.Meta.Load(metaCCSessionID)
 	assert.Equal(t, "sess-xyz", sid)
 }

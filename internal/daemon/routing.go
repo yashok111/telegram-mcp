@@ -155,11 +155,13 @@ func (r *Router) Snapshot() []ShimInfo {
 
 	out := make([]ShimInfo, 0, len(r.shims))
 	pinsByShim := map[string][]string{}
+
 	now := time.Now()
 	for chat, p := range r.pins {
 		if now.After(p.expiresAt) {
 			continue
 		}
+
 		pinsByShim[p.shimID] = append(pinsByShim[p.shimID], chat)
 	}
 
@@ -175,9 +177,11 @@ func (r *Router) Snapshot() []ShimInfo {
 			PinnedChats:  pinsByShim[s.ID],
 		})
 	}
+
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].ConnectedAt.After(out[j].ConnectedAt)
 	})
+
 	return out
 }
 
@@ -194,6 +198,7 @@ func (r *Router) Pin(chatID, shimID string, ttl time.Duration) error {
 
 	r.pins[chatID] = pin{shimID: shimID, expiresAt: time.Now().Add(ttl)}
 	slog.Info("router pin set", "chat_id", chatID, "shim_id", shimID, "ttl_sec", int(ttl.Seconds()))
+
 	return nil
 }
 
@@ -218,17 +223,21 @@ func (r *Router) ResolveShimByPrefix(prefix string) (*Shim, error) {
 	}
 
 	var found *Shim
+
 	for id, s := range r.shims {
 		if strings.HasPrefix(id, prefix) {
 			if found != nil {
 				return nil, ErrAmbiguousShimPrefix
 			}
+
 			found = s
 		}
 	}
+
 	if found == nil {
 		return nil, ErrShimNotFound
 	}
+
 	return found, nil
 }
 
