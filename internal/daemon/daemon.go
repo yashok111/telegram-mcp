@@ -108,14 +108,28 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (d *Daemon) claimPID() error {
 	if raw, err := os.ReadFile(d.PidPath); err == nil {
 		if old, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && old > 1 && old != os.Getpid() {
-			if syscall.Kill(old, 0) == nil && isOurDaemon(old) {
+			alive := syscall.Kill(old, 0) == nil
+			ours := isOurDaemon(old)
+
+			switch {
+			case alive && ours:
 				slog.Info("replacing stale daemon", "pid", old)
 				_ = syscall.Kill(old, syscall.SIGTERM)
+			case alive && !ours:
+				slog.Warn("daemon.pid points at foreign process — leaving it alone", "pid", old)
+			default:
+				slog.Info("daemon.pid stale, overwriting", "pid", old)
 			}
 		}
 	}
 
-	return os.WriteFile(d.PidPath, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	if err := os.WriteFile(d.PidPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		return err
+	}
+
+	slog.Info("daemon.pid claimed", "pid", os.Getpid(), "path", d.PidPath)
+
+	return nil
 }
 
 func isOurDaemon(pid int) bool {

@@ -204,6 +204,9 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	}
 
 	cmd := commandName(msg.Text)
+
+	slog.Info("inbound command", "cmd", cmd, "user_id", msg.From.ID, "chat_id", msg.Chat.ID, "user", userLabel(msg.From), "dm_policy", st.DMPolicy)
+
 	switch cmd {
 	case "start":
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
@@ -260,7 +263,24 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 		return nil
 	}
 
+	slog.Info("inbound message",
+		"chat_id", msg.Chat.ID,
+		"message_id", msg.MessageID,
+		"user", userLabel(msg.From),
+		"user_id", msg.From.ID,
+		"kind", classifyMessageKind(&msg),
+		"text_len", len(msg.Text),
+	)
+
 	decision := b.gate(&msg)
+
+	slog.Info("gate decision",
+		"chat_id", msg.Chat.ID,
+		"user_id", msg.From.ID,
+		"action", decision.action,
+		"is_resend", decision.isResend,
+	)
+
 	switch decision.action {
 	case actionDrop:
 		return nil
@@ -292,6 +312,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 			behavior = "allow"
 			emoji = "✅"
 		}
+
+		slog.Info("permission reply intercepted", "request_id", strings.ToLower(m[2]), "behavior", behavior, "chat_id", chatID, "user_id", msg.From.ID)
 
 		b.notifier.ResolvePermission(strings.ToLower(m[2]), behavior)
 		_ = b.setReaction(ctx, chatID, msgID, emoji)
@@ -336,6 +358,32 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 
 // attachmentMeta extracts attachment_kind / file_id / size / mime / name for
 // non-photo media. Returns nil if the message carries no attachment.
+// classifyMessageKind names the inbound payload shape for telemetry/diagnostics.
+func classifyMessageKind(msg *telego.Message) string {
+	switch {
+	case msg.Photo != nil:
+		return "photo"
+	case msg.Voice != nil:
+		return "voice"
+	case msg.VideoNote != nil:
+		return "video_note"
+	case msg.Video != nil:
+		return "video"
+	case msg.Audio != nil:
+		return "audio"
+	case msg.Document != nil:
+		return "document"
+	case msg.Sticker != nil:
+		return "sticker"
+	case msg.Animation != nil:
+		return "animation"
+	case msg.Text != "":
+		return "text"
+	default:
+		return "other"
+	}
+}
+
 func attachmentMeta(msg *telego.Message) map[string]string {
 	put := func(kind, fileID string, size int64, mime, name string) map[string]string {
 		m := map[string]string{
@@ -501,6 +549,7 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
 	m := callbackRE.FindStringSubmatch(q.Data)
 	if m == nil {
+		slog.Info("callback unknown pattern", "data", q.Data, "user_id", q.From.ID)
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
 		return nil
 	}
@@ -509,6 +558,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 
 	senderID := strconv.FormatInt(q.From.ID, 10)
 	if !slices.Contains(st.AllowFrom, senderID) {
+		slog.Warn("callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
 			CallbackQueryID: q.ID,
 			Text:            "Not authorized.",
@@ -518,6 +568,8 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 	}
 
 	behavior, requestID := m[1], m[2]
+
+	slog.Info("callback received", "behavior", behavior, "request_id", requestID, "user_id", q.From.ID)
 
 	if behavior == "more" {
 		details, ok := b.notifier.LookupPermission(requestID)
@@ -744,6 +796,7 @@ func (b *Bot) checkApprovals(ctx context.Context) {
 func (b *Bot) SendMessage(ctx context.Context, chatID, text string, opts SendOpts) (int, error) {
 	id, err := parseChatID(chatID)
 	if err != nil {
+		slog.Warn("SendMessage bad chat_id", "chat_id", chatID, "err", err)
 		return 0, err
 	}
 
@@ -758,8 +811,11 @@ func (b *Bot) SendMessage(ctx context.Context, chatID, text string, opts SendOpt
 
 	m, err := b.api.SendMessage(ctx, p)
 	if err != nil {
+		slog.Error("Telegram sendMessage failed", "chat_id", id, "text_len", len(text), "reply_to", opts.ReplyTo, "parse_mode", opts.ParseMode, "err", err)
 		return 0, err
 	}
+
+	slog.Info("Telegram sendMessage ok", "chat_id", id, "message_id", m.MessageID, "text_len", len(text), "reply_to", opts.ReplyTo)
 
 	return m.MessageID, nil
 }
@@ -772,6 +828,7 @@ func (b *Bot) SendFile(ctx context.Context, chatID, path string, opts SendOpts) 
 
 	f, err := os.Open(path)
 	if err != nil {
+		slog.Warn("SendFile open failed", "path", path, "err", err)
 		return 0, err
 	}
 	defer func() { _ = f.Close() }()
@@ -785,8 +842,11 @@ func (b *Bot) SendFile(ctx context.Context, chatID, path string, opts SendOpts) 
 
 		m, err := b.api.SendPhoto(ctx, p)
 		if err != nil {
+			slog.Error("Telegram sendPhoto failed", "chat_id", id, "path", path, "err", err)
 			return 0, err
 		}
+
+		slog.Info("Telegram sendPhoto ok", "chat_id", id, "message_id", m.MessageID, "path", path)
 
 		return m.MessageID, nil
 	}
@@ -798,8 +858,11 @@ func (b *Bot) SendFile(ctx context.Context, chatID, path string, opts SendOpts) 
 
 	m, err := b.api.SendDocument(ctx, p)
 	if err != nil {
+		slog.Error("Telegram sendDocument failed", "chat_id", id, "path", path, "err", err)
 		return 0, err
 	}
+
+	slog.Info("Telegram sendDocument ok", "chat_id", id, "message_id", m.MessageID, "path", path)
 
 	return m.MessageID, nil
 }
@@ -817,12 +880,16 @@ func (b *Bot) EditMessage(ctx context.Context, chatID string, messageID int, tex
 
 	m, err := b.api.EditMessageText(ctx, p)
 	if err != nil {
+		slog.Error("Telegram editMessageText failed", "chat_id", id, "message_id", messageID, "err", err)
 		return 0, err
 	}
 
 	if m == nil {
+		slog.Info("Telegram editMessageText ok (no message)", "chat_id", id, "message_id", messageID)
 		return messageID, nil
 	}
+
+	slog.Info("Telegram editMessageText ok", "chat_id", id, "message_id", m.MessageID)
 
 	return m.MessageID, nil
 }

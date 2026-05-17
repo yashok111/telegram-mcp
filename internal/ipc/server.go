@@ -96,10 +96,13 @@ func (s *Server) Listen(ctx context.Context) error {
 		_ = l.Close()
 	}()
 
+	slog.Info("ipc server listening", "socket", s.socketPath)
+
 	for {
 		nc, err := l.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
+				slog.Info("ipc server stopping", "socket", s.socketPath)
 				s.closeAllConns()
 				return nil
 			}
@@ -118,6 +121,8 @@ func (s *Server) Listen(ctx context.Context) error {
 		s.connsMu.Lock()
 		s.conns[c] = struct{}{}
 		s.connsMu.Unlock()
+
+		slog.Info("ipc accept", "remote", nc.RemoteAddr().String())
 
 		s.hooksMu.Lock()
 		onConnect := s.onConnect

@@ -177,7 +177,19 @@ func (s *Store) Save(st State) error {
 		return err
 	}
 
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+
+	slog.Info("access.json saved",
+		"path", s.path,
+		"allow_from", len(st.AllowFrom),
+		"groups", len(st.Groups),
+		"pending", len(st.Pending),
+		"dm_policy", st.DMPolicy,
+	)
+
+	return nil
 }
 
 // PruneExpired drops timed-out pending entries. Returns true if anything was removed.

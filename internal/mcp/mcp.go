@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	mcptypes "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -47,9 +48,31 @@ type Server struct {
 	// "See more" expansion in the Telegram inline-keyboard flow.
 	permMu  sync.Mutex
 	pending map[string]bot.PermissionDetails
+
+	// Init state observed via MCP hooks for diagnostics.
+	sessionsRegistered atomic.Int32
+	sessionsInited     atomic.Int32
 }
 
 func New(store *access.Store) (*Server, error) {
+	s := &Server{
+		store:   store,
+		pending: map[string]bot.PermissionDetails{},
+	}
+
+	hooks := &mcpserver.Hooks{}
+	hooks.AddOnRegisterSession(func(_ context.Context, _ mcpserver.ClientSession) {
+		n := s.sessionsRegistered.Add(1)
+		slog.Info("mcp session registered", "registered_total", n)
+	})
+	hooks.AddOnUnregisterSession(func(_ context.Context, _ mcpserver.ClientSession) {
+		s.sessionsRegistered.Add(-1)
+	})
+	hooks.AddAfterInitialize(func(_ context.Context, _ any, _ *mcptypes.InitializeRequest, _ *mcptypes.InitializeResult) {
+		n := s.sessionsInited.Add(1)
+		slog.Info("mcp session initialized", "inited_total", n)
+	})
+
 	srv := mcpserver.NewMCPServer(
 		"telegram",
 		"1.0.0",
@@ -62,17 +85,21 @@ func New(store *access.Store) (*Server, error) {
 			"claude/channel/permission": map[string]any{},
 		}),
 		mcpserver.WithRecovery(),
+		mcpserver.WithHooks(hooks),
 	)
 
-	s := &Server{
-		store:   store,
-		srv:     srv,
-		pending: map[string]bot.PermissionDetails{},
-	}
+	s.srv = srv
 	s.registerTools()
 	s.registerNotifications()
 
 	return s, nil
+}
+
+// SessionStats returns (registered, initialized) counts observed via MCP hooks.
+// Used by shim diagnostics to verify the stdio session is past the handshake
+// before notifications fire.
+func (s *Server) SessionStats() (int32, int32) {
+	return s.sessionsRegistered.Load(), s.sessionsInited.Load()
 }
 
 func (s *Server) AttachBot(b BotAPI) {
@@ -96,7 +123,9 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 // --- Notifier surface (called by bot package) ---
 
 // DeliverInbound forwards a Telegram message into Claude Code via the
-// experimental notifications/claude/channel notification.
+// experimental notifications/claude/channel notification. The content is
+// wrapped in a <channel> tag so the LLM sees the routing context even when
+// the CC harness doesn't render the tag itself.
 func (s *Server) DeliverInbound(content string, meta map[string]string) {
 	metaAny := make(map[string]any, len(meta))
 	for k, v := range meta {
@@ -107,12 +136,27 @@ func (s *Server) DeliverInbound(content string, meta map[string]string) {
 		"content_len", len(content),
 		"chat_id", meta["chat_id"],
 		"user", meta["user"],
+		"sessions_registered", s.sessionsRegistered.Load(),
+		"sessions_inited", s.sessionsInited.Load(),
 	)
 
+	wrapped := wrapChannel(content, meta)
+
 	s.srv.SendNotificationToAllClients("notifications/claude/channel", map[string]any{
-		"content": content,
+		"content": wrapped,
 		"meta":    metaAny,
 	})
+}
+
+func wrapChannel(content string, meta map[string]string) string {
+	attrs := []string{`source="telegram"`}
+	for _, k := range []string{"chat_id", "message_id", "user", "ts", "image_path", "attachment_file_id"} {
+		if v, ok := meta[k]; ok && v != "" {
+			attrs = append(attrs, fmt.Sprintf(`%s=%q`, k, v))
+		}
+	}
+
+	return fmt.Sprintf("<channel %s>\n%s\n</channel>\n\nReply through mcp__telegram__reply (pass chat_id back). Your terminal output never reaches the sender.", strings.Join(attrs, " "), content)
 }
 
 func (s *Server) LookupPermission(requestID string) (bot.PermissionDetails, bool) {
@@ -146,7 +190,10 @@ func (s *Server) registerNotifications() {
 			description, _ := params["description"].(string)
 			inputPreview, _ := params["input_preview"].(string)
 
+			slog.Info("permission_request received", "request_id", requestID, "tool", toolName, "desc_len", len(description), "preview_len", len(inputPreview))
+
 			if requestID == "" {
+				slog.Warn("permission_request dropped: empty request_id")
 				return
 			}
 
@@ -160,6 +207,8 @@ func (s *Server) registerNotifications() {
 
 			if b := s.Bot(); b != nil {
 				b.BroadcastPermissionRequest(ctx, requestID, toolName)
+			} else {
+				slog.Warn("permission_request not broadcast: bot not attached", "request_id", requestID)
 			}
 		},
 	)
@@ -223,8 +272,11 @@ func (s *Server) handleReply(ctx context.Context, req mcptypes.CallToolRequest) 
 
 	files := req.GetStringSlice("files", nil)
 
+	slog.Info("tool reply invoked", "chat_id", chatID, "text_len", len(text), "reply_to", replyTo, "format", format, "files", len(files))
+
 	st := s.store.Load()
 	if !access.Allowed(st, chatID) {
+		slog.Warn("tool reply gate denied", "chat_id", chatID)
 		return mcptypes.NewToolResultError(fmt.Sprintf("chat %s is not allowlisted — add via /telegram:access", chatID)), nil
 	}
 
@@ -275,6 +327,8 @@ func (s *Server) handleReply(ctx context.Context, req mcptypes.CallToolRequest) 
 		sentIDs = append(sentIDs, id)
 	}
 
+	slog.Info("tool reply sent", "chat_id", chatID, "ids", sentIDs, "chunks", len(chunks), "files", len(files))
+
 	if len(sentIDs) == 1 {
 		return mcptypes.NewToolResultText(fmt.Sprintf("sent (id: %d)", sentIDs[0])), nil
 	}
@@ -287,8 +341,11 @@ func (s *Server) handleReact(ctx context.Context, req mcptypes.CallToolRequest) 
 	msgID := atoiSafe(req.GetString("message_id", ""))
 	emoji := req.GetString("emoji", "")
 
+	slog.Info("tool react invoked", "chat_id", chatID, "message_id", msgID, "emoji", emoji)
+
 	st := s.store.Load()
 	if !access.Allowed(st, chatID) {
+		slog.Warn("tool react gate denied", "chat_id", chatID)
 		return mcptypes.NewToolResultError(fmt.Sprintf("chat %s is not allowlisted", chatID)), nil
 	}
 
@@ -298,6 +355,7 @@ func (s *Server) handleReact(ctx context.Context, req mcptypes.CallToolRequest) 
 	}
 
 	if err := b.React(ctx, chatID, msgID, emoji); err != nil {
+		slog.Error("tool react failed", "chat_id", chatID, "message_id", msgID, "err", err)
 		return mcptypes.NewToolResultError(fmt.Sprintf("react failed: %v", err)), nil
 	}
 
@@ -307,19 +365,25 @@ func (s *Server) handleReact(ctx context.Context, req mcptypes.CallToolRequest) 
 func (s *Server) handleDownload(ctx context.Context, req mcptypes.CallToolRequest) (*mcptypes.CallToolResult, error) {
 	fileID := req.GetString("file_id", "")
 
+	slog.Info("tool download_attachment invoked", "file_id", fileID)
+
 	b := s.Bot()
 	if b == nil {
 		return mcptypes.NewToolResultError("bot not attached"), nil
 	}
 
 	if err := os.MkdirAll(s.store.InboxDir(), 0o700); err != nil {
+		slog.Error("tool download_attachment mkdir failed", "err", err)
 		return mcptypes.NewToolResultError(fmt.Sprintf("mkdir inbox: %v", err)), nil
 	}
 
 	path, err := b.DownloadFile(ctx, fileID)
 	if err != nil {
+		slog.Error("tool download_attachment failed", "file_id", fileID, "err", err)
 		return mcptypes.NewToolResultError(fmt.Sprintf("download failed: %v", err)), nil
 	}
+
+	slog.Info("tool download_attachment ok", "file_id", fileID, "path", path)
 
 	return mcptypes.NewToolResultText(path), nil
 }
@@ -335,8 +399,11 @@ func (s *Server) handleEdit(ctx context.Context, req mcptypes.CallToolRequest) (
 		parseMode = "MarkdownV2"
 	}
 
+	slog.Info("tool edit_message invoked", "chat_id", chatID, "message_id", msgID, "text_len", len(text), "format", format)
+
 	st := s.store.Load()
 	if !access.Allowed(st, chatID) {
+		slog.Warn("tool edit_message gate denied", "chat_id", chatID)
 		return mcptypes.NewToolResultError(fmt.Sprintf("chat %s is not allowlisted", chatID)), nil
 	}
 
@@ -347,8 +414,11 @@ func (s *Server) handleEdit(ctx context.Context, req mcptypes.CallToolRequest) (
 
 	id, err := b.EditMessage(ctx, chatID, msgID, text, parseMode)
 	if err != nil {
+		slog.Error("tool edit_message failed", "chat_id", chatID, "message_id", msgID, "err", err)
 		return mcptypes.NewToolResultError(fmt.Sprintf("edit failed: %v", err)), nil
 	}
+
+	slog.Info("tool edit_message ok", "chat_id", chatID, "message_id", id)
 
 	return mcptypes.NewToolResultText(fmt.Sprintf("edited (id: %d)", id)), nil
 }

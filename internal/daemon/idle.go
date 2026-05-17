@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -36,13 +37,16 @@ func (i *IdleExit) Run(ctx context.Context) {
 			if i.router.ConnectedCount() == 0 {
 				if idleSince.IsZero() {
 					idleSince = time.Now()
+					slog.Info("idle timer started", "timeout", i.timeout)
 				}
 
 				if time.Since(idleSince) >= i.timeout {
+					slog.Info("idle timer elapsed — calling onIdle", "idle_for", time.Since(idleSince))
 					i.onIdle()
 					return
 				}
-			} else {
+			} else if !idleSince.IsZero() {
+				slog.Info("idle timer cancelled — shim reconnected", "was_idle_for", time.Since(idleSince))
 				idleSince = time.Time{}
 			}
 		}

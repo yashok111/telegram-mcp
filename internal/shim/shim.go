@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/yakov/telegram-mcp/internal/access"
@@ -50,6 +51,10 @@ func (s *Shim) Wire() error {
 		},
 	}
 	s.MCP.AttachBot(adapter)
+
+	if s.StateDir != "" {
+		AttachNotifierDebug(filepath.Join(s.StateDir, "shim-debug.log"))
+	}
 
 	AttachNotifier(s.Client, s.MCP)
 

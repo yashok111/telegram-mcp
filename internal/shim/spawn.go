@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -29,12 +30,15 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 	}
 
 	if canDial(opts.SocketPath) {
+		slog.Info("daemon already listening", "socket", opts.SocketPath)
 		return nil
 	}
 
 	if opts.NoSpawn {
 		return errors.New("daemon socket missing and spawn disabled")
 	}
+
+	slog.Info("daemon not reachable — spawning", "socket", opts.SocketPath)
 
 	bin := opts.BinaryPath
 	if bin == "" {
@@ -66,6 +70,8 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 		return fmt.Errorf("spawn daemon: %w", err)
 	}
 
+	slog.Info("daemon spawned", "bin", bin, "pid", cmd.Process.Pid)
+
 	go func() { _ = cmd.Process.Release() }()
 
 	deadline := time.Now().Add(opts.WaitTimeout)
@@ -77,6 +83,7 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 		}
 
 		if canDial(opts.SocketPath) {
+			slog.Info("daemon socket reachable", "socket", opts.SocketPath, "wait_ms", time.Since(deadline.Add(-opts.WaitTimeout)).Milliseconds())
 			return nil
 		}
 

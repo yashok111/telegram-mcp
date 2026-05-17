@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
@@ -56,6 +57,8 @@ func (h *Handlers) gate(chatID string) *ipc.Error {
 		return nil
 	}
 
+	slog.Warn("gate denied: chat not allowlisted", "chat_id", chatID)
+
 	data, _ := json.Marshal(map[string]string{"chat_id": chatID})
 
 	return &ipc.Error{Code: ipc.CodeNotAllowlisted, Message: "chat not allowlisted", Data: data}
@@ -75,6 +78,8 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 	id := hex.EncodeToString(buf)
 	c.Meta.Store(metaShimID, id)
 	c.Meta.Store(metaLabel, p.Label)
+
+	slog.Info("hello received", "shim_id", id, "shim_pid", p.ShimPID, "label", p.Label, "daemon_version", DaemonVersion)
 
 	return map[string]any{"shim_id": id, "daemon_version": DaemonVersion}, nil
 }
@@ -96,8 +101,11 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params js
 
 	id, err := h.bot.SendMessage(ctx, p.ChatID, p.Text, bot.SendOpts{ReplyTo: p.ReplyTo, ParseMode: p.ParseMode})
 	if err != nil {
+		slog.Error("bot.SendMessage failed", "shim_id", h.shimID(c), "chat_id", p.ChatID, "text_len", len(p.Text), "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
 	}
+
+	slog.Info("bot.SendMessage ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "text_len", len(p.Text), "reply_to", p.ReplyTo, "parse_mode", p.ParseMode)
 
 	h.router.RecordOutbound(h.shimID(c), p.ChatID)
 
@@ -120,8 +128,11 @@ func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.
 
 	id, err := h.bot.SendFile(ctx, p.ChatID, p.Path, bot.SendOpts{ReplyTo: p.ReplyTo})
 	if err != nil {
+		slog.Error("bot.SendFile failed", "shim_id", h.shimID(c), "chat_id", p.ChatID, "path", p.Path, "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
 	}
+
+	slog.Info("bot.SendFile ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "path", p.Path, "reply_to", p.ReplyTo)
 
 	h.router.RecordOutbound(h.shimID(c), p.ChatID)
 
@@ -145,8 +156,11 @@ func (h *Handlers) HandleEditMessage(ctx context.Context, _ *ipc.Conn, params js
 
 	id, err := h.bot.EditMessage(ctx, p.ChatID, p.MessageID, p.Text, p.ParseMode)
 	if err != nil {
+		slog.Error("bot.EditMessage failed", "chat_id", p.ChatID, "message_id", p.MessageID, "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
 	}
+
+	slog.Info("bot.EditMessage ok", "chat_id", p.ChatID, "message_id", id, "text_len", len(p.Text), "parse_mode", p.ParseMode)
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -166,8 +180,11 @@ func (h *Handlers) HandleReact(ctx context.Context, _ *ipc.Conn, params json.Raw
 	}
 
 	if err := h.bot.React(ctx, p.ChatID, p.MessageID, p.Emoji); err != nil {
+		slog.Error("bot.React failed", "chat_id", p.ChatID, "message_id", p.MessageID, "emoji", p.Emoji, "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
 	}
+
+	slog.Info("bot.React ok", "chat_id", p.ChatID, "message_id", p.MessageID, "emoji", p.Emoji)
 
 	return map[string]any{}, nil
 }
@@ -182,8 +199,11 @@ func (h *Handlers) HandleDownloadFile(ctx context.Context, _ *ipc.Conn, params j
 
 	path, err := h.bot.DownloadFile(ctx, p.FileID)
 	if err != nil {
+		slog.Error("bot.DownloadFile failed", "file_id", p.FileID, "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
 	}
+
+	slog.Info("bot.DownloadFile ok", "file_id", p.FileID, "path", path)
 
 	return map[string]any{"path": path}, nil
 }
@@ -203,9 +223,12 @@ func (h *Handlers) HandleBroadcastPermission(ctx context.Context, c *ipc.Conn, p
 	if err := h.router.RegisterPermission(p.RequestID, shimID, PermDetails{
 		ToolName: p.ToolName, Description: p.Description, InputPreview: p.InputPreview,
 	}); err != nil {
+		slog.Warn("permission register collision", "request_id", p.RequestID, "shim_id", shimID, "tool", p.ToolName, "err", err)
 		data, _ := json.Marshal(map[string]string{"request_id": p.RequestID})
 		return nil, &ipc.Error{Code: ipc.CodeRequestIDCollision, Message: err.Error(), Data: data}
 	}
+
+	slog.Info("permission registered", "request_id", p.RequestID, "shim_id", shimID, "tool", p.ToolName, "desc_len", len(p.Description), "preview_len", len(p.InputPreview))
 
 	h.bot.BroadcastPermissionRequest(ctx, p.RequestID, p.ToolName)
 
@@ -221,7 +244,7 @@ func (h *Handlers) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodBotDownloadFile, h.HandleDownloadFile)
 	s.Handle(ipc.MethodBotBroadcastPermissionRequest, h.HandleBroadcastPermission)
 
-	s.HandleNotify(ipc.MethodGoodbye, func(context.Context, *ipc.Conn, json.RawMessage) {
-		// graceful disconnect is signaled by Conn close; nothing to do.
+	s.HandleNotify(ipc.MethodGoodbye, func(_ context.Context, c *ipc.Conn, _ json.RawMessage) {
+		slog.Info("goodbye received", "shim_id", h.shimID(c))
 	})
 }
