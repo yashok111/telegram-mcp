@@ -12,18 +12,22 @@ Restart=on-failure
 RestartSec=5s
 
 # Hardening — the bot only needs its state dir and outbound HTTPS.
+# Restricted to directives that user-mode systemd can enforce without
+# CAP_SYS_ADMIN. The kernel/namespace-level options (ProtectKernel*,
+# LockPersonality, MemoryDenyWriteExecute, RestrictAddressFamilies) are
+# left commented for system-unit deployments where they will work.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.claude/channels/telegram
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-LockPersonality=true
-MemoryDenyWriteExecute=true
-SystemCallArchitectures=native
+# ProtectKernelTunables=true       # requires CAP_SYS_ADMIN
+# ProtectKernelModules=true        # requires CAP_SYS_ADMIN
+# ProtectControlGroups=true        # requires CAP_SYS_ADMIN
+# RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX  # CAP_NET_ADMIN
+# LockPersonality=true             # cap drop fails in user mode
+# MemoryDenyWriteExecute=true      # cap drop fails in user mode
+# SystemCallArchitectures=native   # seccomp setup needs caps
 
 # When the unit is normally only useful while a Claude Code session is alive,
 # but pairing/permission flows can fire outside that. Keep it running and let
