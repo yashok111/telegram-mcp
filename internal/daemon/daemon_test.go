@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yakov/telegram-mcp/internal/access"
@@ -37,7 +36,7 @@ func TestDaemonShutsDownOnCancel(t *testing.T) {
 
 	select {
 	case err := <-done:
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("Daemon.Run did not return after cancel")
 	}
@@ -54,8 +53,7 @@ func TestIdleExitFiresAfterTimeout(t *testing.T) {
 		}
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go idle.Run(ctx)
 
@@ -78,8 +76,7 @@ func TestIdleExitDoesNotFireWhileConnected(t *testing.T) {
 		}
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go idle.Run(ctx)
 
@@ -101,8 +98,7 @@ func TestIdleExitDisabledByZero(t *testing.T) {
 		}
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go idle.Run(ctx)
 

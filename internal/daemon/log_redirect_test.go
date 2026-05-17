@@ -15,6 +15,7 @@ func TestRedirectStderrToFile(t *testing.T) {
 
 	restore, err := RedirectStderrTo(path)
 	require.NoError(t, err)
+
 	defer restore()
 
 	_, _ = os.Stderr.WriteString("hello\n")
@@ -26,7 +27,7 @@ func TestRedirectStderrToFile(t *testing.T) {
 	assert.Contains(t, string(raw), "hello")
 }
 
-func TestShouldRedirectFalseWhenTTY(t *testing.T) {
+func TestShouldRedirectFalseWhenTTY(_ *testing.T) {
 	// We can't easily simulate a real tty in unit tests; assert the function
 	// runs and returns a bool. Real behavior is covered by manual integration.
 	_ = ShouldRedirect()

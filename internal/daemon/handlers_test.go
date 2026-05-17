@@ -46,6 +46,7 @@ func (b *fakeBot) SendMessage(_ context.Context, chatID, text string, opts bot.S
 	b.sentMessage.chatID = chatID
 	b.sentMessage.text = text
 	b.sentMessage.opts = opts
+
 	return b.sentMessage.retID, b.sentMessage.retErr
 }
 
@@ -53,6 +54,7 @@ func (b *fakeBot) SendFile(_ context.Context, chatID, path string, opts bot.Send
 	b.sentFile.chatID = chatID
 	b.sentFile.path = path
 	b.sentFile.opts = opts
+
 	return b.sentFile.retID, b.sentFile.retErr
 }
 
@@ -61,6 +63,7 @@ func (b *fakeBot) EditMessage(_ context.Context, chatID string, msgID int, text,
 	b.editedMessage.messageID = msgID
 	b.editedMessage.text = text
 	b.editedMessage.parseMode = pm
+
 	return b.editedMessage.retID, b.editedMessage.retErr
 }
 
@@ -95,19 +98,23 @@ func newHandlersFixture(t *testing.T) (*Handlers, *fakeBot, *Router, *access.Sto
 	r.Register(&Shim{ID: "shim-a", Notify: func(string, any) error { return nil }})
 
 	h := NewHandlers(store, fb, r)
+
 	return h, fb, r, store
 }
 
 func raw(t *testing.T, v any) json.RawMessage {
 	t.Helper()
+
 	b, err := json.Marshal(v)
 	require.NoError(t, err)
+
 	return b
 }
 
 func conn(id string) *ipc.Conn {
 	c := &ipc.Conn{}
 	c.Meta.Store(metaShimID, id)
+
 	return c
 }
 

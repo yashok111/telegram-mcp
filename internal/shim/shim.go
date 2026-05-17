@@ -32,6 +32,7 @@ type Shim struct {
 func (s *Shim) ShimID() (string, bool) {
 	s.idMu.RLock()
 	defer s.idMu.RUnlock()
+
 	return s.id, s.id != ""
 }
 
@@ -43,6 +44,7 @@ func (s *Shim) Wire() error {
 			if !ok {
 				return "", ""
 			}
+
 			return d.Description, d.InputPreview
 		},
 	}

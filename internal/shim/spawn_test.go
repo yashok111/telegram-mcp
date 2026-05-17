@@ -25,6 +25,7 @@ func TestEnsureDaemonConnectsToExistingSocket(t *testing.T) {
 			if err != nil {
 				return
 			}
+
 			_ = c.Close()
 		}
 	}()

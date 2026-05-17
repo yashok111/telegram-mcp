@@ -45,7 +45,7 @@ func TestShimSendsHelloOnWire(t *testing.T) {
 		Store:       store,
 		HelloPID:    1234,
 		HelloLabel:  "session-X",
-		WireContext: func() context.Context { return context.Background() },
+		WireContext: context.Background,
 	}
 
 	require.NoError(t, sh.Wire())
@@ -78,5 +78,6 @@ func TestShimRunStopsOnContextCancel(t *testing.T) {
 	cancel()
 
 	require.NoError(t, sh.Wire())
+
 	_ = ctx
 }

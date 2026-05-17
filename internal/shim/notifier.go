@@ -24,6 +24,7 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 			slog.Warn("inbound unmarshal", "err", err)
 			return
 		}
+
 		sink.DeliverInbound(p.Content, p.Meta)
 	})
 
@@ -36,6 +37,7 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 			slog.Warn("perm resolved unmarshal", "err", err)
 			return
 		}
+
 		sink.ResolvePermission(p.RequestID, p.Behavior)
 	})
 }

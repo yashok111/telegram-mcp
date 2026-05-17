@@ -176,5 +176,6 @@ func removeStr(xs []string, x string) []string {
 			out = append(out, v)
 		}
 	}
+
 	return out
 }

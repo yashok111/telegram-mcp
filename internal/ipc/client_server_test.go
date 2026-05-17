@@ -3,7 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
-	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -27,14 +27,16 @@ func startTestServer(t *testing.T) (*Server, string) {
 
 	go func() {
 		_ = s.Listen(ctx)
+
 		close(done)
 	}()
+
 	t.Cleanup(func() { <-done })
 
 	require.Eventually(t, func() bool {
-		_, err := net.Dial("unix", sock)
+		_, err := os.Stat(sock)
 		return err == nil
-	}, 2*time.Second, 10*time.Millisecond, "server never accepted")
+	}, 2*time.Second, 10*time.Millisecond, "server never bound socket")
 
 	return s, sock
 }
@@ -42,16 +44,18 @@ func startTestServer(t *testing.T) (*Server, string) {
 func TestClientCallEcho(t *testing.T) {
 	s, sock := startTestServer(t)
 	s.Handle("echo", func(_ context.Context, _ *Conn, params json.RawMessage) (any, *Error) {
-		return map[string]any{"got": json.RawMessage(params)}, nil
+		return map[string]any{"got": params}, nil
 	})
 
 	c, err := Dial(sock)
 	require.NoError(t, err)
+
 	defer c.Close()
 
 	var got struct {
 		Got map[string]string `json:"got"`
 	}
+
 	err = c.Call(t.Context(), "echo", map[string]string{"x": "y"}, &got)
 	require.NoError(t, err)
 	assert.Equal(t, "y", got.Got["x"])
@@ -65,6 +69,7 @@ func TestClientCallError(t *testing.T) {
 
 	c, err := Dial(sock)
 	require.NoError(t, err)
+
 	defer c.Close()
 
 	err = c.Call(t.Context(), "explode", nil, nil)
@@ -79,12 +84,15 @@ func TestClientConcurrentCalls(t *testing.T) {
 	s, sock := startTestServer(t)
 	s.Handle("inc", func(_ context.Context, _ *Conn, params json.RawMessage) (any, *Error) {
 		var p struct{ N int }
+
 		_ = json.Unmarshal(params, &p)
+
 		return map[string]int{"n": p.N + 1}, nil
 	})
 
 	c, err := Dial(sock)
 	require.NoError(t, err)
+
 	defer c.Close()
 
 	const N = 50
@@ -98,6 +106,7 @@ func TestClientConcurrentCalls(t *testing.T) {
 			defer wg.Done()
 
 			var got struct{ N int }
+
 			err := c.Call(t.Context(), "inc", map[string]int{"N": i}, &got)
 			assert.NoError(t, err)
 			assert.Equal(t, i+1, got.N)
@@ -111,13 +120,16 @@ func TestClientReceivesServerNotification(t *testing.T) {
 	s, sock := startTestServer(t)
 
 	var conn atomic.Pointer[Conn]
+
 	s.OnConnect(func(c *Conn) { conn.Store(c) })
 
 	c, err := Dial(sock)
 	require.NoError(t, err)
+
 	defer c.Close()
 
 	got := make(chan json.RawMessage, 1)
+
 	c.OnNotify("pinged", func(_ context.Context, params json.RawMessage) {
 		got <- params
 	})
@@ -138,12 +150,14 @@ func TestClientNotifyServer(t *testing.T) {
 	s, sock := startTestServer(t)
 
 	got := make(chan json.RawMessage, 1)
+
 	s.HandleNotify("bye", func(_ context.Context, _ *Conn, params json.RawMessage) {
 		got <- params
 	})
 
 	c, err := Dial(sock)
 	require.NoError(t, err)
+
 	defer c.Close()
 
 	require.NoError(t, c.Notify("bye", map[string]string{"r": "ok"}))

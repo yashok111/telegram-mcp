@@ -2,7 +2,6 @@ package ipc
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -13,6 +12,7 @@ import (
 
 func TestFrameRoundtrip(t *testing.T) {
 	var buf bytes.Buffer
+
 	fw := NewFrameWriter(&buf)
 	require.NoError(t, fw.WriteFrame([]byte(`{"hello":"world"}`)))
 	require.NoError(t, fw.WriteFrame([]byte(`{"n":2}`)))
@@ -21,6 +21,7 @@ func TestFrameRoundtrip(t *testing.T) {
 	a, err := fr.ReadFrame()
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"hello":"world"}`, string(a))
+
 	b, err := fr.ReadFrame()
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"n":2}`, string(b))
@@ -28,8 +29,10 @@ func TestFrameRoundtrip(t *testing.T) {
 
 func TestFrameEOFAfterLastFrame(t *testing.T) {
 	var buf bytes.Buffer
+
 	fw := NewFrameWriter(&buf)
 	require.NoError(t, fw.WriteFrame([]byte("x")))
+
 	fr := NewFrameReader(&buf)
 	_, err := fr.ReadFrame()
 	require.NoError(t, err)
@@ -48,7 +51,7 @@ func TestFrameOversizedRejected(t *testing.T) {
 	fr := NewFrameReader(strings.NewReader(hdr))
 	_, err := fr.ReadFrame()
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrFrameTooLarge))
+	assert.ErrorIs(t, err, ErrFrameTooLarge)
 }
 
 func TestFrameNegativeLength(t *testing.T) {

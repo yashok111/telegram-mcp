@@ -46,7 +46,9 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 		}
 	}
 
-	cmd := exec.Command(bin, "daemon")
+	// We deliberately use exec.Command (not CommandContext): the daemon must
+	// outlive the shim's ctx — CommandContext would kill it on shim exit.
+	cmd := exec.Command(bin, "daemon") //nolint:noctx // see comment above; daemon detached.
 	cmd.Stdin = nil
 
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
@@ -91,5 +93,6 @@ func canDial(path string) bool {
 	}
 
 	_ = c.Close()
+
 	return true
 }

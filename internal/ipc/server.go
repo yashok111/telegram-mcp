@@ -12,8 +12,10 @@ import (
 	"sync"
 )
 
-type MethodHandler func(ctx context.Context, conn *Conn, params json.RawMessage) (result any, err *Error)
-type ServerNotifyHandler func(ctx context.Context, conn *Conn, params json.RawMessage)
+type (
+	MethodHandler       func(ctx context.Context, conn *Conn, params json.RawMessage) (result any, err *Error)
+	ServerNotifyHandler func(ctx context.Context, conn *Conn, params json.RawMessage)
+)
 
 type Server struct {
 	socketPath string
@@ -90,6 +92,7 @@ func (s *Server) Listen(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+
 		_ = l.Close()
 	}()
 
@@ -100,6 +103,7 @@ func (s *Server) Listen(ctx context.Context) error {
 				s.closeAllConns()
 				return nil
 			}
+
 			return fmt.Errorf("accept: %w", err)
 		}
 
@@ -159,6 +163,7 @@ func (s *Server) handleConn(ctx context.Context, c *Conn) {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				slog.Warn("ipc server read", "err", err)
 			}
+
 			return
 		}
 

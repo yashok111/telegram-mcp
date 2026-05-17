@@ -38,6 +38,7 @@ func (fr *FrameReader) ReadFrame() ([]byte, error) {
 			if errors.Is(err, io.EOF) && line == "" {
 				return nil, io.EOF
 			}
+
 			return nil, fmt.Errorf("read header: %w", err)
 		}
 

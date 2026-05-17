@@ -56,7 +56,7 @@ func TestNotifierDeliverInboundFallsBackToLRU(t *testing.T) {
 	assert.Len(t, bSink, 1)
 }
 
-func TestNotifierDeliverInboundDropsWhenNoShim(t *testing.T) {
+func TestNotifierDeliverInboundDropsWhenNoShim(_ *testing.T) {
 	r := NewRouter()
 	n := NewNotifier(r)
 
@@ -95,7 +95,7 @@ func TestNotifierResolvePermissionRoutesAndRemoves(t *testing.T) {
 	assert.False(t, ok, "permission must be removed after resolution")
 }
 
-func TestNotifierResolveUnknownIsNoop(t *testing.T) {
+func TestNotifierResolveUnknownIsNoop(_ *testing.T) {
 	r := NewRouter()
 	n := NewNotifier(r)
 	n.ResolvePermission("nope", "deny") // must not panic

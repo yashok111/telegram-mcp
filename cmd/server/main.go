@@ -65,6 +65,7 @@ func main() {
 	}
 
 	var runErr error
+
 	switch selectMode(os.Args) {
 	case modeDaemon:
 		runErr = runDaemon(stateDir)
@@ -150,6 +151,7 @@ func runDaemon(stateDir string) error {
 			slog.Warn("stderr redirect failed", "err", err)
 		} else {
 			defer restore()
+
 			setupSlog()
 		}
 	}
@@ -257,6 +259,7 @@ func runShim(stateDir string) error {
 	}
 
 	sigs := make(chan os.Signal, 1)
+
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() { <-sigs; cancel() }()
 

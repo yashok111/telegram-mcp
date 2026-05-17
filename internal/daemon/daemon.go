@@ -29,6 +29,7 @@ type Daemon struct {
 
 	IdleTimeout time.Duration // 0 disables
 
+	//nolint:containedctx // dctx is an internal cancel signal scoped to Run(); IdleExit needs it.
 	dctx    context.Context
 	dcancel context.CancelFunc
 }
@@ -86,12 +87,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.dcancel()
 		})
 
-		idleWG.Add(1)
-
-		go func() {
-			defer idleWG.Done()
+		idleWG.Go(func() {
 			idleExit.Run(d.dctx)
-		}()
+		})
 	}
 
 	listenErr := server.Listen(d.dctx)

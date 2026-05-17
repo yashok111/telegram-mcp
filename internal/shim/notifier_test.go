@@ -52,6 +52,7 @@ func TestNotifierRegistersHandlersOnAttach(t *testing.T) {
 
 	_, hasInbound := c.handlers[ipc.NotifyInbound]
 	_, hasResolved := c.handlers[ipc.NotifyPermissionResolved]
+
 	assert.True(t, hasInbound)
 	assert.True(t, hasResolved)
 }

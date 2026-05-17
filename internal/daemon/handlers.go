@@ -46,6 +46,7 @@ func (h *Handlers) shimID(c *ipc.Conn) string {
 	}
 
 	s, _ := v.(string)
+
 	return s
 }
 
@@ -56,6 +57,7 @@ func (h *Handlers) gate(chatID string) *ipc.Error {
 	}
 
 	data, _ := json.Marshal(map[string]string{"chat_id": chatID})
+
 	return &ipc.Error{Code: ipc.CodeNotAllowlisted, Message: "chat not allowlisted", Data: data}
 }
 
@@ -206,6 +208,7 @@ func (h *Handlers) HandleBroadcastPermission(ctx context.Context, c *ipc.Conn, p
 	}
 
 	h.bot.BroadcastPermissionRequest(ctx, p.RequestID, p.ToolName)
+
 	return map[string]any{}, nil
 }
 

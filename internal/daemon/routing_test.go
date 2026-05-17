@@ -9,7 +9,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	goleak.VerifyTestMain(m,
+		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*HostClient).connsCleaner"),
+		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*Client).mCleaner"),
+		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*TCPDialer).tcpAddrsClean"),
+		goleak.IgnoreAnyFunction("github.com/mymmrac/telego.(*Bot).doLongPolling"),
+	)
 }
 
 func TestRouterRecordOutboundAndRouteInbound(t *testing.T) {

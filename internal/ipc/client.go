@@ -23,7 +23,7 @@ type Client struct {
 	fr   *FrameReader
 	fw   *FrameWriter
 
-	nextID uint64
+	nextID atomic.Uint64
 
 	mu      sync.Mutex
 	pending map[uint64]chan *Response
@@ -82,7 +82,7 @@ func (c *Client) OnNotify(method string, h NotifyHandler) {
 // Call sends a request and blocks until response, ctx cancel, or connection close.
 // If result is non-nil, the response.Result JSON is decoded into it.
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
-	id := atomic.AddUint64(&c.nextID, 1)
+	id := c.nextID.Add(1)
 
 	raw, err := marshalParams(params)
 	if err != nil {
@@ -151,7 +151,7 @@ func (c *Client) Notify(method string, params any) error {
 }
 
 func (c *Client) readLoop() {
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	for {
 		frame, err := c.fr.ReadFrame()
@@ -159,6 +159,7 @@ func (c *Client) readLoop() {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				slog.Warn("ipc client read", "err", err)
 			}
+
 			return
 		}
 
