@@ -225,6 +225,7 @@ func (h *Handlers) HandleBroadcastPermission(ctx context.Context, c *ipc.Conn, p
 	}); err != nil {
 		slog.Warn("permission register collision", "request_id", p.RequestID, "shim_id", shimID, "tool", p.ToolName, "err", err)
 		data, _ := json.Marshal(map[string]string{"request_id": p.RequestID})
+
 		return nil, &ipc.Error{Code: ipc.CodeRequestIDCollision, Message: err.Error(), Data: data}
 	}
 

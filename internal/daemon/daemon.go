@@ -70,10 +70,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		m, _ := res.(map[string]any)
 		id, _ := m["shim_id"].(string)
 
-		d.Router.Register(&Shim{ID: id, Notify: c.Notify})
-		slog.Info("shim connected", "shim_id", id)
+		shim := &Shim{ID: id, Notify: c.Notify}
+		d.Router.Register(shim)
+		m["alias"] = shim.Alias
 
-		return res, nil
+		slog.Info("shim connected", "shim_id", id, "alias", shim.Alias)
+
+		return m, nil
 	})
 
 	d.dctx, d.dcancel = context.WithCancel(ctx)
