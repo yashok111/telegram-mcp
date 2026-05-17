@@ -17,30 +17,70 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
+	daemonpkg "github.com/yakov/telegram-mcp/internal/daemon"
+	"github.com/yakov/telegram-mcp/internal/ipc"
 	"github.com/yakov/telegram-mcp/internal/mcp"
+	shimpkg "github.com/yakov/telegram-mcp/internal/shim"
 )
 
-func main() {
-	if err := run(); err != nil {
-		slog.Error("fatal", "err", err)
-		os.Exit(1)
+type mode int
+
+const (
+	modeEmbedded mode = iota
+	modeDaemon
+	modeShim
+)
+
+func selectMode(argv []string) mode {
+	if len(argv) >= 2 {
+		switch argv[1] {
+		case "daemon":
+			return modeDaemon
+		case "shim":
+			return modeShim
+		}
 	}
+
+	if v := os.Getenv("TELEGRAM_DAEMON"); v != "" && v != "0" {
+		return modeShim
+	}
+
+	return modeEmbedded
 }
 
-func run() error {
+func main() {
 	setupSlog()
 	bindParentDeath()
 
 	stateDir, err := bootstrapStateDir()
 	if err != nil {
-		return err
+		slog.Error("bootstrap", "err", err)
+		os.Exit(1)
 	}
 
+	var runErr error
+	switch selectMode(os.Args) {
+	case modeDaemon:
+		runErr = runDaemon(stateDir)
+	case modeShim:
+		runErr = runShim(stateDir)
+	case modeEmbedded:
+		runErr = runEmbedded(stateDir)
+	}
+
+	if runErr != nil {
+		slog.Error("fatal", "err", runErr)
+		os.Exit(1)
+	}
+}
+
+func runEmbedded(stateDir string) error {
 	token, err := loadConfig(stateDir)
 	if err != nil {
 		return err
@@ -87,7 +127,6 @@ func run() error {
 		}
 	}()
 
-	// Signal shutdown: SIGTERM from PDEATHSIG, SIGINT for manual stop.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
@@ -102,6 +141,126 @@ func run() error {
 	wg.Wait()
 
 	return nil
+}
+
+func runDaemon(stateDir string) error {
+	if daemonpkg.ShouldRedirect() {
+		restore, err := daemonpkg.RedirectStderrTo(filepath.Join(stateDir, "daemon.log"))
+		if err != nil {
+			slog.Warn("stderr redirect failed", "err", err)
+		} else {
+			defer restore()
+			setupSlog()
+		}
+	}
+
+	token, err := loadConfig(stateDir)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := access.NewStore(stateDir, os.Getenv("TELEGRAM_ACCESS_MODE") == "static")
+
+	router := daemonpkg.NewRouter()
+	notifier := daemonpkg.NewNotifier(router)
+
+	tgBot, err := bot.New(token, store, notifier)
+	if err != nil {
+		return fmt.Errorf("telegram init: %w", err)
+	}
+
+	idleSecs, _ := strconv.Atoi(os.Getenv("TELEGRAM_DAEMON_IDLE_EXIT"))
+	if idleSecs == 0 {
+		idleSecs = 1800
+	}
+
+	d := &daemonpkg.Daemon{
+		StateDir:    stateDir,
+		SocketPath:  filepath.Join(stateDir, "daemon.sock"),
+		PidPath:     filepath.Join(stateDir, "daemon.pid"),
+		Store:       store,
+		Bot:         tgBot,
+		Router:      router,
+		IdleTimeout: time.Duration(idleSecs) * time.Second,
+	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+	go func() {
+		<-sigs
+		cancel()
+	}()
+
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer cancel()
+
+		if err := tgBot.Poll(ctx); err != nil {
+			slog.Error("poll exited", "err", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		defer cancel()
+
+		if err := d.Run(ctx); err != nil {
+			slog.Error("daemon exited", "err", err)
+		}
+	}()
+
+	wg.Wait()
+	tgBot.Stop()
+
+	return nil
+}
+
+func runShim(stateDir string) error {
+	socketPath := filepath.Join(stateDir, "daemon.sock")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := shimpkg.EnsureDaemon(ctx, shimpkg.EnsureOpts{
+		SocketPath: socketPath,
+		StateDir:   stateDir,
+	}); err != nil {
+		return fmt.Errorf("ensure daemon: %w", err)
+	}
+
+	client, err := ipc.Dial(socketPath)
+	if err != nil {
+		return fmt.Errorf("dial daemon: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	store := access.NewStore(stateDir, os.Getenv("TELEGRAM_ACCESS_MODE") == "static")
+
+	mcpSrv, err := mcp.New(store)
+	if err != nil {
+		return fmt.Errorf("mcp init: %w", err)
+	}
+
+	sh := &shimpkg.Shim{
+		Client:     client,
+		MCP:        mcpSrv,
+		Store:      store,
+		StateDir:   stateDir,
+		SocketPath: socketPath,
+		HelloLabel: os.Getenv("CLAUDE_SESSION_LABEL"),
+	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() { <-sigs; cancel() }()
+
+	return sh.Run(ctx)
 }
 
 // setupSlog routes all slog calls to stderr as JSON. Kept as its own function
