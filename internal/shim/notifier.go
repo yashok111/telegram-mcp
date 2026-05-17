@@ -25,6 +25,8 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 			return
 		}
 
+		slog.Info("shim received inbound", "chat_id", p.Meta["chat_id"], "user", p.Meta["user"], "content_len", len(p.Content))
+
 		sink.DeliverInbound(p.Content, p.Meta)
 	})
 

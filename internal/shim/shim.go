@@ -2,6 +2,7 @@ package shim
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -76,6 +77,8 @@ func (s *Shim) Wire() error {
 	s.idMu.Lock()
 	s.id = hello.ShimID
 	s.idMu.Unlock()
+
+	slog.Info("shim wired", "shim_id", hello.ShimID, "daemon_version", hello.DaemonVersion, "shim_pid", s.HelloPID, "label", s.HelloLabel)
 
 	return nil
 }

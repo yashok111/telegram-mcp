@@ -25,6 +25,8 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 		return
 	}
 
+	slog.Info("DeliverInbound dispatch", "chat_id", chatID, "shim_id", target.ID, "content_len", len(content), "user", meta["user"])
+
 	if err := target.Notify(ipc.NotifyInbound, map[string]any{
 		"content": content,
 		"meta":    meta,

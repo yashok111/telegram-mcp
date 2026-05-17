@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"errors"
+	"log/slog"
 	"sync"
 )
 
@@ -82,10 +83,14 @@ func (r *Router) RecordOutbound(shimID, chatID string) {
 	defer r.mu.Unlock()
 
 	if _, ok := r.shims[shimID]; !ok {
+		slog.Warn("RecordOutbound dropped: unknown shim", "shim_id", shimID, "chat_id", chatID)
 		return
 	}
 
+	prev := r.chatOwners[chatID]
 	r.chatOwners[chatID] = shimID
+
+	slog.Info("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "prev_owner", prev)
 }
 
 func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
@@ -94,15 +99,22 @@ func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
 
 	if owner, ok := r.chatOwners[chatID]; ok {
 		if s, ok := r.shims[owner]; ok {
+			slog.Info("RouteInbound owner", "chat_id", chatID, "shim_id", s.ID)
 			return s, true
 		}
+
+		slog.Warn("RouteInbound owner gone", "chat_id", chatID, "stale_owner", owner)
 	}
 
 	if len(r.lru) == 0 {
+		slog.Warn("RouteInbound no shims", "chat_id", chatID)
 		return nil, false
 	}
 
 	s, ok := r.shims[r.lru[0]]
+	if ok {
+		slog.Info("RouteInbound LRU fallback", "chat_id", chatID, "shim_id", s.ID, "lru", r.lru)
+	}
 
 	return s, ok
 }
