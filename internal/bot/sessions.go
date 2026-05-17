@@ -241,11 +241,13 @@ func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, ac
 
 		info, err := b.router.Pin(chatID, prefix, PinTTL)
 		if err != nil {
+			// nilerr: err is surfaced to the user via the callback ack toast; no
+			// further handler-side error propagation is appropriate.
 			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
 				CallbackQueryID: q.ID, Text: "Pin failed: " + err.Error(),
 			})
 
-			return nil
+			return nil //nolint:nilerr // error already surfaced to user via callback ack
 		}
 
 		label := info.Label
@@ -264,11 +266,13 @@ func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, ac
 	case "kill":
 		info, err := b.router.Evict(prefix)
 		if err != nil {
+			// nilerr: err is surfaced to the user via the callback ack toast; no
+			// further handler-side error propagation is appropriate.
 			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
 				CallbackQueryID: q.ID, Text: "Evict failed: " + err.Error(),
 			})
 
-			return nil
+			return nil //nolint:nilerr // error already surfaced to user via callback ack
 		}
 
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{

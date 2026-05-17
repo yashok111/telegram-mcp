@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -150,19 +151,13 @@ func TestHandleUseNoRouter(t *testing.T) {
 }
 
 func TestHandleUsePinError(t *testing.T) {
-	fv := &fakeRouterView{pinErr: assertErr("ambiguous")}
+	fv := &fakeRouterView{pinErr: errors.New("ambiguous")}
 	b := &Bot{router: fv}
 	reply, ok := b.handleUseCommand("123", "/use ab")
 	require.True(t, ok)
 	assert.Contains(t, reply, "Pin failed")
 	assert.Contains(t, reply, "ambiguous")
 }
-
-type stringErr string
-
-func (s stringErr) Error() string { return string(s) }
-
-func assertErr(s string) error { return stringErr(s) }
 
 // renderShims output stays compact enough to never need Telegram's split.
 func TestRenderShimsStaysUnderChunkLimit(t *testing.T) {
@@ -203,11 +198,9 @@ func TestHandleCommand_statusPairedWithShims(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-
-	text := calls[0].params["text"].(string)
-	assert.Contains(t, text, "Paired as")
-	assert.Contains(t, text, "deadbeef")
-	assert.Contains(t, text, "demo")
+	assert.Contains(t, calls[0].params["text"], "Paired as")
+	assert.Contains(t, calls[0].params["text"], "deadbeef")
+	assert.Contains(t, calls[0].params["text"], "demo")
 }
 
 func TestHandleCommand_sessions_listsShims(t *testing.T) {
@@ -219,9 +212,7 @@ func TestHandleCommand_sessions_listsShims(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-
-	text := calls[0].params["text"].(string)
-	assert.Contains(t, text, "Tap a session")
+	assert.Contains(t, calls[0].params["text"], "Tap a session")
 	assert.Contains(t, payloadString(calls[0].params), "sess:use:abcd0000")
 }
 
@@ -232,7 +223,7 @@ func TestHandleCommand_sessions_emptyList(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"].(string), "No active CC sessions")
+	assert.Contains(t, calls[0].params["text"], "No active CC sessions")
 }
 
 func TestHandleCommand_sessions_noRouter(t *testing.T) {
@@ -241,7 +232,7 @@ func TestHandleCommand_sessions_noRouter(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"].(string), "daemon mode")
+	assert.Contains(t, calls[0].params["text"], "daemon mode")
 }
 
 func TestHandleCommand_use_pinsShim(t *testing.T) {
@@ -253,7 +244,7 @@ func TestHandleCommand_use_pinsShim(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"].(string), "Pinned")
+	assert.Contains(t, calls[0].params["text"], "Pinned")
 	assert.Equal(t, "1", fv.lastPin.chatID)
 	assert.Equal(t, "abcdef", fv.lastPin.prefix)
 }
@@ -328,11 +319,9 @@ func TestHandleCommand_idle_listsMostIdle(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-
-	text := calls[0].params["text"].(string)
-	assert.Contains(t, text, "Most idle")
-	assert.Contains(t, text, "abcd1111")
-	assert.Contains(t, text, "main")
+	assert.Contains(t, calls[0].params["text"], "Most idle")
+	assert.Contains(t, calls[0].params["text"], "abcd1111")
+	assert.Contains(t, calls[0].params["text"], "main")
 
 	payload := payloadString(calls[0].params)
 	assert.Contains(t, payload, "sess:use:abcd1111")
@@ -346,7 +335,7 @@ func TestHandleCommand_idle_emptyList(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"].(string), "No active CC sessions")
+	assert.Contains(t, calls[0].params["text"], "No active CC sessions")
 }
 
 func TestHandleCommand_idle_noRouter(t *testing.T) {
@@ -355,7 +344,7 @@ func TestHandleCommand_idle_noRouter(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"].(string), "daemon mode")
+	assert.Contains(t, calls[0].params["text"], "daemon mode")
 }
 
 // ===== sess: callback =====
@@ -399,7 +388,7 @@ func TestHandleCallback_sessUseAllowed_pinsAndAcks(t *testing.T) {
 
 	edits := api.recordedCalls("editMessageText")
 	require.Len(t, edits, 1)
-	assert.Contains(t, edits[0].params["text"].(string), "Pinned")
+	assert.Contains(t, edits[0].params["text"], "Pinned")
 }
 
 func TestHandleCallback_sessKillAllowed_evictsAndAcks(t *testing.T) {
@@ -456,7 +445,7 @@ func TestHandleCallback_sessNoRouter_says_daemonOnly(t *testing.T) {
 }
 
 func TestHandleCallback_sessPinError_acksMessage(t *testing.T) {
-	fv := &fakeRouterView{pinErr: assertErr("ambiguous")}
+	fv := &fakeRouterView{pinErr: errors.New("ambiguous")}
 	b, api, _ := newTestBot(t, allowlistState("1"))
 	b.router = fv
 
