@@ -50,6 +50,29 @@ Two modes:
 
 Ctx-driven shutdown everywhere. `Poll` exits within ~2s of `ctx.Done()` via `StopWithContext`. `approvalLoop` is a 5s ticker that respects `ctx.Done()`.
 
+## Daemon mode (opt-in, multi-session)
+
+To bridge N Claude Code sessions to one Telegram bot:
+
+1. Set `TELEGRAM_DAEMON=1` in `~/.claude/channels/telegram/.env`.
+2. (Optional) Install `contrib/systemd/telegram-mcp.service` for a daemon that survives reboots: `systemctl --user enable --now telegram-mcp`.
+3. Restart Claude Code. First session spawns the daemon; subsequent sessions attach.
+
+**Mode trigger:** `TELEGRAM_DAEMON=1` env var, or invoking the binary with the `daemon` / `shim` subcommand.
+
+**Routing:** inbound messages go to the shim that last replied to that chat. Fresh chats fall back to the most-recently-connected shim. Permission replies route by `request_id`.
+
+**Daemon owns the bot token.** Shims never see it. Daemon enforces the access.json gate authoritatively.
+
+**Idle exit:** daemon dies 30 minutes after the last shim disconnects. Override with `TELEGRAM_DAEMON_IDLE_EXIT=<seconds>`; `=0` disables.
+
+**Files:**
+- `~/.claude/channels/telegram/daemon.sock` (0600) — IPC unix socket
+- `~/.claude/channels/telegram/daemon.pid` — daemon's PID
+- `~/.claude/channels/telegram/daemon.log` — daemon stderr when shim-spawned (systemd captures it via journal otherwise)
+
+**Don't run both modes against the same token.** Kill the daemon (`kill $(cat ~/.claude/channels/telegram/daemon.pid)`) before reverting to embedded.
+
 ## Testing
 
 `go.uber.org/goleak` in every package's `TestMain`. Ignored upstream leaks (documented inline): `fasthttp.HostClient.connsCleaner` / `Client.mCleaner` / `TCPDialer.tcpAddrsClean`, `telego.Bot.doLongPolling` (sleeps in backoff after ctx cancel).
