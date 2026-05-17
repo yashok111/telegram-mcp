@@ -232,3 +232,18 @@ func TestSelectModeShimSubcommand(t *testing.T) {
 	t.Setenv("TELEGRAM_DAEMON", "")
 	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp", "shim"}))
 }
+
+// Regression: .env loading must happen BEFORE selectMode so TELEGRAM_DAEMON
+// set only in .env triggers shim mode. Without this, a Claude Code-spawned
+// binary defaults to embedded and fights the daemon for getUpdates.
+func TestEnvLoadedBeforeSelectMode_pickShim(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("TELEGRAM_DAEMON=1\n"), 0o600))
+
+	_ = os.Unsetenv("TELEGRAM_DAEMON")
+
+	t.Cleanup(func() { _ = os.Unsetenv("TELEGRAM_DAEMON") })
+
+	require.NoError(t, loadDotEnv(filepath.Join(dir, ".env")))
+	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp"}))
+}

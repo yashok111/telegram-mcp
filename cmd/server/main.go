@@ -63,6 +63,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Load .env before selectMode: TELEGRAM_DAEMON commonly lives only in
+	// ~/.claude/channels/telegram/.env (not in the spawning shell's env), so
+	// reading it later inside runEmbedded/runDaemon is too late — selectMode
+	// would have already dispatched to embedded and started a second poller.
+	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn(".env load failed", "err", err)
+	}
+
 	// PR_SET_PDEATHSIG binds our lifetime to the spawning Claude Code session
 	// for embedded and shim modes. Daemon mode must outlive any single shim,
 	// so it explicitly opts out — its lifetime is governed by IdleTimeout and
