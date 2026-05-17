@@ -28,6 +28,7 @@ func TestDefaultState(t *testing.T) {
 func TestNewPairingCode_format(t *testing.T) {
 	c1 := NewPairingCode()
 	c2 := NewPairingCode()
+
 	assert.Len(t, c1, 6)
 	assert.Len(t, c2, 6)
 	assert.NotEqual(t, c1, c2, "two codes back-to-back should not collide (3-byte entropy)")
@@ -94,12 +95,15 @@ func TestStore_load_corruptJSON_quarantinesAndReturnsDefault(t *testing.T) {
 	// Original file moved aside as *.corrupt-<ts>.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
+
 	var quarantined string
+
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), "access.json.corrupt-") {
 			quarantined = e.Name()
 		}
 	}
+
 	assert.NotEmpty(t, quarantined, "corrupt file should have been moved aside")
 }
 
@@ -154,6 +158,7 @@ func TestAllowed(t *testing.T) {
 		AllowFrom: []string{"1", "2", "3"},
 		Groups:    map[string]GroupPolicy{"-100200": {}},
 	}
+
 	tests := []struct {
 		name   string
 		chatID string

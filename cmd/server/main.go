@@ -64,13 +64,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("telegram init: %w", err)
 	}
+
 	mcpSrv.AttachBot(tgBot)
 
 	var wg sync.WaitGroup
+
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		defer cancel()
+
 		if err := mcpSrv.ServeStdio(ctx); err != nil {
 			slog.Error("mcp loop exited", "err", err)
 		}
@@ -78,6 +81,7 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		defer cancel()
+
 		if err := tgBot.Poll(ctx); err != nil {
 			slog.Error("poll loop exited", "err", err)
 		}
@@ -86,6 +90,7 @@ func run() error {
 	// Signal shutdown: SIGTERM from PDEATHSIG, SIGINT for manual stop.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
 	select {
 	case <-ctx.Done():
 	case sig := <-sigs:
@@ -95,6 +100,7 @@ func run() error {
 
 	tgBot.Stop()
 	wg.Wait()
+
 	return nil
 }
 
@@ -121,7 +127,9 @@ func resolveStateDir() string {
 	if s := os.Getenv("TELEGRAM_STATE_DIR"); s != "" {
 		return s
 	}
+
 	home, _ := os.UserHomeDir()
+
 	return filepath.Join(home, ".claude", "channels", "telegram")
 }
 
@@ -132,6 +140,7 @@ func bootstrapStateDir() (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("mkdir state: %w", err)
 	}
+
 	return dir, nil
 }
 
@@ -141,10 +150,12 @@ func loadConfig(stateDir string) (string, error) {
 	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn(".env load failed", "err", err)
 	}
+
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
 		return "", fmt.Errorf("TELEGRAM_BOT_TOKEN required (set in %s/.env)", stateDir)
 	}
+
 	return token, nil
 }
 
@@ -154,14 +165,18 @@ func loadDotEnv(path string) error {
 	if err != nil {
 		return err
 	}
+
 	_ = os.Chmod(path, 0o600)
+
 	for line := range strings.Lines(string(raw)) {
 		k, v, ok := strings.Cut(strings.TrimRight(line, "\n"), "=")
 		if !ok || k == "" || os.Getenv(k) != "" {
 			continue
 		}
+
 		_ = os.Setenv(k, v)
 	}
+
 	return nil
 }
 
@@ -179,6 +194,7 @@ func claimPID(path string) error {
 			}
 		}
 	}
+
 	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
 }
 
@@ -187,6 +203,8 @@ func isOurPoller(pid int) bool {
 	if err != nil {
 		return false
 	}
+
 	comm := strings.TrimSpace(string(raw))
+
 	return comm == "telegram-mcp" || comm == "bun"
 }

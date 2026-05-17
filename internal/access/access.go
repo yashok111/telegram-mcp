@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -94,9 +95,11 @@ func NewStore(stateDir string, static bool) *Store {
 			slog.Warn("static mode downgraded dmPolicy", "from", PolicyPairing, "to", PolicyAllowlist)
 			st.DMPolicy = PolicyAllowlist
 		}
+
 		st.Pending = map[string]Pending{}
 		s.boot = &st
 	}
+
 	return s
 }
 
@@ -104,6 +107,7 @@ func (s *Store) Load() State {
 	if s.boot != nil {
 		return *s.boot
 	}
+
 	return s.readFile()
 }
 
@@ -113,25 +117,32 @@ func (s *Store) readFile() State {
 		if !os.IsNotExist(err) {
 			s.quarantineCorrupt(err)
 		}
+
 		return defaultState()
 	}
+
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
 		s.quarantineCorrupt(err)
 		return defaultState()
 	}
+
 	if st.DMPolicy == "" {
 		st.DMPolicy = PolicyPairing
 	}
+
 	if st.AllowFrom == nil {
 		st.AllowFrom = []string{}
 	}
+
 	if st.Groups == nil {
 		st.Groups = map[string]GroupPolicy{}
 	}
+
 	if st.Pending == nil {
 		st.Pending = map[string]Pending{}
 	}
+
 	return st
 }
 
@@ -146,20 +157,26 @@ func (s *Store) Save(st State) error {
 	if s.static {
 		return nil
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
+
 	tmp := s.path + ".tmp"
+
 	buf, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
+
 	buf = append(buf, '\n')
 	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
 		return err
 	}
+
 	return os.Rename(tmp, s.path)
 }
 
@@ -167,12 +184,15 @@ func (s *Store) Save(st State) error {
 func PruneExpired(st *State) bool {
 	now := time.Now().UnixMilli()
 	changed := false
+
 	for code, p := range st.Pending {
 		if p.ExpiresAt < now {
 			delete(st.Pending, code)
+
 			changed = true
 		}
 	}
+
 	return changed
 }
 
@@ -180,6 +200,7 @@ func PruneExpired(st *State) bool {
 func NewPairingCode() string {
 	b := make([]byte, 3)
 	_, _ = rand.Read(b)
+
 	return hex.EncodeToString(b)
 }
 
@@ -195,11 +216,11 @@ func (s *Store) InboxDir() string {
 
 // Allowed reports whether outbound to chat_id is permitted (DM allowlist or known group).
 func Allowed(st State, chatID string) bool {
-	for _, id := range st.AllowFrom {
-		if id == chatID {
-			return true
-		}
+	if slices.Contains(st.AllowFrom, chatID) {
+		return true
 	}
+
 	_, inGroup := st.Groups[chatID]
+
 	return inGroup
 }

@@ -50,6 +50,7 @@ func newMockAPI(t *testing.T) *mockAPI {
 	m := &mockAPI{t: t, nextMessageID: 0, errFor: map[string]string{}}
 	m.server = httptest.NewServer(http.HandlerFunc(m.handle))
 	t.Cleanup(m.server.Close)
+
 	return m
 }
 
@@ -57,12 +58,14 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 	// Path format: /bot<TOKEN>/<method>
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 2 {
-		http.Error(w, "bad path", 400)
+		http.Error(w, "bad path", http.StatusBadRequest)
 		return
 	}
+
 	method := parts[len(parts)-1]
 
 	params := map[string]any{}
+
 	contentType := r.Header.Get("Content-Type")
 	switch {
 	case strings.HasPrefix(contentType, "multipart/form-data"):
@@ -70,6 +73,7 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 			for k, v := range r.MultipartForm.Value {
 				params[k] = singleOrList(v)
 			}
+
 			for k := range r.MultipartForm.File {
 				params[k+"_file"] = true
 			}
@@ -77,6 +81,7 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
+
 		if len(body) > 0 {
 			_ = json.Unmarshal(body, &params)
 		}
@@ -112,21 +117,26 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}))
 	case "editMessageText":
 		mid := 0
+
 		switch v := params["message_id"].(type) {
 		case float64:
 			mid = int(v)
 		case string:
 			n := 0
-			for i := 0; i < len(v); i++ {
+
+			for i := range len(v) {
 				c := v[i]
 				if c < '0' || c > '9' {
 					n = 0
 					break
 				}
+
 				n = n*10 + int(c-'0')
 			}
+
 			mid = n
 		}
+
 		writeJSON(w, ok(map[string]any{
 			"message_id": mid,
 			"date":       time.Now().Unix(),
@@ -142,7 +152,7 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 			"file_size":      100,
 		}))
 	default:
-		http.Error(w, "unknown method: "+method, 404)
+		http.Error(w, "unknown method: "+method, http.StatusNotFound)
 	}
 }
 
@@ -152,6 +162,7 @@ func singleOrList(v []string) any {
 	if len(v) == 1 {
 		return v[0]
 	}
+
 	return v
 }
 
@@ -163,12 +174,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 func (m *mockAPI) recordedCalls(method string) []apiCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	var out []apiCall
+
 	for _, c := range m.calls {
 		if c.method == method {
 			out = append(out, c)
 		}
 	}
+
 	return out
 }
 
@@ -194,6 +208,7 @@ func newTestBot(t *testing.T, st access.State) (*Bot, *mockAPI, string) {
 		notifier: &noopNotifier{},
 		username: "test_bot",
 	}
+
 	return b, api, dir
 }
 
@@ -220,6 +235,7 @@ type resolvedCall struct {
 func (n *noopNotifier) DeliverInbound(content string, meta map[string]string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
 	n.delivered = append(n.delivered, deliveredCall{content, meta})
 }
 
@@ -227,12 +243,14 @@ func (n *noopNotifier) LookupPermission(requestID string) (PermissionDetails, bo
 	if requestID == "abcde" {
 		return PermissionDetails{ToolName: "Bash", Description: "d", InputPreview: "{}"}, true
 	}
+
 	return PermissionDetails{}, false
 }
 
 func (n *noopNotifier) ResolvePermission(requestID, behavior string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
 	n.resolved = append(n.resolved, resolvedCall{requestID, behavior})
 }
 
@@ -246,6 +264,7 @@ func TestSendMessage_simple(t *testing.T) {
 	id, err := b.SendMessage(t.Context(), "42", "hello", SendOpts{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, id)
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Equal(t, "hello", calls[0].params["text"])
@@ -258,6 +277,7 @@ func TestSendMessage_withReplyToAndParseMode(t *testing.T) {
 	})
 	_, err := b.SendMessage(t.Context(), "42", "*x*", SendOpts{ReplyTo: 5, ParseMode: "MarkdownV2"})
 	require.NoError(t, err)
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
@@ -284,7 +304,7 @@ func TestSendFile_photoExtensionRoutesToSendPhoto(t *testing.T) {
 
 	id, err := b.SendFile(t.Context(), "42", p, SendOpts{ReplyTo: 3})
 	require.NoError(t, err)
-	assert.Greater(t, id, 0)
+	assert.Positive(t, id)
 	assert.NotEmpty(t, api.recordedCalls("sendPhoto"))
 	assert.Empty(t, api.recordedCalls("sendDocument"))
 }
@@ -335,6 +355,7 @@ func TestEditMessage_apiError(t *testing.T) {
 func TestReact(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{})
 	require.NoError(t, b.React(t.Context(), "42", 7, "👍"))
+
 	calls := api.recordedCalls("setMessageReaction")
 	require.Len(t, calls, 1)
 	assert.Contains(t, payloadString(calls[0].params), "👍")
@@ -350,7 +371,9 @@ func TestDownloadFile_writesToInbox(t *testing.T) {
 
 	// Swap fileClient to point at our mock; restore after.
 	orig := fileClient
+
 	t.Cleanup(func() { fileClient = orig })
+
 	fileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("fakepicbytes"))
 	}))
@@ -382,9 +405,10 @@ func (r *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	req2 := req.Clone(req.Context())
 	// req2.URL was https://api.telegram.org/file/bot<TOKEN>/<path>
 	// We want fileServer/<path-stripped> but content doesn't matter for the test.
-	parsed, _ := http.NewRequest(req.Method, r.base, nil)
+	parsed, _ := http.NewRequestWithContext(req.Context(), req.Method, r.base, nil)
 	req2.URL = parsed.URL
 	req2.Host = parsed.URL.Host
+
 	return http.DefaultTransport.RoundTrip(req2)
 }
 
@@ -398,6 +422,7 @@ func TestCheckApprovals_sendsAndRemoves(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(approved, "not-a-number"), []byte{}, 0o600))
 
 	b.checkApprovals(t.Context())
+
 	calls := api.recordedCalls("sendMessage")
 	assert.Len(t, calls, 1, "only the numeric file should produce a sendMessage")
 
@@ -420,8 +445,10 @@ func TestBroadcastPermissionRequest(t *testing.T) {
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
 	b.BroadcastPermissionRequest(t.Context(), "abcde", "Bash")
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 2)
+
 	for _, c := range calls {
 		assert.Contains(t, c.params["text"], "Permission: Bash")
 		assert.Contains(t, payloadString(c.params), "perm:allow:abcde")
@@ -445,6 +472,7 @@ func TestHandleCommand_startInDM(t *testing.T) {
 	})
 	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/start"}
 	require.NoError(t, b.handleCommand(t.Context(), msg))
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].params["text"], "bridges Telegram")
@@ -456,6 +484,7 @@ func TestHandleCommand_helpInDM(t *testing.T) {
 	})
 	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/help"}
 	require.NoError(t, b.handleCommand(t.Context(), msg))
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].params["text"], "route to a paired")
@@ -468,6 +497,7 @@ func TestHandleCommand_statusPaired(t *testing.T) {
 	})
 	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1, Username: "alice"}, Text: "/status"}
 	require.NoError(t, b.handleCommand(t.Context(), msg))
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].params["text"], "@alice")
@@ -484,6 +514,7 @@ func TestHandleCommand_statusPending(t *testing.T) {
 	})
 	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/status"}
 	require.NoError(t, b.handleCommand(t.Context(), msg))
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].params["text"], "pair zzzaaa")
@@ -496,6 +527,7 @@ func TestHandleCommand_statusNotPaired(t *testing.T) {
 	})
 	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/status"}
 	require.NoError(t, b.handleCommand(t.Context(), msg))
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].params["text"], "Not paired")
@@ -560,6 +592,7 @@ func TestHandleMessage_gatePair_sendsCode(t *testing.T) {
 	})
 	msg := telego.Message{Chat: telego.Chat{ID: 7, Type: "private"}, From: &telego.User{ID: 7}, Text: "hi"}
 	require.NoError(t, b.handleMessage(t.Context(), msg))
+
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].params["text"], "/telegram:access pair")
@@ -570,7 +603,7 @@ func TestHandleMessage_deliver_callsNotifier(t *testing.T) {
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"1"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	n := b.notifier.(*noopNotifier)
+	n, _ := b.notifier.(*noopNotifier)
 	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "hi", Date: 1700000000}
 	require.NoError(t, b.handleMessage(t.Context(), msg))
 	require.Len(t, n.delivered, 1)
@@ -583,7 +616,7 @@ func TestHandleMessage_permissionReplyShortCircuits(t *testing.T) {
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"1"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	n := b.notifier.(*noopNotifier)
+	n, _ := b.notifier.(*noopNotifier)
 	msg := telego.Message{
 		Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1},
 		MessageID: 9, Text: "yes abcde",
@@ -615,7 +648,7 @@ func TestHandleCallback_allow_resolvesAndEdits(t *testing.T) {
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	n := b.notifier.(*noopNotifier)
+	n, _ := b.notifier.(*noopNotifier)
 	q := telego.CallbackQuery{
 		ID:   "cq1",
 		From: telego.User{ID: 42},
@@ -636,7 +669,7 @@ func TestHandleCallback_deny(t *testing.T) {
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	n := b.notifier.(*noopNotifier)
+	n, _ := b.notifier.(*noopNotifier)
 	q := telego.CallbackQuery{
 		ID: "cq2", From: telego.User{ID: 42},
 		Data:    "perm:deny:abcde",
@@ -658,6 +691,7 @@ func TestHandleCallback_more_expandsDetails(t *testing.T) {
 		Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42, Type: "private"}, Text: "x"},
 	}
 	require.NoError(t, b.handleCallback(t.Context(), q))
+
 	edits := api.recordedCalls("editMessageText")
 	require.Len(t, edits, 1)
 	assert.Contains(t, edits[0].params["text"], "tool_name: Bash")
@@ -674,6 +708,7 @@ func TestHandleCallback_more_missingDetails(t *testing.T) {
 		Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42}, Text: "x"},
 	}
 	require.NoError(t, b.handleCallback(t.Context(), q))
+
 	cb := api.recordedCalls("answerCallbackQuery")
 	require.Len(t, cb, 1)
 	assert.Contains(t, cb[0].params["text"], "no longer available")
@@ -684,7 +719,7 @@ func TestHandleCallback_notAllowlisted(t *testing.T) {
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	n := b.notifier.(*noopNotifier)
+	n, _ := b.notifier.(*noopNotifier)
 	q := telego.CallbackQuery{
 		ID: "cqX", From: telego.User{ID: 42},
 		Data:    "perm:allow:abcde",
@@ -692,6 +727,7 @@ func TestHandleCallback_notAllowlisted(t *testing.T) {
 	}
 	require.NoError(t, b.handleCallback(t.Context(), q))
 	assert.Empty(t, n.resolved)
+
 	cb := api.recordedCalls("answerCallbackQuery")
 	require.Len(t, cb, 1)
 	assert.Contains(t, cb[0].params["text"], "Not authorized")
@@ -711,11 +747,14 @@ func TestApprovalLoop_exitsOnCtxCancel(t *testing.T) {
 	b, _, _ := newTestBot(t, access.State{})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
+
 	go func() {
 		b.approvalLoop(ctx)
 		close(done)
 	}()
+
 	cancel()
+
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -723,7 +762,7 @@ func TestApprovalLoop_exitsOnCtxCancel(t *testing.T) {
 	}
 }
 
-// New() and Stop() smoke
+// New() and Stop() smoke.
 func TestNew_invalidToken_errors(t *testing.T) {
 	_, err := New("", access.NewStore(t.TempDir(), false), &noopNotifier{})
 	assert.Error(t, err)
@@ -742,11 +781,13 @@ func TestPoll_exitsOnCtxCancel(t *testing.T) {
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
 	ctx, cancel := context.WithCancel(t.Context())
+
 	done := make(chan error, 1)
 	go func() { done <- b.Poll(ctx) }()
 	// Give Poll a beat to call getMe + register handlers, then cancel.
 	time.Sleep(150 * time.Millisecond)
 	cancel()
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):

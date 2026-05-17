@@ -79,11 +79,11 @@ func TestSafeExt(t *testing.T) {
 func TestSanitizeID(t *testing.T) {
 	assert.Equal(t, "abc-123_x", sanitizeID("abc-123_x"))
 	assert.Equal(t, "abc123", sanitizeID("abc 123!@#"))
-	assert.Equal(t, "", sanitizeID("$$$"))
+	assert.Empty(t, sanitizeID("$$$"))
 }
 
 func TestUserLabel(t *testing.T) {
-	assert.Equal(t, "", userLabel(nil))
+	assert.Empty(t, userLabel(nil))
 	assert.Equal(t, "@bob", userLabel(&telego.User{Username: "bob", ID: 5}))
 	assert.Equal(t, "42", userLabel(&telego.User{ID: 42}))
 }
@@ -245,6 +245,7 @@ func newGateBot(t *testing.T, st access.State) (*Bot, *access.Store) {
 	dir := t.TempDir()
 	store := access.NewStore(dir, false)
 	require.NoError(t, store.Save(st))
+
 	return &Bot{store: store, username: "my_bot"}, store
 }
 
@@ -304,10 +305,12 @@ func TestGate_dm_pairing_dropsAfterTwoReplies(t *testing.T) {
 
 func TestGate_dm_pairing_dropsWhenPendingFull(t *testing.T) {
 	now := time.Now().UnixMilli()
+
 	pending := map[string]access.Pending{}
 	for i := range 3 {
 		pending[string(rune('a'+i))+"bcdef"] = access.Pending{SenderID: "100", ExpiresAt: now + 60_000, Replies: 1}
 	}
+
 	b, _ := newGateBot(t, access.State{
 		DMPolicy: access.PolicyPairing, AllowFrom: []string{}, Groups: map[string]access.GroupPolicy{}, Pending: pending,
 	})
@@ -413,6 +416,7 @@ func TestPermissionReplyRegex(t *testing.T) {
 				assert.Nil(t, m)
 				return
 			}
+
 			require.NotNil(t, m)
 			assert.Equal(t, c.yn, m[1])
 			assert.Equal(t, c.code, m[2])

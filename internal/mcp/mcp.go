@@ -23,9 +23,9 @@ import (
 // BotAPI is the outbound surface the MCP layer calls into. Defined as an
 // interface so handlers can be unit-tested with a fake.
 type BotAPI interface {
-	SendMessage(ctx context.Context, chatID string, text string, opts bot.SendOpts) (int, error)
-	SendFile(ctx context.Context, chatID string, path string, opts bot.SendOpts) (int, error)
-	EditMessage(ctx context.Context, chatID string, messageID int, text string, parseMode string) (int, error)
+	SendMessage(ctx context.Context, chatID, text string, opts bot.SendOpts) (int, error)
+	SendFile(ctx context.Context, chatID, path string, opts bot.SendOpts) (int, error)
+	EditMessage(ctx context.Context, chatID string, messageID int, text, parseMode string) (int, error)
 	React(ctx context.Context, chatID string, messageID int, emoji string) error
 	DownloadFile(ctx context.Context, fileID string) (string, error)
 	BroadcastPermissionRequest(ctx context.Context, requestID, toolName string)
@@ -70,6 +70,7 @@ func New(store *access.Store) (*Server, error) {
 	}
 	s.registerTools()
 	s.registerNotifications()
+
 	return s, nil
 }
 
@@ -82,6 +83,7 @@ func (s *Server) AttachBot(b BotAPI) {
 func (s *Server) Bot() BotAPI {
 	s.botMu.RLock()
 	defer s.botMu.RUnlock()
+
 	return s.bot
 }
 
@@ -99,6 +101,7 @@ func (s *Server) DeliverInbound(content string, meta map[string]string) {
 	for k, v := range meta {
 		metaAny[k] = v
 	}
+
 	s.srv.SendNotificationToAllClients("notifications/claude/channel", map[string]any{
 		"content": content,
 		"meta":    metaAny,
@@ -108,7 +111,9 @@ func (s *Server) DeliverInbound(content string, meta map[string]string) {
 func (s *Server) LookupPermission(requestID string) (bot.PermissionDetails, bool) {
 	s.permMu.Lock()
 	defer s.permMu.Unlock()
+
 	d, ok := s.pending[requestID]
+
 	return d, ok
 }
 
@@ -133,9 +138,11 @@ func (s *Server) registerNotifications() {
 			toolName, _ := params["tool_name"].(string)
 			description, _ := params["description"].(string)
 			inputPreview, _ := params["input_preview"].(string)
+
 			if requestID == "" {
 				return
 			}
+
 			s.permMu.Lock()
 			s.pending[requestID] = bot.PermissionDetails{
 				ToolName:     toolName,
@@ -143,6 +150,7 @@ func (s *Server) registerNotifications() {
 				InputPreview: inputPreview,
 			}
 			s.permMu.Unlock()
+
 			if b := s.Bot(); b != nil {
 				b.BroadcastPermissionRequest(ctx, requestID, toolName)
 			}
@@ -200,10 +208,12 @@ func (s *Server) handleReply(ctx context.Context, req mcptypes.CallToolRequest) 
 	text := req.GetString("text", "")
 	replyTo := atoiSafe(req.GetString("reply_to", ""))
 	format := req.GetString("format", "text")
+
 	parseMode := ""
 	if format == "markdownv2" {
 		parseMode = "MarkdownV2"
 	}
+
 	files := req.GetStringSlice("files", nil)
 
 	st := s.store.Load()
@@ -211,36 +221,16 @@ func (s *Server) handleReply(ctx context.Context, req mcptypes.CallToolRequest) 
 		return mcptypes.NewToolResultError(fmt.Sprintf("chat %s is not allowlisted — add via /telegram:access", chatID)), nil
 	}
 
-	// Validate files up front — refuse the whole call rather than send some
-	// chunks then crash mid-flight on a bad attachment.
-	for _, f := range files {
-		if err := s.assertSendable(f); err != nil {
-			return mcptypes.NewToolResultError(err.Error()), nil
-		}
-		info, err := os.Stat(f)
-		if err != nil {
-			return mcptypes.NewToolResultError(fmt.Sprintf("stat %s: %v", f, err)), nil
-		}
-		if info.Size() > MaxAttachmentBytes {
-			return mcptypes.NewToolResultError(fmt.Sprintf("file too large: %s (%.1fMB, max 50MB)", f, float64(info.Size())/1024/1024)), nil
-		}
+	if errMsg := s.validateAttachments(files); errMsg != "" {
+		return mcptypes.NewToolResultError(errMsg), nil
 	}
 
-	limit := chunk.MaxChunkLimit
-	if st.TextChunkLimit > 0 && st.TextChunkLimit < limit {
-		limit = st.TextChunkLimit
-	}
-	mode := chunk.Length
-	if st.ChunkMode == access.ChunkNewline {
-		mode = chunk.Newline
-	}
-	replyMode := st.ReplyToMode
-	if replyMode == "" {
-		replyMode = access.ReplyToFirst
-	}
+	limit, mode, replyMode := resolveChunkOpts(st)
 
 	chunks := chunk.Split(text, limit, mode)
+
 	var sentIDs []int
+
 	b := s.Bot()
 	if b == nil {
 		return mcptypes.NewToolResultError("bot not attached"), nil
@@ -251,11 +241,13 @@ func (s *Server) handleReply(ctx context.Context, req mcptypes.CallToolRequest) 
 		if replyTo > 0 && replyMode != access.ReplyToOff && (replyMode == access.ReplyToAll || i == 0) {
 			opts.ReplyTo = replyTo
 		}
+
 		id, err := b.SendMessage(ctx, chatID, c, opts)
 		if err != nil {
 			return mcptypes.NewToolResultError(fmt.Sprintf(
 				"reply failed after %d of %d chunk(s) sent: %v", len(sentIDs), len(chunks), err)), nil
 		}
+
 		sentIDs = append(sentIDs, id)
 	}
 
@@ -266,17 +258,20 @@ func (s *Server) handleReply(ctx context.Context, req mcptypes.CallToolRequest) 
 		if replyTo > 0 && replyMode != access.ReplyToOff {
 			opts.ReplyTo = replyTo
 		}
+
 		id, err := b.SendFile(ctx, chatID, f, opts)
 		if err != nil {
 			return mcptypes.NewToolResultError(fmt.Sprintf(
 				"reply attachment failed after text sent (%d ids: %v): %v", len(sentIDs), sentIDs, err)), nil
 		}
+
 		sentIDs = append(sentIDs, id)
 	}
 
 	if len(sentIDs) == 1 {
 		return mcptypes.NewToolResultText(fmt.Sprintf("sent (id: %d)", sentIDs[0])), nil
 	}
+
 	return mcptypes.NewToolResultText(fmt.Sprintf("sent %d parts (ids: %s)", len(sentIDs), joinInts(sentIDs))), nil
 }
 
@@ -289,29 +284,36 @@ func (s *Server) handleReact(ctx context.Context, req mcptypes.CallToolRequest) 
 	if !access.Allowed(st, chatID) {
 		return mcptypes.NewToolResultError(fmt.Sprintf("chat %s is not allowlisted", chatID)), nil
 	}
+
 	b := s.Bot()
 	if b == nil {
 		return mcptypes.NewToolResultError("bot not attached"), nil
 	}
+
 	if err := b.React(ctx, chatID, msgID, emoji); err != nil {
 		return mcptypes.NewToolResultError(fmt.Sprintf("react failed: %v", err)), nil
 	}
+
 	return mcptypes.NewToolResultText("reacted"), nil
 }
 
 func (s *Server) handleDownload(ctx context.Context, req mcptypes.CallToolRequest) (*mcptypes.CallToolResult, error) {
 	fileID := req.GetString("file_id", "")
+
 	b := s.Bot()
 	if b == nil {
 		return mcptypes.NewToolResultError("bot not attached"), nil
 	}
+
 	if err := os.MkdirAll(s.store.InboxDir(), 0o700); err != nil {
 		return mcptypes.NewToolResultError(fmt.Sprintf("mkdir inbox: %v", err)), nil
 	}
+
 	path, err := b.DownloadFile(ctx, fileID)
 	if err != nil {
 		return mcptypes.NewToolResultError(fmt.Sprintf("download failed: %v", err)), nil
 	}
+
 	return mcptypes.NewToolResultText(path), nil
 }
 
@@ -320,6 +322,7 @@ func (s *Server) handleEdit(ctx context.Context, req mcptypes.CallToolRequest) (
 	msgID := atoiSafe(req.GetString("message_id", ""))
 	text := req.GetString("text", "")
 	format := req.GetString("format", "text")
+
 	parseMode := ""
 	if format == "markdownv2" {
 		parseMode = "MarkdownV2"
@@ -329,34 +332,88 @@ func (s *Server) handleEdit(ctx context.Context, req mcptypes.CallToolRequest) (
 	if !access.Allowed(st, chatID) {
 		return mcptypes.NewToolResultError(fmt.Sprintf("chat %s is not allowlisted", chatID)), nil
 	}
+
 	b := s.Bot()
 	if b == nil {
 		return mcptypes.NewToolResultError("bot not attached"), nil
 	}
+
 	id, err := b.EditMessage(ctx, chatID, msgID, text, parseMode)
 	if err != nil {
 		return mcptypes.NewToolResultError(fmt.Sprintf("edit failed: %v", err)), nil
 	}
+
 	return mcptypes.NewToolResultText(fmt.Sprintf("edited (id: %d)", id)), nil
+}
+
+// validateAttachments enforces the file pre-flight: not in state dir, exists,
+// under the 50MB cap. Returns an empty string on success, an error message on
+// rejection.
+func (s *Server) validateAttachments(files []string) string {
+	for _, f := range files {
+		if err := s.assertSendable(f); err != nil {
+			return err.Error()
+		}
+
+		info, err := os.Stat(f)
+		if err != nil {
+			return fmt.Sprintf("stat %s: %v", f, err)
+		}
+
+		if info.Size() > MaxAttachmentBytes {
+			return fmt.Sprintf("file too large: %s (%.1fMB, max 50MB)", f, float64(info.Size())/1024/1024)
+		}
+	}
+
+	return ""
+}
+
+// resolveChunkOpts pulls per-state UX settings (chunk limit, mode, reply-to
+// behaviour) and applies the documented defaults.
+func resolveChunkOpts(st access.State) (int, chunk.Mode, access.ReplyToMode) {
+	limit := chunk.MaxChunkLimit
+	if st.TextChunkLimit > 0 && st.TextChunkLimit < limit {
+		limit = st.TextChunkLimit
+	}
+
+	mode := chunk.Length
+	if st.ChunkMode == access.ChunkNewline {
+		mode = chunk.Newline
+	}
+
+	replyMode := st.ReplyToMode
+	if replyMode == "" {
+		replyMode = access.ReplyToFirst
+	}
+
+	return limit, mode, replyMode
 }
 
 // assertSendable blocks attempts to send files from inside the channel state
 // dir (other than inbox/). Mirrors the TS plugin's safety net against exfil
 // of the bot token, access.json, pid file, etc.
 func (s *Server) assertSendable(path string) error {
-	real, err := filepath.EvalSymlinks(path)
+	// Both EvalSymlinks calls deliberately swallow errors: on the input path,
+	// os.Stat() in the caller will fail meaningfully; on the state dir, a
+	// missing dir means there's nothing to exfil. Returning nil here lets the
+	// caller proceed with the existence check it was going to do anyway.
+	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return nil // os.Stat will fail meaningfully later
+		return nil //nolint:nilerr // see comment above
 	}
+
 	stateReal, err := filepath.EvalSymlinks(filepath.Dir(s.store.InboxDir()))
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr // see comment above
 	}
+
 	inbox := filepath.Join(stateReal, "inbox")
+
 	sep := string(filepath.Separator)
-	if strings.HasPrefix(real, stateReal+sep) && !strings.HasPrefix(real, inbox+sep) {
+	if strings.HasPrefix(resolved, stateReal+sep) && !strings.HasPrefix(resolved, inbox+sep) {
 		return fmt.Errorf("refusing to send channel state: %s", path)
 	}
+
 	return nil
 }
 
@@ -374,6 +431,7 @@ func joinInts(xs []int) string {
 	for i, n := range xs {
 		parts[i] = strconv.Itoa(n)
 	}
+
 	return strings.Join(parts, ", ")
 }
 

@@ -67,65 +67,80 @@ func newFakeBot() *fakeBot {
 func (f *fakeBot) SendMessage(_ context.Context, chatID, text string, opts bot.SendOpts) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	idx := len(f.sendCalls)
+
 	f.sendCalls = append(f.sendCalls, sendCall{chatID, text, opts})
 	if idx == f.sendErrOn {
 		return 0, assertedErr("send failed")
 	}
+
 	f.nextSendID++
+
 	return f.nextSendID, nil
 }
 
 func (f *fakeBot) SendFile(_ context.Context, chatID, path string, opts bot.SendOpts) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	idx := len(f.fileCalls)
+
 	f.fileCalls = append(f.fileCalls, fileCall{chatID, path, opts})
 	if idx == f.fileErrOn {
 		return 0, assertedErr("send file failed")
 	}
+
 	f.nextSendID++
+
 	return f.nextSendID, nil
 }
 
 func (f *fakeBot) EditMessage(_ context.Context, chatID string, messageID int, text, parseMode string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	f.editCalls = append(f.editCalls, editCall{chatID, messageID, text, parseMode})
 	if f.editErr != nil {
 		return 0, f.editErr
 	}
+
 	return messageID, nil
 }
 
 func (f *fakeBot) React(_ context.Context, _ string, _ int, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	f.reactCalls++
+
 	return f.reactErr
 }
 
 func (f *fakeBot) DownloadFile(_ context.Context, fileID string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	f.downloadFiles = append(f.downloadFiles, fileID)
 	if f.downloadFn != nil {
 		return f.downloadFn(fileID)
 	}
+
 	return "/tmp/dl/" + fileID, nil
 }
 
 func (f *fakeBot) BroadcastPermissionRequest(_ context.Context, requestID, _ string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	f.broadcastIDs = append(f.broadcastIDs, requestID)
 }
 
-type errString string
+type stringError string
 
-func (e errString) Error() string { return string(e) }
+func (e stringError) Error() string { return string(e) }
 
-func assertedErr(s string) error { return errString(s) }
+func assertedErr(s string) error { return stringError(s) }
 
 // ===== helpers =====
 
@@ -142,15 +157,19 @@ func newServerWithAllowlist(t *testing.T, allow ...string) (*Server, *fakeBot, s
 	require.NoError(t, store.Save(st))
 	srv, err := New(store)
 	require.NoError(t, err)
+
 	fb := newFakeBot()
 	srv.AttachBot(fb)
+
 	return srv, fb, dir
 }
 
 func callTool(name string, args map[string]any) mcptypes.CallToolRequest {
 	var req mcptypes.CallToolRequest
+
 	req.Params.Name = name
 	req.Params.Arguments = args
+
 	return req
 }
 
@@ -444,7 +463,7 @@ func TestAtoiSafe(t *testing.T) {
 }
 
 func TestJoinInts(t *testing.T) {
-	assert.Equal(t, "", joinInts(nil))
+	assert.Empty(t, joinInts(nil))
 	assert.Equal(t, "7", joinInts([]int{7}))
 	assert.Equal(t, "1, 2, 3", joinInts([]int{1, 2, 3}))
 }
@@ -469,6 +488,7 @@ func TestRegisterNotifications_storesAndBroadcasts(t *testing.T) {
 	if b, ok := srv.Bot().(*fakeBot); ok {
 		b.BroadcastPermissionRequest(t.Context(), "zzzzz", "Read")
 	}
+
 	assert.Contains(t, fb.broadcastIDs, "zzzzz")
 }
 
@@ -478,8 +498,10 @@ func contentText(res *mcptypes.CallToolResult) string {
 	if res == nil || len(res.Content) == 0 {
 		return ""
 	}
+
 	if tc, ok := res.Content[0].(mcptypes.TextContent); ok {
 		return tc.Text
 	}
+
 	return ""
 }

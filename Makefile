@@ -1,7 +1,7 @@
 BINARY := bin/telegram-mcp
 STATE_DIR ?= $(HOME)/.claude/channels/telegram
 
-.PHONY: build run install clean tidy
+.PHONY: build run install clean tidy lint lint-fix test check
 
 build:
 	@mkdir -p bin
@@ -9,6 +9,17 @@ build:
 
 tidy:
 	go mod tidy
+
+lint:
+	golangci-lint run ./...
+
+lint-fix:
+	golangci-lint run --fix ./...
+
+test:
+	go test -race ./...
+
+check: lint test build
 
 run: build
 	./$(BINARY)

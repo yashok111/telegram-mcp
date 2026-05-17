@@ -109,6 +109,7 @@ func TestClaimPID_killsStaleOurPoller(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(strconv.Itoa(cmd)), 0o600))
 
 	require.NoError(t, claimPID(path))
+
 	_ = syscall.Kill(cmd, syscall.SIGTERM)
 }
 
@@ -129,6 +130,7 @@ func TestResolveStateDir_envOverride(t *testing.T) {
 
 func TestResolveStateDir_defaultHomeRelative(t *testing.T) {
 	t.Setenv("TELEGRAM_STATE_DIR", "")
+
 	dir := resolveStateDir()
 	assert.True(t, strings.HasSuffix(dir, filepath.Join(".claude", "channels", "telegram")),
 		"default lands under ~/.claude/channels/telegram (got %q)", dir)
@@ -164,6 +166,7 @@ func TestLoadConfig_tokenFromEnv(t *testing.T) {
 	// No .env file → loadDotEnv returns ENOENT, swallowed. Token comes from env.
 	t.Setenv("TELEGRAM_BOT_TOKEN", "fromenv")
 	t.Cleanup(func() { _ = os.Unsetenv("TELEGRAM_BOT_TOKEN") })
+
 	tok, err := loadConfig(dir)
 	require.NoError(t, err)
 	assert.Equal(t, "fromenv", tok)
@@ -172,6 +175,7 @@ func TestLoadConfig_tokenFromEnv(t *testing.T) {
 func TestLoadConfig_tokenFromDotEnv(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.Unsetenv("TELEGRAM_BOT_TOKEN")
+
 	t.Cleanup(func() { _ = os.Unsetenv("TELEGRAM_BOT_TOKEN") })
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("TELEGRAM_BOT_TOKEN=fromfile\n"), 0o600))
 	tok, err := loadConfig(dir)
@@ -183,20 +187,21 @@ func TestLoadConfig_missingToken(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.Unsetenv("TELEGRAM_BOT_TOKEN")
 	_, err := loadConfig(dir)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TELEGRAM_BOT_TOKEN required")
 }
 
-func TestSetupSlog_doesNotPanic(t *testing.T) {
+func TestSetupSlog_doesNotPanic(_ *testing.T) {
 	setupSlog()
 }
 
-func TestBindParentDeath_doesNotPanic(t *testing.T) {
+func TestBindParentDeath_doesNotPanic(_ *testing.T) {
 	bindParentDeath()
 }
 
 func startSleeper(t *testing.T) int {
 	t.Helper()
+
 	procAttr := &os.ProcAttr{Files: []*os.File{nil, nil, nil}}
 	p, err := os.StartProcess("/bin/sleep", []string{"sleep", "30"}, procAttr)
 	require.NoError(t, err)
@@ -204,5 +209,6 @@ func startSleeper(t *testing.T) int {
 		_ = p.Kill()
 		_, _ = p.Wait()
 	})
+
 	return p.Pid
 }

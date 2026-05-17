@@ -18,16 +18,20 @@ func Split(text string, limit int, mode Mode) []string {
 	if limit <= 0 || limit > MaxChunkLimit {
 		limit = MaxChunkLimit
 	}
+
 	if len(text) <= limit {
 		return []string{text}
 	}
+
 	var out []string
+
 	rest := text
 	for len(rest) > limit {
 		cut := limit
 		if mode == Newline {
 			para := strings.LastIndex(rest[:limit], "\n\n")
 			line := strings.LastIndex(rest[:limit], "\n")
+
 			space := strings.LastIndex(rest[:limit], " ")
 			switch {
 			case para > limit/2:
@@ -38,11 +42,14 @@ func Split(text string, limit int, mode Mode) []string {
 				cut = space
 			}
 		}
+
 		out = append(out, rest[:cut])
 		rest = strings.TrimLeft(rest[cut:], "\n")
 	}
+
 	if rest != "" {
 		out = append(out, rest)
 	}
+
 	return out
 }
