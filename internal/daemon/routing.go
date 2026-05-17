@@ -16,6 +16,7 @@ var ErrPermissionIDInUse = errors.New("permission request_id already in use")
 // connection's lifetime; the Notify function pushes daemon→shim notifications.
 type Shim struct {
 	ID     string
+	Alias  string
 	Label  string
 	Notify func(method string, params any) error // bound to the underlying ipc.Conn
 }
@@ -37,6 +38,9 @@ type Router struct {
 	chatOwners  map[string]string
 	permOwners  map[string]string
 	permDetails map[string]PermDetails
+
+	aliases   map[string]string // alias → shim_id
+	shimAlias map[string]string // shim_id → alias  (for O(1) release at Drop)
 }
 
 func NewRouter() *Router {
@@ -45,12 +49,19 @@ func NewRouter() *Router {
 		chatOwners:  map[string]string{},
 		permOwners:  map[string]string{},
 		permDetails: map[string]PermDetails{},
+		aliases:     map[string]string{},
+		shimAlias:   map[string]string{},
 	}
 }
 
 func (r *Router) Register(s *Shim) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	alias := r.allocAlias()
+	s.Alias = alias
+	r.aliases[alias] = s.ID
+	r.shimAlias[s.ID] = alias
 
 	r.shims[s.ID] = s
 	r.lru = prepend(r.lru, s.ID)
@@ -60,8 +71,12 @@ func (r *Router) Drop(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	delete(r.shims, id)
+	if alias, ok := r.shimAlias[id]; ok {
+		delete(r.aliases, alias)
+		delete(r.shimAlias, id)
+	}
 
+	delete(r.shims, id)
 	r.lru = removeStr(r.lru, id)
 
 	for chat, owner := range r.chatOwners {

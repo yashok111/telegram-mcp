@@ -152,6 +152,7 @@ func newIntegration(t *testing.T) *integrationFixture {
 type helloResp struct {
 	ShimID        string `json:"shim_id"`
 	DaemonVersion string `json:"daemon_version"`
+	Alias         string `json:"alias"`
 }
 
 func connectShim(t *testing.T, sock string) (*ipc.Client, string) {
@@ -162,6 +163,7 @@ func connectShim(t *testing.T, sock string) (*ipc.Client, string) {
 
 	var hello helloResp
 	require.NoError(t, c.Call(t.Context(), ipc.MethodHello, map[string]any{}, &hello))
+	require.NotEmpty(t, hello.Alias, "daemon must return alias in hello response")
 
 	return c, hello.ShimID
 }
@@ -198,6 +200,27 @@ func TestIntegrationPerChatAffinity(t *testing.T) {
 	owner, ok := f.router.RouteInbound("123")
 	require.True(t, ok)
 	assert.Equal(t, idA, owner.ID, "chat 123 must route to shim A which last replied")
+}
+
+func TestIntegrationHelloReturnsAlias(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, idA := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, idB := connectShim(t, f.sock)
+	defer cB.Close()
+
+	require.NotEqual(t, idA, idB)
+
+	shim, ok := f.router.ResolveAlias("s1")
+	require.True(t, ok)
+	assert.NotEmpty(t, shim.Alias)
+
+	shim2, ok := f.router.ResolveAlias("s2")
+	require.True(t, ok)
+	assert.NotEqual(t, shim.ID, shim2.ID)
 }
 
 func TestIntegrationGateBlocksUnknownChat(t *testing.T) {
