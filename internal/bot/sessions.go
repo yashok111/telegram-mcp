@@ -3,12 +3,19 @@ package bot
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 )
+
+// sessCallbackRE matches the session-control callback button payloads emitted
+// by /sessions and /idle. Lowercase-hex is what daemon.ShimInfo.IDPrefix
+// returns, so any other casing is rejected as a forged/garbled payload.
+var sessCallbackRE = regexp.MustCompile(`^sess:(use|kill):([a-f0-9]{1,12})$`)
 
 // ShimInfo mirrors daemon.ShimInfo for bot-side rendering. Kept duplicated to
 // avoid a bot→daemon import. Conversion happens at the wiring boundary in main.
@@ -155,4 +162,124 @@ func (b *Bot) sendSessions(ctx context.Context, msg telego.Message) {
 
 	keyboard := tu.InlineKeyboard(rows...)
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Tap a session to pin it as your reply target:").WithReplyMarkup(keyboard))
+}
+
+// pickIdle returns the shim whose IdleFor(now) is largest. Returns ok=false
+// when no shims are connected or the router isn't wired (embedded mode).
+func (b *Bot) pickIdle(now time.Time) (ShimInfo, bool) {
+	if b.router == nil {
+		return ShimInfo{}, false
+	}
+
+	shims := b.router.Snapshot()
+	if len(shims) == 0 {
+		return ShimInfo{}, false
+	}
+
+	pick := shims[0]
+	for _, s := range shims[1:] {
+		if s.IdleFor(now) > pick.IdleFor(now) {
+			pick = s
+		}
+	}
+
+	return pick, true
+}
+
+func (b *Bot) sendIdle(ctx context.Context, msg telego.Message) {
+	pick, ok := b.pickIdle(time.Now())
+	if !ok {
+		text := "No active CC sessions connected."
+		if b.router == nil {
+			text = "Session switcher is only available in daemon mode."
+		}
+
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text))
+
+		return
+	}
+
+	idle := pick.IdleFor(time.Now()).Truncate(time.Second)
+
+	label := pick.Label
+	if label == "" {
+		label = "(no label)"
+	}
+
+	wd := pick.Workdir
+	if wd == "" {
+		wd = "?"
+	}
+
+	text := fmt.Sprintf("Most idle: %s [%s] %s\n%s\nIdle for %s.",
+		pick.IDPrefix, pick.Alias, label, wd, idle)
+	keyboard := tu.InlineKeyboard(tu.InlineKeyboardRow(
+		tu.InlineKeyboardButton("📌 Use this").WithCallbackData("sess:use:"+pick.IDPrefix),
+		tu.InlineKeyboardButton("❌ Evict").WithCallbackData("sess:kill:"+pick.IDPrefix),
+	))
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text).WithReplyMarkup(keyboard))
+}
+
+// handleSessCallback executes the use/kill action carried by a sess: callback.
+// Caller is responsible for the allowlist check before reaching here — same
+// rule as the existing perm: callback path.
+func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, action, prefix string) error {
+	if b.router == nil {
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID, Text: "Daemon mode only.",
+		})
+
+		return nil
+	}
+
+	switch action {
+	case "use":
+		chatID := strconv.FormatInt(q.From.ID, 10)
+		if msg, ok := q.Message.(*telego.Message); ok && msg != nil {
+			chatID = strconv.FormatInt(msg.Chat.ID, 10)
+		}
+
+		info, err := b.router.Pin(chatID, prefix, PinTTL)
+		if err != nil {
+			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: q.ID, Text: "Pin failed: " + err.Error(),
+			})
+
+			return nil
+		}
+
+		label := info.Label
+		if label == "" {
+			label = "(no label)"
+		}
+
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID, Text: "📌 Pinned " + info.Alias,
+		})
+
+		if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
+			_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
+				msg.Text+"\n\n📌 Pinned "+info.IDPrefix+" ["+info.Alias+"] "+label))
+		}
+	case "kill":
+		info, err := b.router.Evict(prefix)
+		if err != nil {
+			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: q.ID, Text: "Evict failed: " + err.Error(),
+			})
+
+			return nil
+		}
+
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID, Text: "❌ Evicted " + info.Alias,
+		})
+
+		if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
+			_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
+				msg.Text+"\n\n❌ Evicted "+info.IDPrefix+" ["+info.Alias+"]"))
+		}
+	}
+
+	return nil
 }

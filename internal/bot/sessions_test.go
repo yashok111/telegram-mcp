@@ -274,3 +274,201 @@ func dmMsg(userID int64, text string) telego.Message {
 		Text: text,
 	}
 }
+
+// ===== /idle command =====
+
+func TestPickIdleEmpty(t *testing.T) {
+	b := &Bot{router: &fakeRouterView{}}
+	_, ok := b.pickIdle(time.Now())
+	assert.False(t, ok)
+}
+
+func TestPickIdleNoRouter(t *testing.T) {
+	b := &Bot{}
+	_, ok := b.pickIdle(time.Now())
+	assert.False(t, ok)
+}
+
+func TestPickIdleSelectsLongest(t *testing.T) {
+	now := time.Now()
+	fv := &fakeRouterView{snap: []ShimInfo{
+		{ID: "a", IDPrefix: "a", Alias: "s1", LastOutbound: now.Add(-time.Second)},
+		{ID: "b", IDPrefix: "b", Alias: "s2", LastOutbound: now.Add(-time.Hour)},
+		{ID: "c", IDPrefix: "c", Alias: "s3", LastOutbound: now.Add(-time.Minute)},
+	}}
+	b := &Bot{router: fv}
+
+	pick, ok := b.pickIdle(now)
+	require.True(t, ok)
+	assert.Equal(t, "b", pick.ID)
+}
+
+func TestPickIdleFallsBackToConnectedAt(t *testing.T) {
+	now := time.Now()
+	fv := &fakeRouterView{snap: []ShimInfo{
+		{ID: "a", IDPrefix: "a", ConnectedAt: now.Add(-5 * time.Minute), LastOutbound: now.Add(-time.Second)},
+		{ID: "b", IDPrefix: "b", ConnectedAt: now.Add(-time.Hour)}, // never sent → uses ConnectedAt
+	}}
+	b := &Bot{router: fv}
+
+	pick, ok := b.pickIdle(now)
+	require.True(t, ok)
+	assert.Equal(t, "b", pick.ID)
+}
+
+func TestHandleCommand_idle_listsMostIdle(t *testing.T) {
+	now := time.Now()
+	fv := &fakeRouterView{snap: []ShimInfo{
+		{IDPrefix: "abcd1111", Alias: "s1", Label: "main", Workdir: "/w1", LastOutbound: now.Add(-time.Hour)},
+	}}
+
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/idle")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+
+	text := calls[0].params["text"].(string)
+	assert.Contains(t, text, "Most idle")
+	assert.Contains(t, text, "abcd1111")
+	assert.Contains(t, text, "main")
+
+	payload := payloadString(calls[0].params)
+	assert.Contains(t, payload, "sess:use:abcd1111")
+	assert.Contains(t, payload, "sess:kill:abcd1111")
+}
+
+func TestHandleCommand_idle_emptyList(t *testing.T) {
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = &fakeRouterView{}
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/idle")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"].(string), "No active CC sessions")
+}
+
+func TestHandleCommand_idle_noRouter(t *testing.T) {
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/idle")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"].(string), "daemon mode")
+}
+
+// ===== sess: callback =====
+
+func TestCallbackSessPrefixRegex(t *testing.T) {
+	cases := map[string]bool{
+		"sess:use:abcdef01":  true,
+		"sess:kill:abcdef01": true,
+		"sess:use:":          false,
+		"perm:allow:abcde":   false,
+		"sess:bogus:abcdef":  false,
+		"sess:use:ABCDEF":    false, // uppercase rejected
+	}
+	for input, want := range cases {
+		t.Run(input, func(t *testing.T) {
+			got := sessCallbackRE.MatchString(input)
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func TestHandleCallback_sessUseAllowed_pinsAndAcks(t *testing.T) {
+	fv := &fakeRouterView{pinned: ShimInfo{IDPrefix: "abcdef01", Alias: "s1", Label: "main"}}
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+
+	q := telego.CallbackQuery{
+		ID:      "cb1",
+		From:    telego.User{ID: 1},
+		Data:    "sess:use:abcdef01",
+		Message: &telego.Message{MessageID: 99, Chat: telego.Chat{ID: 1}, Text: "before"},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+
+	assert.Equal(t, "1", fv.lastPin.chatID)
+	assert.Equal(t, "abcdef01", fv.lastPin.prefix)
+
+	acks := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, acks, 1)
+	assert.Contains(t, payloadString(acks[0].params), "Pinned")
+
+	edits := api.recordedCalls("editMessageText")
+	require.Len(t, edits, 1)
+	assert.Contains(t, edits[0].params["text"].(string), "Pinned")
+}
+
+func TestHandleCallback_sessKillAllowed_evictsAndAcks(t *testing.T) {
+	fv := &fakeRouterView{evicted: ShimInfo{IDPrefix: "abcdef01", Alias: "s1", Label: "main"}}
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+
+	q := telego.CallbackQuery{
+		ID:      "cb2",
+		From:    telego.User{ID: 1},
+		Data:    "sess:kill:abcdef01",
+		Message: &telego.Message{MessageID: 99, Chat: telego.Chat{ID: 1}, Text: "before"},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+
+	assert.Equal(t, "abcdef01", fv.lastEvict)
+
+	acks := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, acks, 1)
+	assert.Contains(t, payloadString(acks[0].params), "Evicted")
+}
+
+func TestHandleCallback_sessUseNotAllowed_denies(t *testing.T) {
+	fv := &fakeRouterView{}
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+
+	q := telego.CallbackQuery{
+		ID:   "cb3",
+		From: telego.User{ID: 999}, // not allowlisted
+		Data: "sess:use:abcdef01",
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+
+	assert.Empty(t, fv.lastPin.prefix, "Pin should not have been called for unauthorized user")
+
+	acks := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, acks, 1)
+	assert.Contains(t, payloadString(acks[0].params), "Not authorized")
+}
+
+func TestHandleCallback_sessNoRouter_says_daemonOnly(t *testing.T) {
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	q := telego.CallbackQuery{
+		ID:   "cb4",
+		From: telego.User{ID: 1},
+		Data: "sess:use:abcdef01",
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+
+	acks := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, acks, 1)
+	assert.Contains(t, payloadString(acks[0].params), "Daemon mode only")
+}
+
+func TestHandleCallback_sessPinError_acksMessage(t *testing.T) {
+	fv := &fakeRouterView{pinErr: assertErr("ambiguous")}
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+
+	q := telego.CallbackQuery{
+		ID:      "cb5",
+		From:    telego.User{ID: 1},
+		Data:    "sess:use:abcdef01",
+		Message: &telego.Message{MessageID: 99, Chat: telego.Chat{ID: 1}, Text: "before"},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+
+	acks := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, acks, 1)
+	assert.Contains(t, payloadString(acks[0].params), "Pin failed")
+}

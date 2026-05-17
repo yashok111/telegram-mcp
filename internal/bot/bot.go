@@ -248,6 +248,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	case "use":
 		reply, _ := b.handleUseCommand(strconv.FormatInt(msg.Chat.ID, 10), msg.Text)
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply))
+	case "idle":
+		b.sendIdle(ctx, msg)
 	}
 
 	return nil
@@ -573,6 +575,22 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 }
 
 func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
+	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
+		st := b.store.Load()
+
+		senderID := strconv.FormatInt(q.From.ID, 10)
+		if !slices.Contains(st.AllowFrom, senderID) {
+			slog.Warn("sess callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
+			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: q.ID, Text: "Not authorized.",
+			})
+
+			return nil
+		}
+
+		return b.handleSessCallback(ctx, q, sm[1], sm[2])
+	}
+
 	m := callbackRE.FindStringSubmatch(q.Data)
 	if m == nil {
 		slog.Info("callback unknown pattern", "data", q.Data, "user_id", q.From.ID)
