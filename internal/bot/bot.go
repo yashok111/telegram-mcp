@@ -149,7 +149,10 @@ func (b *Bot) Poll(ctx context.Context) error {
 			Commands: []telego.BotCommand{
 				{Command: "start", Description: "Welcome and setup guide"},
 				{Command: "help", Description: "What this bot can do"},
-				{Command: "status", Description: "Check your pairing status"},
+				{Command: "status", Description: "Pairing + active sessions"},
+				{Command: "sessions", Description: "Pick which CC session to talk to"},
+				{Command: "use", Description: "/use <prefix> — pin a session"},
+				{Command: "idle", Description: "Show the most idle session"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		})
@@ -234,9 +237,17 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 			"Messages you send here route to a paired Claude Code session. "+
 				"Text and photos are forwarded; replies and reactions come back.\n\n"+
 				"/start — pairing instructions\n"+
-				"/status — check your pairing state"))
+				"/status — pairing + active sessions\n"+
+				"/sessions — pick which CC session to talk to\n"+
+				"/use <prefix> — pin a specific session\n"+
+				"/idle — show the most idle session"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
+	case "sessions":
+		b.sendSessions(ctx, msg)
+	case "use":
+		reply, _ := b.handleUseCommand(strconv.FormatInt(msg.Chat.ID, 10), msg.Text)
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply))
 	}
 
 	return nil
@@ -249,7 +260,8 @@ func (b *Bot) sendStatus(ctx context.Context, msg telego.Message, st access.Stat
 			label = "@" + msg.From.Username
 		}
 
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), fmt.Sprintf("Paired as %s.", label)))
+		text := fmt.Sprintf("Paired as %s.\n\n%s", label, b.renderShims(time.Now()))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text))
 
 		return
 	}
