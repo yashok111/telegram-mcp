@@ -5,7 +5,9 @@ package daemon
 import (
 	"errors"
 	"log/slog"
+	"sort"
 	"sync"
+	"time"
 )
 
 // ErrPermissionIDInUse is returned when a shim tries to register a permission
@@ -15,10 +17,13 @@ var ErrPermissionIDInUse = errors.New("permission request_id already in use")
 // Shim is the daemon-side handle for a connected shim. ID is stable for the
 // connection's lifetime; the Notify function pushes daemon→shim notifications.
 type Shim struct {
-	ID     string
-	Alias  string
-	Label  string
-	Notify func(method string, params any) error // bound to the underlying ipc.Conn
+	ID          string
+	Alias       string
+	Label       string
+	Workdir     string
+	CCSessionID string
+	ConnectedAt time.Time
+	Notify      func(method string, params any) error // bound to the underlying ipc.Conn
 }
 
 // PermDetails caches the perm request fields embedded in
@@ -41,16 +46,26 @@ type Router struct {
 
 	aliases   map[string]string // alias → shim_id
 	shimAlias map[string]string // shim_id → alias  (for O(1) release at Drop)
+
+	lastOutbound map[string]time.Time // shim_id → time
+	pins         map[string]pin       // chat_id → pin
+}
+
+type pin struct {
+	shimID    string
+	expiresAt time.Time
 }
 
 func NewRouter() *Router {
 	return &Router{
-		shims:       map[string]*Shim{},
-		chatOwners:  map[string]string{},
-		permOwners:  map[string]string{},
-		permDetails: map[string]PermDetails{},
-		aliases:     map[string]string{},
-		shimAlias:   map[string]string{},
+		shims:        map[string]*Shim{},
+		chatOwners:   map[string]string{},
+		permOwners:   map[string]string{},
+		permDetails:  map[string]PermDetails{},
+		aliases:      map[string]string{},
+		shimAlias:    map[string]string{},
+		lastOutbound: map[string]time.Time{},
+		pins:         map[string]pin{},
 	}
 }
 
@@ -62,6 +77,10 @@ func (r *Router) Register(s *Shim) {
 	s.Alias = alias
 	r.aliases[alias] = s.ID
 	r.shimAlias[s.ID] = alias
+
+	if s.ConnectedAt.IsZero() {
+		s.ConnectedAt = time.Now()
+	}
 
 	r.shims[s.ID] = s
 	r.lru = prepend(r.lru, s.ID)
@@ -91,6 +110,14 @@ func (r *Router) Drop(id string) {
 			delete(r.permDetails, pid)
 		}
 	}
+
+	delete(r.lastOutbound, id)
+
+	for chat, p := range r.pins {
+		if p.shimID == id {
+			delete(r.pins, chat)
+		}
+	}
 }
 
 func (r *Router) RecordOutbound(shimID, chatID string) {
@@ -104,8 +131,43 @@ func (r *Router) RecordOutbound(shimID, chatID string) {
 
 	prev := r.chatOwners[chatID]
 	r.chatOwners[chatID] = shimID
+	r.lastOutbound[shimID] = time.Now()
 
 	slog.Info("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "prev_owner", prev)
+}
+
+// Snapshot returns a by-value list of connected shims, newest-first by ConnectedAt.
+// Safe to hand to bot code without leaking router-internal state.
+func (r *Router) Snapshot() []ShimInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]ShimInfo, 0, len(r.shims))
+	pinsByShim := map[string][]string{}
+	now := time.Now()
+	for chat, p := range r.pins {
+		if now.After(p.expiresAt) {
+			continue
+		}
+		pinsByShim[p.shimID] = append(pinsByShim[p.shimID], chat)
+	}
+
+	for _, s := range r.shims {
+		out = append(out, ShimInfo{
+			ID:           s.ID,
+			Alias:        s.Alias,
+			Label:        s.Label,
+			Workdir:      s.Workdir,
+			CCSessionID:  s.CCSessionID,
+			ConnectedAt:  s.ConnectedAt,
+			LastOutbound: r.lastOutbound[s.ID],
+			PinnedChats:  pinsByShim[s.ID],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ConnectedAt.After(out[j].ConnectedAt)
+	})
+	return out
 }
 
 func (r *Router) RouteInbound(chatID string) (*Shim, bool) {

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -228,4 +229,31 @@ func TestRouteInboundMultiMentionDoesNotChangeOwner(t *testing.T) {
 	owner, ok := r.RouteInbound("chat-1")
 	require.True(t, ok)
 	assert.Equal(t, "a", owner.ID, "mention dispatch must not rewrite chatOwners")
+}
+
+func TestRouterRegisterRecordsConnectedAt(t *testing.T) {
+	r := NewRouter()
+	before := time.Now()
+	r.Register(&Shim{ID: "s1", Workdir: "/tmp/wd", CCSessionID: "cc-1"})
+	after := time.Now()
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, "/tmp/wd", infos[0].Workdir)
+	assert.Equal(t, "cc-1", infos[0].CCSessionID)
+	assert.True(t, !infos[0].ConnectedAt.Before(before) && !infos[0].ConnectedAt.After(after))
+	assert.True(t, infos[0].LastOutbound.IsZero())
+}
+
+func TestRouterRecordOutboundSetsLastOutbound(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+
+	before := time.Now()
+	r.RecordOutbound("s1", "chat-1")
+	after := time.Now()
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 1)
+	assert.True(t, !infos[0].LastOutbound.Before(before) && !infos[0].LastOutbound.After(after))
 }
