@@ -192,9 +192,14 @@ func runDaemon(stateDir string) error {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	defer signal.Stop(sigs)
+
 	go func() {
-		<-sigs
-		cancel()
+		select {
+		case <-sigs:
+			cancel()
+		case <-ctx.Done():
+		}
 	}()
 
 	var wg sync.WaitGroup
@@ -259,9 +264,17 @@ func runShim(stateDir string) error {
 	}
 
 	sigs := make(chan os.Signal, 1)
-
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() { <-sigs; cancel() }()
+
+	defer signal.Stop(sigs)
+
+	go func() {
+		select {
+		case <-sigs:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	return sh.Run(ctx)
 }

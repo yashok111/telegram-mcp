@@ -127,15 +127,21 @@ func newIntegration(t *testing.T) *integrationFixture {
 		cancel()
 		ts.Close()
 
+		daemonTimer := time.NewTimer(3 * time.Second)
+		defer daemonTimer.Stop()
+
 		select {
 		case <-daemonDone:
-		case <-time.After(3 * time.Second):
+		case <-daemonTimer.C:
 			t.Error("daemon did not exit cleanly")
 		}
 
+		pollTimer := time.NewTimer(3 * time.Second)
+		defer pollTimer.Stop()
+
 		select {
 		case <-pollDone:
-		case <-time.After(3 * time.Second):
+		case <-pollTimer.C:
 			t.Error("poll did not exit cleanly")
 		}
 	}
