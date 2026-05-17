@@ -122,3 +122,110 @@ func TestRouterPermissionDetailsLookup(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, d, got)
 }
+
+func TestRouteInboundMultiNoMentionFallsThroughToOwner(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a)
+	r.Register(b)
+
+	r.RecordOutbound("a", "chat-1")
+
+	got := r.RouteInboundMulti("chat-1", "no mentions here")
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID)
+}
+
+func TestRouteInboundMultiSingleMentionResolves(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a) // s1
+	r.Register(b) // s2
+
+	got := r.RouteInboundMulti("chat-1", "@s2 please")
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID)
+}
+
+func TestRouteInboundMultiMultipleMentionsResolveEach(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+	c := &Shim{ID: "c"}
+
+	r.Register(a) // s1
+	r.Register(b) // s2
+	r.Register(c) // s3
+
+	got := r.RouteInboundMulti("chat-1", "@s1 and @s3 do this")
+	require.Len(t, got, 2)
+	ids := []string{got[0].ID, got[1].ID}
+	assert.ElementsMatch(t, []string{"a", "c"}, ids)
+}
+
+func TestRouteInboundMultiAllBroadcasts(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+	c := &Shim{ID: "c"}
+
+	r.Register(a)
+	r.Register(b)
+	r.Register(c)
+
+	got := r.RouteInboundMulti("chat-1", "@all status")
+	assert.Len(t, got, 3)
+}
+
+func TestRouteInboundMultiUnknownMentionFallsThrough(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a)
+	r.Register(b)
+	r.RecordOutbound("a", "chat-1")
+
+	got := r.RouteInboundMulti("chat-1", "@s99 wrong")
+	require.Len(t, got, 1, "unknown mention falls through to owner")
+	assert.Equal(t, "a", got[0].ID)
+}
+
+func TestRouteInboundMultiMixOfKnownAndUnknownReturnsOnlyKnown(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a) // s1
+	r.Register(b) // s2
+
+	got := r.RouteInboundMulti("chat-1", "@s1 and @s99 mix")
+	require.Len(t, got, 1, "known mention wins; unknown is silently dropped")
+	assert.Equal(t, "a", got[0].ID)
+}
+
+func TestRouteInboundMultiNoShimsReturnsEmpty(t *testing.T) {
+	r := NewRouter()
+	got := r.RouteInboundMulti("chat-1", "@s1 hi")
+	assert.Empty(t, got)
+}
+
+func TestRouteInboundMultiMentionDoesNotChangeOwner(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a) // s1
+	r.Register(b) // s2
+	r.RecordOutbound("a", "chat-1")
+
+	_ = r.RouteInboundMulti("chat-1", "@s2 hello")
+
+	owner, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "a", owner.ID, "mention dispatch must not rewrite chatOwners")
+}

@@ -112,6 +112,11 @@ func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	return r.routeInboundLocked(chatID)
+}
+
+// routeInboundLocked is the owner→LRU resolver. Caller holds r.mu.
+func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	if owner, ok := r.chatOwners[chatID]; ok {
 		if s, ok := r.shims[owner]; ok {
 			slog.Info("RouteInbound owner", "chat_id", chatID, "shim_id", s.ID)
@@ -132,6 +137,77 @@ func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
 	}
 
 	return s, ok
+}
+
+// RouteInboundMulti resolves an inbound message to a set of target shims using
+// the precedence chain: mentions (incl. @all broadcast) → chat owner → LRU.
+// A mention dispatch never rewrites chatOwners — it's a one-shot address.
+// Returns nil if no shims are connected.
+func (r *Router) RouteInboundMulti(chatID, content string) []*Shim {
+	mentions := parseMentions(content)
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if len(mentions) > 0 {
+		targets := r.resolveMentionsLocked(chatID, mentions)
+		if len(targets) > 0 {
+			return targets
+		}
+		// All mentions were unknown; fall through to owner/LRU.
+	}
+
+	if single, ok := r.routeInboundLocked(chatID); ok {
+		return []*Shim{single}
+	}
+
+	return nil
+}
+
+// resolveMentionsLocked translates alias tokens into Shim pointers. @all expands
+// to every connected shim. Unknown aliases are silently dropped. Caller holds r.mu.
+func (r *Router) resolveMentionsLocked(chatID string, mentions []string) []*Shim {
+	seen := make(map[string]struct{}, len(mentions))
+	out := make([]*Shim, 0, len(mentions))
+
+	for _, m := range mentions {
+		if m == "all" {
+			for _, id := range r.lru {
+				if _, dup := seen[id]; dup {
+					continue
+				}
+
+				if s, ok := r.shims[id]; ok {
+					seen[id] = struct{}{}
+
+					out = append(out, s)
+				}
+			}
+
+			continue
+		}
+
+		id, ok := r.aliases[m]
+		if !ok {
+			slog.Warn("mention resolved to unknown alias", "alias", m, "chat_id", chatID)
+			continue
+		}
+
+		if _, dup := seen[id]; dup {
+			continue
+		}
+
+		s, ok := r.shims[id]
+		if !ok {
+			continue
+		}
+
+		seen[id] = struct{}{}
+
+		out = append(out, s)
+	}
+
+	return out
 }
 
 func (r *Router) RegisterPermission(reqID, shimID string, d PermDetails) error {
