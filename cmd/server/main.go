@@ -56,7 +56,6 @@ func selectMode(argv []string) mode {
 
 func main() {
 	setupSlog()
-	bindParentDeath()
 
 	stateDir, err := bootstrapStateDir()
 	if err != nil {
@@ -64,14 +63,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// PR_SET_PDEATHSIG binds our lifetime to the spawning Claude Code session
+	// for embedded and shim modes. Daemon mode must outlive any single shim,
+	// so it explicitly opts out — its lifetime is governed by IdleTimeout and
+	// systemd / signal handling instead.
 	var runErr error
 
 	switch selectMode(os.Args) {
 	case modeDaemon:
 		runErr = runDaemon(stateDir)
 	case modeShim:
+		bindParentDeath()
+
 		runErr = runShim(stateDir)
 	case modeEmbedded:
+		bindParentDeath()
+
 		runErr = runEmbedded(stateDir)
 	}
 
