@@ -1,0 +1,84 @@
+package shim
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/yakov/telegram-mcp/internal/ipc"
+)
+
+type fakeMCP struct {
+	inbound  []inboundCall
+	resolved []resolvedCall
+}
+
+type inboundCall struct {
+	content string
+	meta    map[string]string
+}
+
+type resolvedCall struct {
+	requestID, behavior string
+}
+
+func (f *fakeMCP) DeliverInbound(content string, meta map[string]string) {
+	f.inbound = append(f.inbound, inboundCall{content, meta})
+}
+
+func (f *fakeMCP) ResolvePermission(requestID, behavior string) {
+	f.resolved = append(f.resolved, resolvedCall{requestID, behavior})
+}
+
+type spyClient struct {
+	handlers map[string]ipc.NotifyHandler
+}
+
+func newSpyClient() *spyClient { return &spyClient{handlers: map[string]ipc.NotifyHandler{}} }
+
+func (s *spyClient) Call(context.Context, string, any, any) error { return nil }
+func (s *spyClient) Notify(string, any) error                     { return nil }
+func (s *spyClient) OnNotify(method string, h ipc.NotifyHandler)  { s.handlers[method] = h }
+func (s *spyClient) Close() error                                 { return nil }
+func (s *spyClient) Done() <-chan struct{}                        { return nil }
+
+func TestNotifierRegistersHandlersOnAttach(t *testing.T) {
+	c := newSpyClient()
+	mcp := &fakeMCP{}
+	AttachNotifier(c, mcp)
+
+	_, hasInbound := c.handlers[ipc.NotifyInbound]
+	_, hasResolved := c.handlers[ipc.NotifyPermissionResolved]
+	assert.True(t, hasInbound)
+	assert.True(t, hasResolved)
+}
+
+func TestNotifierDispatchesInbound(t *testing.T) {
+	c := newSpyClient()
+	mcp := &fakeMCP{}
+	AttachNotifier(c, mcp)
+
+	params := json.RawMessage(`{"content":"hi","meta":{"chat_id":"1","user":"@x"}}`)
+	c.handlers[ipc.NotifyInbound](context.Background(), params)
+
+	require.Len(t, mcp.inbound, 1)
+	assert.Equal(t, "hi", mcp.inbound[0].content)
+	assert.Equal(t, "1", mcp.inbound[0].meta["chat_id"])
+	assert.Equal(t, "@x", mcp.inbound[0].meta["user"])
+}
+
+func TestNotifierDispatchesPermissionResolved(t *testing.T) {
+	c := newSpyClient()
+	mcp := &fakeMCP{}
+	AttachNotifier(c, mcp)
+
+	c.handlers[ipc.NotifyPermissionResolved](context.Background(),
+		json.RawMessage(`{"request_id":"ababc","behavior":"allow"}`))
+
+	require.Len(t, mcp.resolved, 1)
+	assert.Equal(t, "ababc", mcp.resolved[0].requestID)
+	assert.Equal(t, "allow", mcp.resolved[0].behavior)
+}
