@@ -27,8 +27,9 @@ type Shim struct {
 
 	WireContext func() context.Context // injected for tests; defaults to context.Background
 
-	idMu sync.RWMutex
-	id   string
+	idMu  sync.RWMutex
+	id    string
+	alias string
 }
 
 func (s *Shim) ShimID() (string, bool) {
@@ -36,6 +37,13 @@ func (s *Shim) ShimID() (string, bool) {
 	defer s.idMu.RUnlock()
 
 	return s.id, s.id != ""
+}
+
+func (s *Shim) ShimAlias() (string, bool) {
+	s.idMu.RLock()
+	defer s.idMu.RUnlock()
+
+	return s.alias, s.alias != ""
 }
 
 func (s *Shim) Wire() error {
@@ -70,6 +78,7 @@ func (s *Shim) Wire() error {
 	var hello struct {
 		ShimID        string `json:"shim_id"`
 		DaemonVersion string `json:"daemon_version"`
+		Alias         string `json:"alias"`
 	}
 
 	if err := s.Client.Call(wctx, ipc.MethodHello, map[string]any{
@@ -81,9 +90,10 @@ func (s *Shim) Wire() error {
 
 	s.idMu.Lock()
 	s.id = hello.ShimID
+	s.alias = hello.Alias
 	s.idMu.Unlock()
 
-	slog.Info("shim wired", "shim_id", hello.ShimID, "daemon_version", hello.DaemonVersion, "shim_pid", s.HelloPID, "label", s.HelloLabel)
+	slog.Info("shim wired", "shim_id", hello.ShimID, "daemon_version", hello.DaemonVersion, "alias", hello.Alias, "shim_pid", s.HelloPID, "label", s.HelloLabel)
 
 	return nil
 }
