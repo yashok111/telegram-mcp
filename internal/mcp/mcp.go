@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	mcptypes "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -360,41 +360,22 @@ func (s *Server) assertSendable(path string) error {
 	return nil
 }
 
+// atoiSafe returns 0 on parse failure — used at the MCP tool boundary where
+// missing/malformed numeric args degrade to "no reply_to" / "no message_id"
+// rather than blowing up the whole call. Real validation happens downstream
+// when the Telegram API rejects message_id=0.
 func atoiSafe(s string) int {
-	if s == "" {
-		return 0
-	}
-	var n int
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '-' && i == 0 {
-			continue
-		}
-		if c < '0' || c > '9' {
-			return 0
-		}
-		n = n*10 + int(c-'0')
-	}
-	if len(s) > 0 && s[0] == '-' {
-		return -n
-	}
+	n, _ := strconv.Atoi(strings.TrimSpace(s))
 	return n
 }
 
 func joinInts(xs []int) string {
-	if len(xs) == 0 {
-		return ""
-	}
 	parts := make([]string, len(xs))
 	for i, n := range xs {
-		parts[i] = fmt.Sprintf("%d", n)
+		parts[i] = strconv.Itoa(n)
 	}
 	return strings.Join(parts, ", ")
 }
-
-// time unused in current path — keep the import via blank reference so future
-// timestamp-based logging won't need a new import line.
-var _ = time.Now
 
 const serverInstructions = `The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.
 

@@ -7,7 +7,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -25,16 +27,22 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "telegram-mcp: fatal: %v\n", err)
+		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
+	// Stderr → Claude Code logs. JSON keeps it parseable, low-cardinality
+	// messages keep aggregators happy.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	// Die-with-parent: kernel sends SIGTERM the moment our parent goes away.
 	// Fixes the orphan-watchdog race the TS version had.
 	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGTERM), 0, 0, 0); err != nil {
-		fmt.Fprintf(os.Stderr, "telegram-mcp: PR_SET_PDEATHSIG failed: %v\n", err)
+		slog.Warn("PR_SET_PDEATHSIG failed", "err", err)
 	}
 
 	stateDir := os.Getenv("TELEGRAM_STATE_DIR")
@@ -46,8 +54,8 @@ func run() error {
 		return fmt.Errorf("mkdir state: %w", err)
 	}
 
-	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil {
-		fmt.Fprintf(os.Stderr, "telegram-mcp: .env load: %v\n", err)
+	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn(".env load failed", "err", err)
 	}
 
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
@@ -56,7 +64,7 @@ func run() error {
 	}
 
 	if err := claimPID(filepath.Join(stateDir, "bot.pid")); err != nil {
-		return err
+		return fmt.Errorf("claim pid: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -81,14 +89,14 @@ func run() error {
 		defer wg.Done()
 		defer cancel()
 		if err := mcpSrv.ServeStdio(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "telegram-mcp: mcp loop: %v\n", err)
+			slog.Error("mcp loop exited", "err", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		defer cancel()
 		if err := tgBot.Poll(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "telegram-mcp: poll loop: %v\n", err)
+			slog.Error("poll loop exited", "err", err)
 		}
 	}()
 
@@ -98,7 +106,7 @@ func run() error {
 	select {
 	case <-ctx.Done():
 	case sig := <-sigs:
-		fmt.Fprintf(os.Stderr, "telegram-mcp: %s received, shutting down\n", sig)
+		slog.Info("shutting down", "signal", sig.String())
 		cancel()
 	}
 
@@ -109,14 +117,14 @@ func run() error {
 
 // loadDotEnv mirrors the TS plugin: KEY=VALUE lines, real env wins.
 func loadDotEnv(path string) error {
-	f, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	_ = os.Chmod(path, 0o600)
-	for _, line := range splitLines(string(f)) {
-		k, v, ok := splitKV(line)
-		if !ok || os.Getenv(k) != "" {
+	for line := range strings.Lines(string(raw)) {
+		k, v, ok := strings.Cut(strings.TrimRight(line, "\n"), "=")
+		if !ok || k == "" || os.Getenv(k) != "" {
 			continue
 		}
 		_ = os.Setenv(k, v)
@@ -133,7 +141,7 @@ func claimPID(path string) error {
 	if raw, err := os.ReadFile(path); err == nil {
 		if old, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && old > 1 && old != os.Getpid() {
 			if syscall.Kill(old, 0) == nil && isOurPoller(old) {
-				fmt.Fprintf(os.Stderr, "telegram-mcp: replacing stale poller pid=%d\n", old)
+				slog.Info("replacing stale poller", "pid", old)
 				_ = syscall.Kill(old, syscall.SIGTERM)
 			}
 		}
@@ -148,33 +156,4 @@ func isOurPoller(pid int) bool {
 	}
 	comm := strings.TrimSpace(string(raw))
 	return comm == "telegram-mcp" || comm == "bun"
-}
-
-func splitLines(s string) []string {
-	var out []string
-	start := 0
-	for i, c := range s {
-		if c == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-	return out
-}
-
-func splitKV(line string) (string, string, bool) {
-	for i := 0; i < len(line); i++ {
-		if line[i] == '=' {
-			k := line[:i]
-			v := line[i+1:]
-			if k == "" {
-				return "", "", false
-			}
-			return k, v, true
-		}
-	}
-	return "", "", false
 }

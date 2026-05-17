@@ -8,10 +8,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +25,10 @@ import (
 
 	"github.com/yakov/telegram-mcp/internal/access"
 )
+
+// fileClient is shared across photo + attachment downloads. Timeout caps a
+// stuck Telegram CDN connection so it can't wedge the poller indefinitely.
+var fileClient = &http.Client{Timeout: 60 * time.Second}
 
 // Notifier is the slice of the MCP server the bot calls into. Defined as an
 // interface so bot tests can drop in a fake without pulling the MCP package.
@@ -85,7 +91,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 		return fmt.Errorf("getMe: %w", err)
 	}
 	b.username = me.Username
-	fmt.Fprintf(os.Stderr, "telegram-mcp: polling as @%s\n", b.username)
+	slog.Info("polling started", "username", b.username)
 
 	updates, err := b.api.UpdatesViaLongPolling(ctx, nil)
 	if err != nil {
@@ -157,7 +163,7 @@ func (b *Bot) onCommand(ctx *th.Context, msg telego.Message) error {
 	if st.DMPolicy == access.PolicyDisabled {
 		return nil
 	}
-	if st.DMPolicy == access.PolicyAllowlist && !containsString(st.AllowFrom, senderID) {
+	if st.DMPolicy == access.PolicyAllowlist && !slices.Contains(st.AllowFrom, senderID) {
 		return nil
 	}
 
@@ -183,7 +189,7 @@ func (b *Bot) onCommand(ctx *th.Context, msg telego.Message) error {
 }
 
 func (b *Bot) sendStatus(ctx context.Context, msg telego.Message, st access.State, senderID string) {
-	if containsString(st.AllowFrom, senderID) {
+	if slices.Contains(st.AllowFrom, senderID) {
 		label := senderID
 		if msg.From.Username != "" {
 			label = "@" + msg.From.Username
@@ -191,12 +197,10 @@ func (b *Bot) sendStatus(ctx context.Context, msg telego.Message, st access.Stat
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), fmt.Sprintf("Paired as %s.", label)))
 		return
 	}
-	for code, p := range st.Pending {
-		if p.SenderID == senderID {
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
-				fmt.Sprintf("Pending pairing — run in Claude Code:\n\n/telegram:access pair %s", code)))
-			return
-		}
+	if code, _, ok := findPendingFor(st.Pending, senderID); ok {
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
+			fmt.Sprintf("Pending pairing — run in Claude Code:\n\n/telegram:access pair %s", code)))
+		return
 	}
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
 		"Not paired. Send me a message to get a pairing code."))
@@ -266,68 +270,57 @@ func (b *Bot) onMessage(ctx *th.Context, msg telego.Message) error {
 		if path, err := b.downloadPhoto(ctx, msg.Photo); err == nil && path != "" {
 			meta["image_path"] = path
 		} else if err != nil {
-			fmt.Fprintf(os.Stderr, "telegram-mcp: photo download failed: %v\n", err)
+			slog.Error("photo download failed", "err", err)
 		}
-	case msg.Document != nil:
-		meta["attachment_kind"] = "document"
-		meta["attachment_file_id"] = msg.Document.FileID
-		if msg.Document.FileSize > 0 {
-			meta["attachment_size"] = strconv.FormatInt(msg.Document.FileSize, 10)
-		}
-		if msg.Document.MimeType != "" {
-			meta["attachment_mime"] = msg.Document.MimeType
-		}
-		if n := safeName(msg.Document.FileName); n != "" {
-			meta["attachment_name"] = n
-		}
-	case msg.Voice != nil:
-		meta["attachment_kind"] = "voice"
-		meta["attachment_file_id"] = msg.Voice.FileID
-		if msg.Voice.FileSize > 0 {
-			meta["attachment_size"] = strconv.FormatInt(msg.Voice.FileSize, 10)
-		}
-		if msg.Voice.MimeType != "" {
-			meta["attachment_mime"] = msg.Voice.MimeType
-		}
-	case msg.Audio != nil:
-		meta["attachment_kind"] = "audio"
-		meta["attachment_file_id"] = msg.Audio.FileID
-		if msg.Audio.FileSize > 0 {
-			meta["attachment_size"] = strconv.FormatInt(msg.Audio.FileSize, 10)
-		}
-		if msg.Audio.MimeType != "" {
-			meta["attachment_mime"] = msg.Audio.MimeType
-		}
-		if n := safeName(msg.Audio.FileName); n != "" {
-			meta["attachment_name"] = n
-		}
-	case msg.Video != nil:
-		meta["attachment_kind"] = "video"
-		meta["attachment_file_id"] = msg.Video.FileID
-		if msg.Video.FileSize > 0 {
-			meta["attachment_size"] = strconv.FormatInt(msg.Video.FileSize, 10)
-		}
-		if msg.Video.MimeType != "" {
-			meta["attachment_mime"] = msg.Video.MimeType
-		}
-		if n := safeName(msg.Video.FileName); n != "" {
-			meta["attachment_name"] = n
-		}
-	case msg.VideoNote != nil:
-		meta["attachment_kind"] = "video_note"
-		meta["attachment_file_id"] = msg.VideoNote.FileID
-		if msg.VideoNote.FileSize > 0 {
-			meta["attachment_size"] = strconv.Itoa(msg.VideoNote.FileSize)
-		}
-	case msg.Sticker != nil:
-		meta["attachment_kind"] = "sticker"
-		meta["attachment_file_id"] = msg.Sticker.FileID
-		if msg.Sticker.FileSize > 0 {
-			meta["attachment_size"] = strconv.Itoa(msg.Sticker.FileSize)
+	default:
+		for k, v := range attachmentMeta(&msg) {
+			meta[k] = v
 		}
 	}
 
 	b.notifier.DeliverInbound(text, meta)
+	return nil
+}
+
+// attachmentMeta extracts attachment_kind / file_id / size / mime / name for
+// non-photo media. Returns nil if the message carries no attachment.
+func attachmentMeta(msg *telego.Message) map[string]string {
+	put := func(kind, fileID string, size int64, mime, name string) map[string]string {
+		m := map[string]string{
+			"attachment_kind":    kind,
+			"attachment_file_id": fileID,
+		}
+		if size > 0 {
+			m["attachment_size"] = strconv.FormatInt(size, 10)
+		}
+		if mime != "" {
+			m["attachment_mime"] = mime
+		}
+		if n := safeName(name); n != "" {
+			m["attachment_name"] = n
+		}
+		return m
+	}
+	switch {
+	case msg.Document != nil:
+		d := msg.Document
+		return put("document", d.FileID, d.FileSize, d.MimeType, d.FileName)
+	case msg.Voice != nil:
+		v := msg.Voice
+		return put("voice", v.FileID, v.FileSize, v.MimeType, "")
+	case msg.Audio != nil:
+		a := msg.Audio
+		return put("audio", a.FileID, a.FileSize, a.MimeType, a.FileName)
+	case msg.Video != nil:
+		v := msg.Video
+		return put("video", v.FileID, v.FileSize, v.MimeType, v.FileName)
+	case msg.VideoNote != nil:
+		v := msg.VideoNote
+		return put("video_note", v.FileID, int64(v.FileSize), "", "")
+	case msg.Sticker != nil:
+		s := msg.Sticker
+		return put("sticker", s.FileID, int64(s.FileSize), "", "")
+	}
 	return nil
 }
 
@@ -385,10 +378,13 @@ func (b *Bot) fetchFile(ctx context.Context, fileID, uniqueHint string) (string,
 	}
 
 	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.token, file.FilePath)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	res, err := http.DefaultClient.Do(req)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	res, err := fileClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch: %w", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
@@ -432,7 +428,7 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 	}
 	st := b.store.Load()
 	senderID := strconv.FormatInt(q.From.ID, 10)
-	if !containsString(st.AllowFrom, senderID) {
+	if !slices.Contains(st.AllowFrom, senderID) {
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
 			CallbackQueryID: q.ID,
 			Text:            "Not authorized.",
@@ -508,22 +504,20 @@ func (b *Bot) gate(msg *telego.Message) gateResult {
 
 	switch msg.Chat.Type {
 	case "private":
-		if containsString(st.AllowFrom, senderID) {
+		if slices.Contains(st.AllowFrom, senderID) {
 			return gateResult{action: actionDeliver, state: st}
 		}
 		if st.DMPolicy == access.PolicyAllowlist {
 			return gateResult{action: actionDrop}
 		}
-		for code, p := range st.Pending {
-			if p.SenderID == senderID {
-				if p.Replies >= 2 {
-					return gateResult{action: actionDrop}
-				}
-				p.Replies++
-				st.Pending[code] = p
-				_ = b.store.Save(st)
-				return gateResult{action: actionPair, code: code, isResend: true}
+		if code, p, ok := findPendingFor(st.Pending, senderID); ok {
+			if p.Replies >= 2 {
+				return gateResult{action: actionDrop}
 			}
+			p.Replies++
+			st.Pending[code] = p
+			_ = b.store.Save(st)
+			return gateResult{action: actionPair, code: code, isResend: true}
 		}
 		if len(st.Pending) >= 3 {
 			return gateResult{action: actionDrop}
@@ -546,7 +540,7 @@ func (b *Bot) gate(msg *telego.Message) gateResult {
 		if !ok {
 			return gateResult{action: actionDrop}
 		}
-		if len(policy.AllowFrom) > 0 && !containsString(policy.AllowFrom, senderID) {
+		if len(policy.AllowFrom) > 0 && !slices.Contains(policy.AllowFrom, senderID) {
 			return gateResult{action: actionDrop}
 		}
 		if policy.RequireMention && !b.isMentioned(msg, st.MentionPatterns) {
@@ -622,9 +616,8 @@ func (b *Bot) checkApprovals(ctx context.Context) {
 			_ = os.Remove(filepath.Join(b.store.ApprovedDir(), senderID))
 			continue
 		}
-		_, err = b.api.SendMessage(ctx, tu.Message(tu.ID(id), "Paired! Say hi to Claude."))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "telegram-mcp: failed to send approval confirm: %v\n", err)
+		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(id), "Paired! Say hi to Claude.")); err != nil {
+			slog.Error("send approval confirm failed", "sender_id", senderID, "err", err)
 		}
 		_ = os.Remove(filepath.Join(b.store.ApprovedDir(), senderID))
 	}
@@ -742,9 +735,8 @@ func (b *Bot) BroadcastPermissionRequest(ctx context.Context, requestID, toolNam
 		if err != nil {
 			continue
 		}
-		_, err = b.api.SendMessage(ctx, tu.Message(tu.ID(id), text).WithReplyMarkup(keyboard))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "telegram-mcp: permission_request send to %s failed: %v\n", dm, err)
+		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(id), text).WithReplyMarkup(keyboard)); err != nil {
+			slog.Error("permission_request send failed", "chat_id", dm, "err", err)
 		}
 	}
 }
@@ -759,17 +751,17 @@ func userLabel(u *telego.User) string {
 	return strconv.FormatInt(u.ID, 10)
 }
 
-func containsString(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
-	}
-	return false
-}
-
 func parseChatID(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
+}
+
+func findPendingFor(pending map[string]access.Pending, senderID string) (string, access.Pending, bool) {
+	for code, p := range pending {
+		if p.SenderID == senderID {
+			return code, p, true
+		}
+	}
+	return "", access.Pending{}, false
 }
 
 func commandName(text string) string {

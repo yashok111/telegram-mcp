@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -90,7 +91,7 @@ func NewStore(stateDir string, static bool) *Store {
 	if static {
 		st := s.readFile()
 		if st.DMPolicy == PolicyPairing {
-			fmt.Fprintln(os.Stderr, "telegram-mcp: static mode — dmPolicy \"pairing\" downgraded to \"allowlist\"")
+			slog.Warn("static mode downgraded dmPolicy", "from", PolicyPairing, "to", PolicyAllowlist)
 			st.DMPolicy = PolicyAllowlist
 		}
 		st.Pending = map[string]Pending{}
@@ -110,15 +111,13 @@ func (s *Store) readFile() State {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			_ = os.Rename(s.path, fmt.Sprintf("%s.corrupt-%d", s.path, time.Now().UnixMilli()))
-			fmt.Fprintln(os.Stderr, "telegram-mcp: access.json is corrupt, moved aside. Starting fresh.")
+			s.quarantineCorrupt(err)
 		}
 		return defaultState()
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
-		_ = os.Rename(s.path, fmt.Sprintf("%s.corrupt-%d", s.path, time.Now().UnixMilli()))
-		fmt.Fprintln(os.Stderr, "telegram-mcp: access.json is corrupt, moved aside. Starting fresh.")
+		s.quarantineCorrupt(err)
 		return defaultState()
 	}
 	if st.DMPolicy == "" {
@@ -134,6 +133,12 @@ func (s *Store) readFile() State {
 		st.Pending = map[string]Pending{}
 	}
 	return st
+}
+
+func (s *Store) quarantineCorrupt(cause error) {
+	dest := fmt.Sprintf("%s.corrupt-%d", s.path, time.Now().UnixMilli())
+	_ = os.Rename(s.path, dest)
+	slog.Warn("access.json corrupt, moved aside; starting fresh", "moved_to", dest, "cause", cause)
 }
 
 // Save persists atomically. No-op in static mode.
