@@ -266,3 +266,24 @@ func TestHandleHelloAssignsShimIDAndAlias(t *testing.T) {
 	assert.NotEmpty(t, m["daemon_version"])
 	assert.Empty(t, m["alias"], "HandleHello alone does not register; alias set by daemon Router.Register")
 }
+
+func TestHandleHelloRecordsWorkdirAndSession(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+	c := &ipc.Conn{}
+
+	res, rpcErr := h.HandleHello(context.Background(), c, raw(t, map[string]any{
+		"shim_pid":      123,
+		"label":         "demo",
+		"workdir":       "/home/u/code",
+		"cc_session_id": "sess-xyz",
+	}))
+	require.Nil(t, rpcErr)
+	m, ok := res.(map[string]any)
+	require.True(t, ok)
+	assert.NotEmpty(t, m["shim_id"])
+
+	wd, _ := c.Meta.Load(metaWorkdir)
+	assert.Equal(t, "/home/u/code", wd)
+	sid, _ := c.Meta.Load(metaCCSessionID)
+	assert.Equal(t, "sess-xyz", sid)
+}
