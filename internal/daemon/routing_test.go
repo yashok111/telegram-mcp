@@ -278,7 +278,7 @@ func TestRouterPinOverridesOwner(t *testing.T) {
 func TestRouterPinUnknownShim(t *testing.T) {
 	r := NewRouter()
 	err := r.Pin("chat-1", "ghost", time.Minute)
-	assert.Error(t, err)
+	require.ErrorIs(t, err, ErrShimNotFound)
 }
 
 func TestRouterPinExpires(t *testing.T) {
@@ -329,6 +329,59 @@ func TestRouterUnpin(t *testing.T) {
 	got, ok := r.RouteInbound("chat-1")
 	require.True(t, ok)
 	assert.Equal(t, "s1", got.ID)
+}
+
+func TestRouterSnapshotPinnedChatsActive(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	require.NoError(t, r.Pin("chatA", "s1", time.Hour))
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 2)
+
+	byID := map[string]ShimInfo{}
+	for _, info := range infos {
+		byID[info.ID] = info
+	}
+
+	require.Contains(t, byID, "s1")
+	require.Contains(t, byID, "s2")
+	assert.Equal(t, []string{"chatA"}, byID["s1"].PinnedChats)
+	assert.Empty(t, byID["s2"].PinnedChats)
+}
+
+func TestRouterSnapshotPinnedChatsExpiredFiltered(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	require.NoError(t, r.Pin("chatA", "s1", -time.Second))
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 2)
+
+	for _, info := range infos {
+		assert.Empty(t, info.PinnedChats, "expired pin must be filtered from snapshot for shim %s", info.ID)
+	}
+}
+
+func TestRouterDropClearsPinsHeldByDroppedShim(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	require.NoError(t, r.Pin("chatA", "s1", time.Hour))
+	require.NoError(t, r.Pin("chatB", "s2", time.Hour))
+
+	r.Drop("s1")
+
+	got, ok := r.RouteInbound("chatA")
+	require.True(t, ok, "chatA should still resolve via fallback after s1 dropped")
+	assert.Equal(t, "s2", got.ID, "chatA falls back to LRU (s2) since s1 gone and its pin cleared")
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, "s2", infos[0].ID)
+	assert.Equal(t, []string{"chatB"}, infos[0].PinnedChats, "s2's pin must be untouched by s1 drop")
 }
 
 func TestRouterResolveShimByPrefix(t *testing.T) {

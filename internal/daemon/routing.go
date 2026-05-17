@@ -363,7 +363,7 @@ func (r *Router) RegisterPermission(reqID, shimID string, d PermDetails) error {
 	}
 
 	if _, ok := r.shims[shimID]; !ok {
-		return errors.New("unknown shim")
+		return ErrShimNotFound
 	}
 
 	r.permOwners[reqID] = shimID
