@@ -111,7 +111,7 @@ func writeDebug(event string, fields map[string]any) {
 		return
 	}
 
-	f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // debugLogPath is set internally from StateDir, not user input.
 	if err != nil {
 		return
 	}
