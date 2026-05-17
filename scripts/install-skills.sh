@@ -14,12 +14,18 @@
 #   bash scripts/install-skills.sh anthropics
 #   bash scripts/install-skills.sh superpowers
 #   bash scripts/install-skills.sh mattpocock
+#   bash scripts/install-skills.sh samber
+#   bash scripts/install-skills.sh netresearch
+#   bash scripts/install-skills.sh jetbrains
 
 set -euo pipefail
 
 REPO_ANTHROPICS="https://github.com/anthropics/skills"
 REPO_SUPERPOWERS="https://github.com/obra/superpowers"
 REPO_MATTPOCOCK="https://github.com/mattpocock/skills"
+REPO_SAMBER="https://github.com/samber/cc-skills-golang"
+REPO_NETRESEARCH="https://github.com/netresearch/go-development-skill"
+REPO_JETBRAINS="https://github.com/JetBrains/go-modern-guidelines"
 
 # anthropics/skills — mcp-builder is the headline match (this entire repo IS
 # an MCP server). skill-creator covers future custom skills for project conventions.
@@ -58,18 +64,68 @@ MATTPOCOCK_SKILLS=(
   improve-codebase-architecture
 )
 
+# samber/cc-skills-golang — 42-skill catalogue; cherry-picked the subset that
+# matches this project (single-binary MCP server, goroutines for poll +
+# approvalLoop, ctx.Done() shutdown, error wrapping with %w, secret handling
+# via .env, internal/ layout, BotAPI/Notifier interfaces). Dropped:
+# cli/cobra/viper, database, graphql, grpc, samber libs, DI frameworks,
+# swagger, benchmark, perf — none of which we use.
+SAMBER_SKILLS=(
+  golang-concurrency
+  golang-context
+  golang-error-handling
+  golang-testing
+  golang-stretchr-testify
+  golang-code-style
+  golang-naming
+  golang-modernize
+  golang-structs-interfaces
+  golang-safety
+  golang-security
+  golang-troubleshooting
+  golang-lint
+  golang-project-layout
+  golang-observability
+  golang-documentation
+)
+
+# netresearch/go-development-skill — single bundled skill: enterprise Go
+# patterns (resilient services, testing, linting, API design, fuzzing,
+# modernization). Broader than samber's narrow-topic skills; pairs well.
+NETRESEARCH_SKILLS=(
+  go-development
+)
+
+# JetBrains/go-modern-guidelines — auto-detects go.mod version (we're on
+# 1.26) and applies modern idioms up to that release. Authoritative on
+# slices/maps stdlib, range-over-func, generics, etc.
+JETBRAINS_SKILLS=(
+  use-modern-go
+)
+
+# --- Notes on what we DIDN'T add ---
+# Telegram-specific: nothing useful. AlexSKuznetsov/claude-skill-telegram is
+# a reminders skill for telegram-bot users, not a guide for bot authors.
+# RichardAtCT, linuz90, seedprod, gmotyl — all apps, not authoring guides.
+# MCP-protocol-specific: anthropics/mcp-builder (above) is the only proper
+# match. microsoft/skills, intellectronica/skillz, etc. are MCP servers that
+# load skills, not skills for building MCP servers.
+
 DRY_RUN=0
 TARGETS=(
   "anthropics"
   "superpowers"
   "mattpocock"
+  "samber"
+  "netresearch"
+  "jetbrains"
 )
 SELECTED=()
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run|-n) DRY_RUN=1 ;;
-    anthropics|superpowers|mattpocock)
+    anthropics|superpowers|mattpocock|samber|netresearch|jetbrains)
       SELECTED+=("$arg")
       ;;
     -h|--help)
@@ -119,6 +175,9 @@ for t in "${TARGETS[@]}"; do
     anthropics)  install_set "$REPO_ANTHROPICS"  "${ANTHROPICS_SKILLS[@]}" ;;
     superpowers) install_set "$REPO_SUPERPOWERS" "${SUPERPOWERS_SKILLS[@]}" ;;
     mattpocock)  install_set "$REPO_MATTPOCOCK"  "${MATTPOCOCK_SKILLS[@]}" ;;
+    samber)      install_set "$REPO_SAMBER"      "${SAMBER_SKILLS[@]}" ;;
+    netresearch) install_set "$REPO_NETRESEARCH" "${NETRESEARCH_SKILLS[@]}" ;;
+    jetbrains)   install_set "$REPO_JETBRAINS"   "${JETBRAINS_SKILLS[@]}" ;;
   esac
 done
 
