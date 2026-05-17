@@ -86,6 +86,22 @@ func New(token string, store *access.Store, notifier Notifier) (*Bot, error) {
 	return &Bot{api: api, token: token, store: store, notifier: notifier}, nil
 }
 
+// NewFromAPI builds a Bot with a custom telego API server URL (for tests).
+// Production code uses New(); tests use this to point at httptest.
+func NewFromAPI(token string, store *access.Store, notifier Notifier, apiURL string) (*Bot, error) {
+	opts := []telego.BotOption{telego.WithDefaultDebugLogger()}
+	if apiURL != "" {
+		opts = append(opts, telego.WithAPIServer(apiURL))
+	}
+
+	api, err := telego.NewBot(token, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Bot{api: api, token: token, store: store, notifier: notifier}, nil
+}
+
 // Poll runs the long-poller until ctx is cancelled or an unrecoverable error
 // occurs. Returns when the handler stops.
 func (b *Bot) Poll(ctx context.Context) error {

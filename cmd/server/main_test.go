@@ -212,3 +212,23 @@ func startSleeper(t *testing.T) int {
 
 	return p.Pid
 }
+
+func TestSelectModeNoArgUnsetEnv(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON", "")
+	assert.Equal(t, modeEmbedded, selectMode([]string{"telegram-mcp"}))
+}
+
+func TestSelectModeNoArgWithEnv(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON", "1")
+	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp"}))
+}
+
+func TestSelectModeDaemonSubcommand(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON", "")
+	assert.Equal(t, modeDaemon, selectMode([]string{"telegram-mcp", "daemon"}))
+}
+
+func TestSelectModeShimSubcommand(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON", "")
+	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp", "shim"}))
+}

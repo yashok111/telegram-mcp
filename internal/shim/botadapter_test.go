@@ -1,0 +1,113 @@
+package shim
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+
+	"github.com/yakov/telegram-mcp/internal/bot"
+	"github.com/yakov/telegram-mcp/internal/ipc"
+)
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
+
+type fakeClient struct {
+	calledMethod string
+	calledParams json.RawMessage
+	returnResult json.RawMessage
+	returnErr    error
+}
+
+func (f *fakeClient) Call(_ context.Context, method string, params, result any) error {
+	f.calledMethod = method
+	f.calledParams, _ = json.Marshal(params)
+
+	if f.returnErr != nil {
+		return f.returnErr
+	}
+
+	if result != nil && len(f.returnResult) > 0 {
+		return json.Unmarshal(f.returnResult, result)
+	}
+
+	return nil
+}
+
+func (f *fakeClient) Notify(string, any) error           { return nil }
+func (f *fakeClient) OnNotify(string, ipc.NotifyHandler) {}
+func (f *fakeClient) Close() error                       { return nil }
+func (f *fakeClient) Done() <-chan struct{}              { return nil }
+
+func TestBotAdapterSendMessage(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":99}`)}
+	a := &BotAdapter{Client: fc}
+
+	id, err := a.SendMessage(context.Background(), "123", "hi", bot.SendOpts{ReplyTo: 4, ParseMode: "MarkdownV2"})
+	require.NoError(t, err)
+	assert.Equal(t, 99, id)
+	assert.Equal(t, "bot.sendMessage", fc.calledMethod)
+	assert.JSONEq(t, `{"chat_id":"123","text":"hi","reply_to":4,"parse_mode":"MarkdownV2"}`, string(fc.calledParams))
+}
+
+func TestBotAdapterSendMessageNotAllowlisted(t *testing.T) {
+	data, _ := json.Marshal(map[string]string{"chat_id": "9"})
+	fc := &fakeClient{returnErr: &ipc.Error{Code: ipc.CodeNotAllowlisted, Message: "no", Data: data}}
+	a := &BotAdapter{Client: fc}
+
+	_, err := a.SendMessage(context.Background(), "9", "x", bot.SendOpts{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotAllowlisted)
+}
+
+func TestBotAdapterReact(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{}`)}
+	a := &BotAdapter{Client: fc}
+
+	require.NoError(t, a.React(context.Background(), "1", 5, "👍"))
+	assert.Equal(t, "bot.react", fc.calledMethod)
+}
+
+func TestBotAdapterDownloadFile(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{"path":"/tmp/x.bin"}`)}
+	a := &BotAdapter{Client: fc}
+
+	p, err := a.DownloadFile(context.Background(), "F123")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/x.bin", p)
+}
+
+func TestBotAdapterBroadcastPermissionRequest(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{}`)}
+	a := &BotAdapter{Client: fc, PermDetails: func(string) (string, string) { return "do the thing", "tool args here" }}
+
+	a.BroadcastPermissionRequest(context.Background(), "ababc", "Bash")
+	assert.Equal(t, "bot.broadcastPermissionRequest", fc.calledMethod)
+	assert.Contains(t, string(fc.calledParams), `"request_id":"ababc"`)
+	assert.Contains(t, string(fc.calledParams), `"description":"do the thing"`)
+	assert.Contains(t, string(fc.calledParams), `"input_preview":"tool args here"`)
+}
+
+func TestBotAdapterEditMessage(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":12}`)}
+	a := &BotAdapter{Client: fc}
+
+	id, err := a.EditMessage(context.Background(), "1", 12, "new", "MarkdownV2")
+	require.NoError(t, err)
+	assert.Equal(t, 12, id)
+}
+
+func TestBotAdapterSendFileAttachmentTooLarge(t *testing.T) {
+	data, _ := json.Marshal(map[string]any{"path": "/big.bin", "size": 99999999, "limit": 50000000})
+	fc := &fakeClient{returnErr: &ipc.Error{Code: ipc.CodeAttachmentTooLarge, Message: "too large", Data: data}}
+	a := &BotAdapter{Client: fc}
+
+	_, err := a.SendFile(context.Background(), "1", "/big.bin", bot.SendOpts{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAttachmentTooLarge)
+}

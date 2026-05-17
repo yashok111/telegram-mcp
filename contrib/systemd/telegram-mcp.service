@@ -6,7 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/projects/telegram-mcp/bin/telegram-mcp
+ExecStart=%h/projects/telegram-mcp/bin/telegram-mcp daemon
+Environment=TELEGRAM_STATE_DIR=%h/.claude/channels/telegram
 Restart=on-failure
 RestartSec=5s
 

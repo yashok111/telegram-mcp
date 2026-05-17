@@ -122,16 +122,33 @@ linters:
       - linters: [gosec]
         text: 'G304|G306|G120'
         path: _test\.go
-      # main.go / bot.go read files whose paths are derived from configured
-      # state dirs, not user input. G304 here is noise.
+      # main.go / bot.go / daemon read files whose paths are derived from
+      # configured state dirs, not user input. G304 here is noise.
       - linters: [gosec]
         text: G304
-        path: 'cmd/server/main\.go|internal/bot/bot\.go'
+        path: 'cmd/server/main\.go|internal/bot/bot\.go|internal/daemon/daemon\.go|internal/daemon/log_redirect\.go'
+      # spawn.go execs /proc/self/exe (or operator-configured BinaryPath); G204
+      # complains about subprocess-with-variable but the binary is trusted.
+      - linters: [gosec]
+        text: G204
+        path: 'internal/shim/spawn\.go'
       # Tests freely use type assertions on known interface values
       # (`b.notifier.(*noopNotifier)`); the comma-ok form is just noise.
       - linters: [errcheck]
         text: 'type assertion'
         path: _test\.go
+      # Test helpers call .Close() on connections at shutdown — errors there are
+      # informational, not actionable. The same applies to the IPC test scaffolding.
+      - linters: [errcheck]
+        text: '\.Close'
+        path: _test\.go
+      # Unix-socket Dial/Listen on file paths inside an internal IPC package
+      # never need a Resolver lookup; noctx's preferred APIs add ceremony with
+      # no benefit. Production code already plumbs ctx into the surrounding
+      # call sites — the missing ctx is on the local FD operation only.
+      - linters: [noctx]
+        text: 'net\.(Dial|Listen|DialTimeout)'
+        path: 'internal/ipc/|internal/shim/spawn\.go|_test\.go'
 
   settings:
     dupl:
