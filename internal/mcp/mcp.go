@@ -6,6 +6,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -101,6 +102,12 @@ func (s *Server) DeliverInbound(content string, meta map[string]string) {
 	for k, v := range meta {
 		metaAny[k] = v
 	}
+
+	slog.Info("delivering inbound to Claude",
+		"content_len", len(content),
+		"chat_id", meta["chat_id"],
+		"user", meta["user"],
+	)
 
 	s.srv.SendNotificationToAllClients("notifications/claude/channel", map[string]any{
 		"content": content,
