@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Pre-commit gate: gofmt → go vet → golangci-lint → go test (fast, no -race).
+# Run only on staged .go files; if none are staged, exit clean. Re-runs the
+# full lint/test on the whole module — partial linting hides cross-file regressions.
+
+set -euo pipefail
+
+# Collect staged .go files (added, copied, modified — not deleted).
+mapfile -t go_files < <(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+
+if [[ ${#go_files[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "==> gofmt"
+unformatted=$(gofmt -l "${go_files[@]}")
+if [[ -n "$unformatted" ]]; then
+  echo "the following files are not gofmt-clean:" >&2
+  echo "$unformatted" >&2
+  echo "run: gofmt -w ${unformatted//$'\n'/ }" >&2
+  exit 1
+fi
+
+echo "==> go vet"
+go vet ./...
+
+if command -v golangci-lint >/dev/null 2>&1; then
+  echo "==> golangci-lint"
+  golangci-lint run ./...
+else
+  echo "==> golangci-lint (skipped — binary not on PATH)"
+fi
+
+echo "==> go test"
+go test ./...
+
+echo "pre-commit: ok"

@@ -1,0 +1,32 @@
+[Unit]
+Description=telegram-mcp — Telegram channel for Claude Code (Go)
+Documentation=https://github.com/yashok111/telegram-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/projects/telegram-mcp/bin/telegram-mcp
+Restart=on-failure
+RestartSec=5s
+
+# Hardening — the bot only needs its state dir and outbound HTTPS.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.claude/channels/telegram
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# When the unit is normally only useful while a Claude Code session is alive,
+# but pairing/permission flows can fire outside that. Keep it running and let
+# the bot itself decide whether to act on inbound traffic via dmPolicy.
+
+[Install]
+WantedBy=default.target

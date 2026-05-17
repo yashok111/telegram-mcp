@@ -1,45 +1,104 @@
 # telegram-mcp
 
-Local Go port of the Claude Code Telegram channel plugin. Single binary, no node/bun, dies with parent via `PR_SET_PDEATHSIG`.
+Local Go port of the Claude Code Telegram channel plugin. Single binary, no
+node/bun, dies with parent via `PR_SET_PDEATHSIG`. Drop-in compatible with the
+TS plugin's `~/.claude/channels/telegram/` state directory — existing
+`access.json` pairing carries over.
 
-## State
+## Why
 
-Compatible with the TS plugin: reads `~/.claude/channels/telegram/{access.json,.env,approved/,inbox/}` unchanged.
+The original `external_plugins/telegram` plugin ships as a bun-runtime
+`server.ts`. Its grandchild process could survive past its parent and busy-loop
+at 100% CPU under certain restart conditions. Go port removes the runtime,
+binds death to the parent at the kernel level, and adds a comm-checked stale
+PID claim so we never SIGTERM unrelated processes.
 
 ## Build
 
-```
-make build
+```bash
+make build         # → bin/telegram-mcp
+make check         # lint + race-enabled test + build
 ```
 
-## Register
+Requires Go 1.26 and (for `make lint`) golangci-lint v2.12+ built with Go 1.26:
 
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 ```
+
+## Register with Claude Code
+
+```bash
 claude mcp add telegram -s user -- $(pwd)/bin/telegram-mcp
 ```
 
-Then disable the marketplace plugin so only one poller is alive:
+If the marketplace bun version is enabled, disable it first or you'll have two
+pollers fighting over the same Telegram token (409 Conflict storm):
 
-```
+```bash
 claude plugin disable telegram
 ```
 
-## Layout
+Restart the Claude Code session after registering.
 
-- `cmd/server/main.go` — entry, lifecycle, PID file, PDEATHSIG, env load
-- `internal/access/` — access.json schema + load/save + pairing codes
-- `internal/bot/` — telego long-polling + gate + inbound handlers
-- `internal/mcp/` — stdio MCP server, tool registry, permission flow
-- `internal/chunk/` — message splitter
+## Standalone mode
+
+If you want the bot to keep accepting DMs without an active Claude Code
+session, see `contrib/systemd/README.md` for the `--user` unit. Pick **one**
+mode — the bot token can have exactly one poller.
+
+## Config
+
+State lives in `~/.claude/channels/telegram/` (or `TELEGRAM_STATE_DIR`):
+
+- `.env` — `TELEGRAM_BOT_TOKEN=...` (chmod 0600, owner-only)
+- `access.json` — allowlist, pairing state, group policy, UX prefs
+- `bot.pid` — current poller PID
+- `inbox/` — downloaded attachments + photos
+- `approved/` — pairing-confirmation drop-zone from `/telegram:access` skill
+
+Managed by the `/telegram:access` skill — do not edit `access.json` by hand
+during a live session; the bot reads it on every gate decision.
+
+`TELEGRAM_ACCESS_MODE=static` snapshots `access.json` at boot and refuses to
+re-read or write it. Useful for read-only filesystems or when you want pairing
+locked at deploy time.
+
+## Skills
+
+`bash scripts/install-skills.sh` installs 37 curated skills into
+`.agents/skills/` (gitignored, lockfile committed). 18 of them are Go-specific
+(samber, JetBrains, netresearch); the rest cover dev workflow (obra,
+mattpocock) and MCP authoring (anthropics).
+
+## Tooling
+
+```bash
+make lint          # golangci-lint v2 — 49 enabled linters, 0 expected findings
+make lint-fix      # auto-fix (modernize, gofumpt, intrange, etc.)
+make test          # go test -race ./...
+make check         # lint + test + build
+```
+
+Install the pre-commit hook to gate every commit on the same checks:
+
+```bash
+bash scripts/install-hooks.sh
+```
 
 ## Status
 
-Skeleton. Most handlers have `TODO` markers — fill iteratively:
+- 182 tests passing under `-race`
+- ~84% LOC coverage (full report: `make test` then `go tool cover -html=...`)
+- `go vet` clean, `golangci-lint` clean
+- goleak-verified in every package
 
-1. `bot.SendMessage` / `SendPhoto` / `SendDocument` / `EditMessage` / `React` / `DownloadFile`
-2. `mcp.handleReply` — wire chunk.Split + bot send loop
-3. `mcp` notifications — `notifications/claude/channel{,/permission}` (experimental, mcp-go needs custom handler)
-4. `bot.onPhoto` / `onDocument` — file_id meta + deferred download
-5. `bot.onPermissionCallback` — inline-keyboard outcomes
-6. `bot.isMentioned` — entity scan + extra patterns
-7. Permission-reply regex intercept in `onText`
+## Security
+
+- Token lives only in `~/.claude/channels/telegram/.env` (chmod 0600). Never
+  logged, never sent over the MCP channel — the `reply` tool refuses to send
+  files from inside the state dir.
+- Permission-reply intercept (`yes xxxxx` / `no xxxxx`) is gate-authenticated
+  before reaching Claude Code — non-allowlisted senders are dropped first.
+- Group commands are silently dropped, never echoed back, so the bot's
+  presence in unapproved chats is not confirmed.
