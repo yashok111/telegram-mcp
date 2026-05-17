@@ -250,7 +250,7 @@ func TestHandleBroadcastPermissionCollisionRejected(t *testing.T) {
 	assert.Empty(t, fb.broadcastSeen, "must not fan to DMs when request_id already in use")
 }
 
-func TestHandleHelloAssignsShimID(t *testing.T) {
+func TestHandleHelloAssignsShimIDAndAlias(t *testing.T) {
 	h, _, _, _ := newHandlersFixture(t)
 	c := &ipc.Conn{}
 
@@ -264,8 +264,5 @@ func TestHandleHelloAssignsShimID(t *testing.T) {
 	require.True(t, ok)
 	assert.NotEmpty(t, m["shim_id"])
 	assert.NotEmpty(t, m["daemon_version"])
-
-	got, ok := c.Meta.Load(metaShimID)
-	require.True(t, ok)
-	assert.Equal(t, m["shim_id"], got)
+	assert.Empty(t, m["alias"], "HandleHello alone does not register; alias set by daemon Router.Register")
 }

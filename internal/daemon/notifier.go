@@ -19,19 +19,23 @@ func NewNotifier(r *Router) *Notifier { return &Notifier{router: r} }
 func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 	chatID := meta["chat_id"]
 
-	target, ok := n.router.RouteInbound(chatID)
-	if !ok {
+	targets := n.router.RouteInboundMulti(chatID, content)
+	if len(targets) == 0 {
 		slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "user", meta["user"])
 		return
 	}
 
-	slog.Info("DeliverInbound dispatch", "chat_id", chatID, "shim_id", target.ID, "content_len", len(content), "user", meta["user"])
-
-	if err := target.Notify(ipc.NotifyInbound, map[string]any{
+	params := map[string]any{
 		"content": content,
 		"meta":    meta,
-	}); err != nil {
-		slog.Error("inbound notify failed", "shim_id", target.ID, "chat_id", chatID, "err", err)
+	}
+
+	for _, t := range targets {
+		slog.Info("DeliverInbound dispatch", "chat_id", chatID, "shim_id", t.ID, "alias", t.Alias, "content_len", len(content), "user", meta["user"], "fanout", len(targets))
+
+		if err := t.Notify(ipc.NotifyInbound, params); err != nil {
+			slog.Error("inbound notify failed", "shim_id", t.ID, "chat_id", chatID, "err", err)
+		}
 	}
 }
 

@@ -58,6 +58,28 @@ func TestShimSendsHelloOnWire(t *testing.T) {
 	assert.Equal(t, "abc", id)
 }
 
+func TestShimWireCapturesAlias(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abcd","daemon_version":"test","alias":"s7"}`)}
+	sh := &Shim{
+		Client:      fc,
+		MCP:         mcpSrv,
+		Store:       store,
+		WireContext: context.Background,
+	}
+
+	require.NoError(t, sh.Wire())
+
+	alias, ok := sh.ShimAlias()
+	require.True(t, ok)
+	assert.Equal(t, "s7", alias)
+}
+
 func TestShimRunStopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	store := access.NewStore(dir, false)

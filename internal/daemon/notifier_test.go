@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -99,4 +100,68 @@ func TestNotifierResolveUnknownIsNoop(_ *testing.T) {
 	r := NewRouter()
 	n := NewNotifier(r)
 	n.ResolvePermission("nope", "deny") // must not panic
+}
+
+func TestDeliverInboundDispatchesToEveryTargetOnBroadcast(t *testing.T) {
+	r := NewRouter()
+	n := NewNotifier(r)
+
+	var (
+		mu        sync.Mutex
+		delivered = map[string]int{}
+	)
+
+	recordTo := func(id string) func(string, any) error {
+		return func(_ string, _ any) error {
+			mu.Lock()
+			delivered[id]++
+			mu.Unlock()
+
+			return nil
+		}
+	}
+
+	r.Register(&Shim{ID: "a", Notify: recordTo("a")})
+	r.Register(&Shim{ID: "b", Notify: recordTo("b")})
+	r.Register(&Shim{ID: "c", Notify: recordTo("c")})
+
+	n.DeliverInbound("@all hello", map[string]string{"chat_id": "chat-1"})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, delivered["a"])
+	assert.Equal(t, 1, delivered["b"])
+	assert.Equal(t, 1, delivered["c"])
+}
+
+func TestDeliverInboundDispatchesToMentionTargetOnly(t *testing.T) {
+	r := NewRouter()
+	n := NewNotifier(r)
+
+	var (
+		mu        sync.Mutex
+		delivered = map[string]int{}
+	)
+
+	recordTo := func(id string) func(string, any) error {
+		return func(_ string, _ any) error {
+			mu.Lock()
+			delivered[id]++
+			mu.Unlock()
+
+			return nil
+		}
+	}
+
+	r.Register(&Shim{ID: "a", Notify: recordTo("a")}) // s1
+	r.Register(&Shim{ID: "b", Notify: recordTo("b")}) // s2
+
+	n.DeliverInbound("@s2 ping", map[string]string{"chat_id": "chat-1"})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 0, delivered["a"])
+	assert.Equal(t, 1, delivered["b"])
 }

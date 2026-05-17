@@ -152,6 +152,7 @@ func newIntegration(t *testing.T) *integrationFixture {
 type helloResp struct {
 	ShimID        string `json:"shim_id"`
 	DaemonVersion string `json:"daemon_version"`
+	Alias         string `json:"alias"`
 }
 
 func connectShim(t *testing.T, sock string) (*ipc.Client, string) {
@@ -162,6 +163,7 @@ func connectShim(t *testing.T, sock string) (*ipc.Client, string) {
 
 	var hello helloResp
 	require.NoError(t, c.Call(t.Context(), ipc.MethodHello, map[string]any{}, &hello))
+	require.NotEmpty(t, hello.Alias, "daemon must return alias in hello response")
 
 	return c, hello.ShimID
 }
@@ -198,6 +200,156 @@ func TestIntegrationPerChatAffinity(t *testing.T) {
 	owner, ok := f.router.RouteInbound("123")
 	require.True(t, ok)
 	assert.Equal(t, idA, owner.ID, "chat 123 must route to shim A which last replied")
+}
+
+func TestIntegrationHelloReturnsAlias(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, idA := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, idB := connectShim(t, f.sock)
+	defer cB.Close()
+
+	require.NotEqual(t, idA, idB)
+
+	shim, ok := f.router.ResolveAlias("s1")
+	require.True(t, ok)
+	assert.NotEmpty(t, shim.Alias)
+
+	shim2, ok := f.router.ResolveAlias("s2")
+	require.True(t, ok)
+	assert.NotEqual(t, shim.ID, shim2.ID)
+}
+
+func TestIntegrationMentionDispatchHitsTarget(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, idA := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, idB := connectShim(t, f.sock)
+	defer cB.Close()
+
+	var (
+		mu   sync.Mutex
+		gotA []string
+		gotB []string
+	)
+
+	cA.OnNotify(ipc.NotifyInbound, func(_ context.Context, params json.RawMessage) {
+		var p struct {
+			Content string `json:"content"`
+		}
+
+		_ = json.Unmarshal(params, &p)
+
+		mu.Lock()
+
+		gotA = append(gotA, p.Content)
+		mu.Unlock()
+	})
+	cB.OnNotify(ipc.NotifyInbound, func(_ context.Context, params json.RawMessage) {
+		var p struct {
+			Content string `json:"content"`
+		}
+
+		_ = json.Unmarshal(params, &p)
+
+		mu.Lock()
+
+		gotB = append(gotB, p.Content)
+		mu.Unlock()
+	})
+
+	target, ok := f.router.ResolveAlias("s2")
+	require.True(t, ok)
+
+	n := NewNotifier(f.router)
+	n.DeliverInbound("@s2 hello", map[string]string{"chat_id": "123", "user": "tester"})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if target.ID == idA {
+			return len(gotA) == 1 && len(gotB) == 0
+		}
+
+		return len(gotB) == 1 && len(gotA) == 0
+	}, time.Second, 20*time.Millisecond, "only @s2 target should receive")
+
+	_ = idB
+}
+
+func TestIntegrationAtAllBroadcasts(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, _ := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, _ := connectShim(t, f.sock)
+	defer cB.Close()
+
+	var (
+		mu   sync.Mutex
+		gotA int
+		gotB int
+	)
+
+	cA.OnNotify(ipc.NotifyInbound, func(_ context.Context, _ json.RawMessage) {
+		mu.Lock()
+		gotA++
+		mu.Unlock()
+	})
+	cB.OnNotify(ipc.NotifyInbound, func(_ context.Context, _ json.RawMessage) {
+		mu.Lock()
+		gotB++
+		mu.Unlock()
+	})
+
+	n := NewNotifier(f.router)
+	n.DeliverInbound("@all status", map[string]string{"chat_id": "123", "user": "tester"})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return gotA == 1 && gotB == 1
+	}, time.Second, 20*time.Millisecond)
+}
+
+func TestIntegrationMentionDoesNotChangeOwnership(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, idA := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, _ := connectShim(t, f.sock)
+	defer cB.Close()
+
+	var sendRes struct {
+		MessageID int `json:"message_id"`
+	}
+	require.NoError(t, cA.Call(t.Context(), ipc.MethodBotSendMessage, map[string]any{
+		"chat_id": "123", "text": "hi",
+	}, &sendRes))
+
+	require.Eventually(t, func() bool {
+		owner, ok := f.router.RouteInbound("123")
+		return ok && owner.ID == idA
+	}, time.Second, 20*time.Millisecond, "shim A must own chat 123 after its first outbound")
+
+	n := NewNotifier(f.router)
+	n.DeliverInbound("@s2 ping", map[string]string{"chat_id": "123", "user": "tester"})
+
+	owner, ok := f.router.RouteInbound("123")
+	require.True(t, ok)
+	assert.Equal(t, idA, owner.ID, "mention must not rewrite chatOwners")
 }
 
 func TestIntegrationGateBlocksUnknownChat(t *testing.T) {
