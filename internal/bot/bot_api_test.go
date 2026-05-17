@@ -1,0 +1,755 @@
+package bot
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mymmrac/telego"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/yakov/telegram-mcp/internal/access"
+)
+
+// ===== mock Telegram Bot API =====
+
+type apiCall struct {
+	method string
+	params map[string]any
+}
+
+type mockAPI struct {
+	t  *testing.T
+	mu sync.Mutex
+
+	server *httptest.Server
+	calls  []apiCall
+
+	// nextMessageID is incremented for every Send*/Edit* response.
+	nextMessageID int
+
+	// errFor lets a specific method return an API error for one call.
+	errFor map[string]string
+
+	// onCall fires after a method is recorded — handy for tests that want
+	// to assert payload contents inline.
+	onCall func(apiCall)
+}
+
+func newMockAPI(t *testing.T) *mockAPI {
+	t.Helper()
+	m := &mockAPI{t: t, nextMessageID: 0, errFor: map[string]string{}}
+	m.server = httptest.NewServer(http.HandlerFunc(m.handle))
+	t.Cleanup(m.server.Close)
+	return m
+}
+
+func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
+	// Path format: /bot<TOKEN>/<method>
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 2 {
+		http.Error(w, "bad path", 400)
+		return
+	}
+	method := parts[len(parts)-1]
+
+	params := map[string]any{}
+	contentType := r.Header.Get("Content-Type")
+	switch {
+	case strings.HasPrefix(contentType, "multipart/form-data"):
+		if err := r.ParseMultipartForm(10 << 20); err == nil && r.MultipartForm != nil {
+			for k, v := range r.MultipartForm.Value {
+				params[k] = singleOrList(v)
+			}
+			for k := range r.MultipartForm.File {
+				params[k+"_file"] = true
+			}
+		}
+	default:
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		if len(body) > 0 {
+			_ = json.Unmarshal(body, &params)
+		}
+	}
+
+	m.mu.Lock()
+	m.calls = append(m.calls, apiCall{method, params})
+	cb := m.onCall
+	errMsg, hasErr := m.errFor[method]
+	m.mu.Unlock()
+
+	if cb != nil {
+		cb(apiCall{method, params})
+	}
+
+	if hasErr {
+		writeJSON(w, map[string]any{"ok": false, "error_code": 400, "description": errMsg})
+		return
+	}
+
+	switch method {
+	case "getMe":
+		writeJSON(w, ok(map[string]any{"id": 1, "is_bot": true, "username": "test_bot", "first_name": "Test"}))
+	case "sendMessage", "sendPhoto", "sendDocument":
+		m.mu.Lock()
+		m.nextMessageID++
+		id := m.nextMessageID
+		m.mu.Unlock()
+		writeJSON(w, ok(map[string]any{
+			"message_id": id,
+			"date":       time.Now().Unix(),
+			"chat":       map[string]any{"id": 1, "type": "private"},
+		}))
+	case "editMessageText":
+		mid := 0
+		switch v := params["message_id"].(type) {
+		case float64:
+			mid = int(v)
+		case string:
+			n := 0
+			for i := 0; i < len(v); i++ {
+				c := v[i]
+				if c < '0' || c > '9' {
+					n = 0
+					break
+				}
+				n = n*10 + int(c-'0')
+			}
+			mid = n
+		}
+		writeJSON(w, ok(map[string]any{
+			"message_id": mid,
+			"date":       time.Now().Unix(),
+			"chat":       map[string]any{"id": 1, "type": "private"},
+		}))
+	case "setMessageReaction", "answerCallbackQuery", "sendChatAction", "setMyCommands":
+		writeJSON(w, ok(true))
+	case "getFile":
+		writeJSON(w, ok(map[string]any{
+			"file_id":        params["file_id"],
+			"file_unique_id": "uniq",
+			"file_path":      "photos/file_1.jpg",
+			"file_size":      100,
+		}))
+	default:
+		http.Error(w, "unknown method: "+method, 404)
+	}
+}
+
+func ok(result any) map[string]any { return map[string]any{"ok": true, "result": result} }
+
+func singleOrList(v []string) any {
+	if len(v) == 1 {
+		return v[0]
+	}
+	return v
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (m *mockAPI) recordedCalls(method string) []apiCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []apiCall
+	for _, c := range m.calls {
+		if c.method == method {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ===== test bot factory =====
+
+func newTestBot(t *testing.T, st access.State) (*Bot, *mockAPI, string) {
+	t.Helper()
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Save(st))
+
+	api := newMockAPI(t)
+	tgBot, err := telego.NewBot("1234567890:AAH00000000000000000000000000000000",
+		telego.WithAPIServer(api.server.URL),
+		telego.WithDiscardLogger(),
+	)
+	require.NoError(t, err)
+
+	b := &Bot{
+		api:      tgBot,
+		token:    "1234567890:AAH00000000000000000000000000000000",
+		store:    store,
+		notifier: &noopNotifier{},
+		username: "test_bot",
+	}
+	return b, api, dir
+}
+
+func payloadString(params map[string]any) string {
+	b, _ := json.Marshal(params)
+	return string(b)
+}
+
+type noopNotifier struct {
+	mu        sync.Mutex
+	delivered []deliveredCall
+	resolved  []resolvedCall
+}
+
+type deliveredCall struct {
+	content string
+	meta    map[string]string
+}
+
+type resolvedCall struct {
+	requestID, behavior string
+}
+
+func (n *noopNotifier) DeliverInbound(content string, meta map[string]string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.delivered = append(n.delivered, deliveredCall{content, meta})
+}
+
+func (n *noopNotifier) LookupPermission(requestID string) (PermissionDetails, bool) {
+	if requestID == "abcde" {
+		return PermissionDetails{ToolName: "Bash", Description: "d", InputPreview: "{}"}, true
+	}
+	return PermissionDetails{}, false
+}
+
+func (n *noopNotifier) ResolvePermission(requestID, behavior string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.resolved = append(n.resolved, resolvedCall{requestID, behavior})
+}
+
+// ===== outbound API methods =====
+
+func TestSendMessage_simple(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	id, err := b.SendMessage(t.Context(), "42", "hello", SendOpts{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, id)
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "hello", calls[0].params["text"])
+}
+
+func TestSendMessage_withReplyToAndParseMode(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	_, err := b.SendMessage(t.Context(), "42", "*x*", SendOpts{ReplyTo: 5, ParseMode: "MarkdownV2"})
+	require.NoError(t, err)
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
+	assert.Contains(t, payloadString(calls[0].params), `"message_id":5`)
+}
+
+func TestSendMessage_invalidChatID_errors(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	_, err := b.SendMessage(t.Context(), "not-a-number", "x", SendOpts{})
+	assert.Error(t, err)
+}
+
+func TestSendMessage_apiError_propagates(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["sendMessage"] = "Forbidden: blocked"
+	_, err := b.SendMessage(t.Context(), "42", "x", SendOpts{})
+	assert.Error(t, err)
+}
+
+func TestSendFile_photoExtensionRoutesToSendPhoto(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	p := filepath.Join(dir, "pic.png")
+	require.NoError(t, os.WriteFile(p, []byte("img"), 0o644))
+
+	id, err := b.SendFile(t.Context(), "42", p, SendOpts{ReplyTo: 3})
+	require.NoError(t, err)
+	assert.Greater(t, id, 0)
+	assert.NotEmpty(t, api.recordedCalls("sendPhoto"))
+	assert.Empty(t, api.recordedCalls("sendDocument"))
+}
+
+func TestSendFile_documentExtensionRoutesToSendDocument(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	p := filepath.Join(dir, "data.bin")
+	require.NoError(t, os.WriteFile(p, []byte("bin"), 0o644))
+
+	_, err := b.SendFile(t.Context(), "42", p, SendOpts{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, api.recordedCalls("sendDocument"))
+}
+
+func TestSendFile_missingFile_errors(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	_, err := b.SendFile(t.Context(), "42", "/no/such/path.png", SendOpts{})
+	assert.Error(t, err)
+}
+
+func TestSendFile_invalidChatID(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	_, err := b.SendFile(t.Context(), "bad", "/etc/hostname", SendOpts{})
+	assert.Error(t, err)
+}
+
+func TestEditMessage(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	id, err := b.EditMessage(t.Context(), "42", 7, "new", "MarkdownV2")
+	require.NoError(t, err)
+	assert.Equal(t, 7, id)
+	assert.NotEmpty(t, api.recordedCalls("editMessageText"))
+}
+
+func TestEditMessage_invalidChatID(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	_, err := b.EditMessage(t.Context(), "bad", 1, "x", "")
+	assert.Error(t, err)
+}
+
+func TestEditMessage_apiError(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["editMessageText"] = "message can't be edited"
+	_, err := b.EditMessage(t.Context(), "42", 1, "x", "")
+	assert.Error(t, err)
+}
+
+func TestReact(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	require.NoError(t, b.React(t.Context(), "42", 7, "👍"))
+	calls := api.recordedCalls("setMessageReaction")
+	require.Len(t, calls, 1)
+	assert.Contains(t, payloadString(calls[0].params), "👍")
+}
+
+func TestReact_invalidChatID(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	assert.Error(t, b.React(t.Context(), "bad", 1, "👍"))
+}
+
+func TestDownloadFile_writesToInbox(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+
+	// Swap fileClient to point at our mock; restore after.
+	orig := fileClient
+	t.Cleanup(func() { fileClient = orig })
+	fileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("fakepicbytes"))
+	}))
+	t.Cleanup(fileServer.Close)
+	// Rewrite all outbound URLs from api.telegram.org/file/... → fileServer.URL/...
+	fileClient = &http.Client{Transport: &redirectTransport{base: fileServer.URL}, Timeout: 5 * time.Second}
+
+	path, err := b.DownloadFile(t.Context(), "AgADxyz")
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(path, filepath.Join(dir, "inbox")), "downloaded file lives under inbox/")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "fakepicbytes", string(data))
+	assert.NotEmpty(t, api.recordedCalls("getFile"))
+}
+
+func TestDownloadFile_getFileError(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["getFile"] = "file not found"
+	_, err := b.DownloadFile(t.Context(), "x")
+	assert.Error(t, err)
+}
+
+// redirectTransport rewrites the request URL to use base's host:port, ignoring
+// the original host. Used so fileClient.Do(req) hits our httptest server.
+type redirectTransport struct{ base string }
+
+func (r *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req2 := req.Clone(req.Context())
+	// req2.URL was https://api.telegram.org/file/bot<TOKEN>/<path>
+	// We want fileServer/<path-stripped> but content doesn't matter for the test.
+	parsed, _ := http.NewRequest(req.Method, r.base, nil)
+	req2.URL = parsed.URL
+	req2.Host = parsed.URL.Host
+	return http.DefaultTransport.RoundTrip(req2)
+}
+
+// ===== checkApprovals =====
+
+func TestCheckApprovals_sendsAndRemoves(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	approved := filepath.Join(dir, "approved")
+	require.NoError(t, os.MkdirAll(approved, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(approved, "42"), []byte{}, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(approved, "not-a-number"), []byte{}, 0o600))
+
+	b.checkApprovals(t.Context())
+	calls := api.recordedCalls("sendMessage")
+	assert.Len(t, calls, 1, "only the numeric file should produce a sendMessage")
+
+	// Both files removed (numeric on success, malformed proactively).
+	entries, _ := os.ReadDir(approved)
+	assert.Empty(t, entries)
+}
+
+func TestCheckApprovals_noDir_silentNoop(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	b.checkApprovals(t.Context()) // approved/ doesn't exist
+	assert.Empty(t, api.recordedCalls("sendMessage"))
+}
+
+// ===== BroadcastPermissionRequest =====
+
+func TestBroadcastPermissionRequest(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42", "99"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	b.BroadcastPermissionRequest(t.Context(), "abcde", "Bash")
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 2)
+	for _, c := range calls {
+		assert.Contains(t, c.params["text"], "Permission: Bash")
+		assert.Contains(t, payloadString(c.params), "perm:allow:abcde")
+	}
+}
+
+func TestBroadcastPermissionRequest_skipsBadChatID(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42", "not-a-number"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	b.BroadcastPermissionRequest(t.Context(), "abcde", "Bash")
+	assert.Len(t, api.recordedCalls("sendMessage"), 1)
+}
+
+// ===== handleCommand =====
+
+func TestHandleCommand_startInDM(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyPairing, AllowFrom: []string{}, Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/start"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "bridges Telegram")
+}
+
+func TestHandleCommand_helpInDM(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyPairing, AllowFrom: []string{}, Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/help"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "route to a paired")
+}
+
+func TestHandleCommand_statusPaired(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"1"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1, Username: "alice"}, Text: "/status"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "@alice")
+}
+
+func TestHandleCommand_statusPending(t *testing.T) {
+	now := time.Now().UnixMilli()
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyPairing, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{},
+		Pending: map[string]access.Pending{
+			"zzzaaa": {SenderID: "1", ChatID: "1", ExpiresAt: now + 60_000, Replies: 1},
+		},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/status"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "pair zzzaaa")
+}
+
+func TestHandleCommand_statusNotPaired(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyPairing, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/status"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "Not paired")
+}
+
+func TestHandleCommand_inGroup_silentDrop(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist,
+		Groups:   map[string]access.GroupPolicy{"-100": {}}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: -100, Type: "group"}, From: &telego.User{ID: 1}, Text: "/start"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	assert.Empty(t, api.recordedCalls("sendMessage"))
+}
+
+func TestHandleCommand_disabledPolicy_silent(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyDisabled, AllowFrom: []string{}, Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/start"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	assert.Empty(t, api.recordedCalls("sendMessage"))
+}
+
+func TestHandleCommand_allowlistNotIncluded_silent(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"99"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/start"}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+	assert.Empty(t, api.recordedCalls("sendMessage"))
+}
+
+// ===== handleMessage =====
+
+func TestHandleMessage_skipsCommandLines(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"1"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "/start arg"}
+	require.NoError(t, b.handleMessage(t.Context(), msg))
+	// onCommand will handle it; handleMessage early-returns.
+	assert.Empty(t, api.recordedCalls("sendMessage"))
+}
+
+func TestHandleMessage_gateDrop_silent(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 9, Type: "private"}, From: &telego.User{ID: 9}, Text: "hi"}
+	require.NoError(t, b.handleMessage(t.Context(), msg))
+	assert.Empty(t, api.recordedCalls("sendMessage"))
+}
+
+func TestHandleMessage_gatePair_sendsCode(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyPairing, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 7, Type: "private"}, From: &telego.User{ID: 7}, Text: "hi"}
+	require.NoError(t, b.handleMessage(t.Context(), msg))
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "/telegram:access pair")
+}
+
+func TestHandleMessage_deliver_callsNotifier(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"1"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	n := b.notifier.(*noopNotifier)
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, Text: "hi", Date: 1700000000}
+	require.NoError(t, b.handleMessage(t.Context(), msg))
+	require.Len(t, n.delivered, 1)
+	assert.Equal(t, "hi", n.delivered[0].content)
+	assert.Equal(t, "1", n.delivered[0].meta["chat_id"])
+}
+
+func TestHandleMessage_permissionReplyShortCircuits(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"1"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	n := b.notifier.(*noopNotifier)
+	msg := telego.Message{
+		Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1},
+		MessageID: 9, Text: "yes abcde",
+	}
+	require.NoError(t, b.handleMessage(t.Context(), msg))
+	require.Len(t, n.resolved, 1)
+	assert.Equal(t, "abcde", n.resolved[0].requestID)
+	assert.Equal(t, "allow", n.resolved[0].behavior)
+	assert.Empty(t, n.delivered, "should NOT relay the permission reply as chat")
+	assert.NotEmpty(t, api.recordedCalls("setMessageReaction"))
+}
+
+func TestHandleMessage_ackReactionFires(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"1"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+		AckReaction: "👀",
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 1, Type: "private"}, From: &telego.User{ID: 1}, MessageID: 9, Text: "hi"}
+	require.NoError(t, b.handleMessage(t.Context(), msg))
+	assert.NotEmpty(t, api.recordedCalls("setMessageReaction"))
+	assert.NotEmpty(t, api.recordedCalls("sendChatAction"))
+}
+
+// ===== handleCallback =====
+
+func TestHandleCallback_allow_resolvesAndEdits(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	n := b.notifier.(*noopNotifier)
+	q := telego.CallbackQuery{
+		ID:   "cq1",
+		From: telego.User{ID: 42},
+		Data: "perm:allow:abcde",
+		Message: &telego.Message{
+			MessageID: 1, Chat: telego.Chat{ID: 42, Type: "private"}, Text: "🔐 Permission: Bash",
+		},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+	require.Len(t, n.resolved, 1)
+	assert.Equal(t, "allow", n.resolved[0].behavior)
+	assert.NotEmpty(t, api.recordedCalls("answerCallbackQuery"))
+	assert.NotEmpty(t, api.recordedCalls("editMessageText"))
+}
+
+func TestHandleCallback_deny(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	n := b.notifier.(*noopNotifier)
+	q := telego.CallbackQuery{
+		ID: "cq2", From: telego.User{ID: 42},
+		Data:    "perm:deny:abcde",
+		Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42, Type: "private"}, Text: "x"},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+	require.Len(t, n.resolved, 1)
+	assert.Equal(t, "deny", n.resolved[0].behavior)
+}
+
+func TestHandleCallback_more_expandsDetails(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	q := telego.CallbackQuery{
+		ID: "cq3", From: telego.User{ID: 42},
+		Data:    "perm:more:abcde",
+		Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42, Type: "private"}, Text: "x"},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+	edits := api.recordedCalls("editMessageText")
+	require.Len(t, edits, 1)
+	assert.Contains(t, edits[0].params["text"], "tool_name: Bash")
+}
+
+func TestHandleCallback_more_missingDetails(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	q := telego.CallbackQuery{
+		ID: "cq4", From: telego.User{ID: 42},
+		Data:    "perm:more:zzzzz", // noopNotifier returns false for this id
+		Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42}, Text: "x"},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+	cb := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, cb, 1)
+	assert.Contains(t, cb[0].params["text"], "no longer available")
+}
+
+func TestHandleCallback_notAllowlisted(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	n := b.notifier.(*noopNotifier)
+	q := telego.CallbackQuery{
+		ID: "cqX", From: telego.User{ID: 42},
+		Data:    "perm:allow:abcde",
+		Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42}, Text: "x"},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+	assert.Empty(t, n.resolved)
+	cb := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, cb, 1)
+	assert.Contains(t, cb[0].params["text"], "Not authorized")
+}
+
+func TestHandleCallback_invalidPayload(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	q := telego.CallbackQuery{ID: "cqY", From: telego.User{ID: 42}, Data: "garbage"}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+	// Only answers the callback to dismiss the spinner.
+	assert.NotEmpty(t, api.recordedCalls("answerCallbackQuery"))
+}
+
+// ===== approvalLoop respects ctx (goleak coverage) =====
+
+func TestApprovalLoop_exitsOnCtxCancel(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		b.approvalLoop(ctx)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("approvalLoop did not exit after ctx cancel")
+	}
+}
+
+// New() and Stop() smoke
+func TestNew_invalidToken_errors(t *testing.T) {
+	_, err := New("", access.NewStore(t.TempDir(), false), &noopNotifier{})
+	assert.Error(t, err)
+}
+
+func TestStop_idempotent(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	// pollHandler is nil — Stop must be a safe no-op.
+	b.Stop()
+	b.Stop()
+}
+
+func TestPoll_exitsOnCtxCancel(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- b.Poll(ctx) }()
+	// Give Poll a beat to call getMe + register handlers, then cancel.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Poll did not exit after ctx cancel")
+	}
+}

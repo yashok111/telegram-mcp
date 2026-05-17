@@ -149,9 +149,15 @@ func (b *Bot) registerHandlers(bh *th.BotHandler) {
 	bh.HandleCallbackQuery(b.onCallback)
 }
 
-// onCommand routes /start, /help, /status. DM-only — group commands would
-// leak pairing codes and confirm bot presence in unapproved chats.
+// onCommand is the th.Context-flavoured entry that delegates to handleCommand;
+// the split exists so tests can drive handleCommand with a plain context.Context.
 func (b *Bot) onCommand(ctx *th.Context, msg telego.Message) error {
+	return b.handleCommand(ctx, msg)
+}
+
+// handleCommand routes /start, /help, /status. DM-only — group commands would
+// leak pairing codes and confirm bot presence in unapproved chats.
+func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	if msg.Chat.Type != "private" || msg.From == nil {
 		return nil
 	}
@@ -206,9 +212,13 @@ func (b *Bot) sendStatus(ctx context.Context, msg telego.Message, st access.Stat
 		"Not paired. Send me a message to get a pairing code."))
 }
 
-// onMessage is the generic inbound path: gate → permission-reply intercept →
-// attachment classification → DeliverInbound to Claude.
 func (b *Bot) onMessage(ctx *th.Context, msg telego.Message) error {
+	return b.handleMessage(ctx, msg)
+}
+
+// handleMessage is the generic inbound path: gate → permission-reply intercept →
+// attachment classification → DeliverInbound to Claude.
+func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 	if msg.Text != "" && strings.HasPrefix(msg.Text, "/") {
 		// Already routed by onCommand. Avoid double-handling.
 		return nil
@@ -421,6 +431,10 @@ func (b *Bot) fetchFile(ctx context.Context, fileID, uniqueHint string) (string,
 var callbackRE = regexp.MustCompile(`^perm:(allow|deny|more):([a-km-z]{5})$`)
 
 func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
+	return b.handleCallback(ctx, q)
+}
+
+func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
 	m := callbackRE.FindStringSubmatch(q.Data)
 	if m == nil {
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
@@ -553,11 +567,13 @@ func (b *Bot) gate(msg *telego.Message) gateResult {
 }
 
 func (b *Bot) isMentioned(msg *telego.Message, extraPatterns []string) bool {
-	entities := msg.Entities
 	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
+	entities := msg.Entities
 	if len(entities) == 0 {
 		entities = msg.CaptionEntities
-		text = msg.Caption
 	}
 	for _, e := range entities {
 		switch e.Type {

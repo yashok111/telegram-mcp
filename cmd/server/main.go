@@ -33,34 +33,17 @@ func main() {
 }
 
 func run() error {
-	// Stderr → Claude Code logs. JSON keeps it parseable, low-cardinality
-	// messages keep aggregators happy.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
+	setupSlog()
+	bindParentDeath()
 
-	// Die-with-parent: kernel sends SIGTERM the moment our parent goes away.
-	// Fixes the orphan-watchdog race the TS version had.
-	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGTERM), 0, 0, 0); err != nil {
-		slog.Warn("PR_SET_PDEATHSIG failed", "err", err)
+	stateDir, err := bootstrapStateDir()
+	if err != nil {
+		return err
 	}
 
-	stateDir := os.Getenv("TELEGRAM_STATE_DIR")
-	if stateDir == "" {
-		home, _ := os.UserHomeDir()
-		stateDir = filepath.Join(home, ".claude", "channels", "telegram")
-	}
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return fmt.Errorf("mkdir state: %w", err)
-	}
-
-	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		slog.Warn(".env load failed", "err", err)
-	}
-
-	token := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if token == "" {
-		return fmt.Errorf("TELEGRAM_BOT_TOKEN required (set in %s/.env)", stateDir)
+	token, err := loadConfig(stateDir)
+	if err != nil {
+		return err
 	}
 
 	if err := claimPID(filepath.Join(stateDir, "bot.pid")); err != nil {
@@ -113,6 +96,56 @@ func run() error {
 	tgBot.Stop()
 	wg.Wait()
 	return nil
+}
+
+// setupSlog routes all slog calls to stderr as JSON. Kept as its own function
+// so tests can assert the handler shape without dragging in os.Stderr fixtures.
+func setupSlog() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+}
+
+// bindParentDeath wires PR_SET_PDEATHSIG so the kernel sends SIGTERM to us
+// the moment our parent goes away. Logged-and-swallowed if the syscall fails
+// (containers with seccomp profiles may block it).
+func bindParentDeath() {
+	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGTERM), 0, 0, 0); err != nil {
+		slog.Warn("PR_SET_PDEATHSIG failed", "err", err)
+	}
+}
+
+// resolveStateDir returns the channel state directory: TELEGRAM_STATE_DIR if
+// set, otherwise ~/.claude/channels/telegram.
+func resolveStateDir() string {
+	if s := os.Getenv("TELEGRAM_STATE_DIR"); s != "" {
+		return s
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "channels", "telegram")
+}
+
+// bootstrapStateDir resolves the state directory, creates it with 0700, and
+// returns the path. Wraps both pieces so tests can drive errors independently.
+func bootstrapStateDir() (string, error) {
+	dir := resolveStateDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("mkdir state: %w", err)
+	}
+	return dir, nil
+}
+
+// loadConfig pulls TELEGRAM_BOT_TOKEN from .env first (if real env hasn't set
+// it) and returns the resolved token. Errors if neither source provides one.
+func loadConfig(stateDir string) (string, error) {
+	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn(".env load failed", "err", err)
+	}
+	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if token == "" {
+		return "", fmt.Errorf("TELEGRAM_BOT_TOKEN required (set in %s/.env)", stateDir)
+	}
+	return token, nil
 }
 
 // loadDotEnv mirrors the TS plugin: KEY=VALUE lines, real env wins.
