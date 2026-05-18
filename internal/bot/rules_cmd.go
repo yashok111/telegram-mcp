@@ -58,17 +58,24 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message) {
 }
 
 func renderRules(rules []access.PermissionRule) string {
-	if len(rules) == 0 {
-		return "No permission rules. Tap a button on a permission prompt to add one."
+	now := time.Now().UnixMilli()
+
+	active := make([]access.PermissionRule, 0, len(rules))
+	for _, r := range rules {
+		if r.ExpiresAt == 0 || r.ExpiresAt > now {
+			active = append(active, r)
+		}
 	}
 
-	now := time.Now().UnixMilli()
+	if len(active) == 0 {
+		return "No permission rules. Tap a button on a permission prompt to add one."
+	}
 
 	var sb strings.Builder
 
 	sb.WriteString("Active permission rules:\n")
 
-	for _, r := range rules {
+	for _, r := range active {
 		exp := "never"
 		if r.ExpiresAt > 0 {
 			left := time.Duration(r.ExpiresAt-now) * time.Millisecond

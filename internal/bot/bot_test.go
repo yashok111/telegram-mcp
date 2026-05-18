@@ -558,6 +558,33 @@ func TestAddRuleAndResolve_callsResolvePermission(t *testing.T) {
 	assert.Equal(t, "deny", n.resolved[1].behavior)
 }
 
+func TestCallback_atool1h_notAllowlisted_doesNotAddRule(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	q := telego.CallbackQuery{
+		ID:   "cq-stranger",
+		From: telego.User{ID: 999},
+		Data: "perm:atool1h:abcde",
+		Message: &telego.Message{
+			MessageID: 1, Chat: telego.Chat{ID: 999, Type: "private"}, Text: "🔐 Permission: Bash",
+		},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+
+	st := b.store.Load()
+	assert.Empty(t, st.Rules, "non-allowlisted callback must not add a rule")
+
+	calls := api.recordedCalls("answerCallbackQuery")
+	require.NotEmpty(t, calls)
+	assert.Contains(t, payloadString(calls[0].params), "Not authorized")
+
+	n, _ := b.notifier.(*noopNotifier)
+	assert.Empty(t, n.resolved, "non-allowlisted callback must not resolve permission")
+}
+
 func TestBroadcastPermissionRequest_keyboardIncludesNewRows(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},

@@ -51,6 +51,26 @@ func TestRenderRules_singleRuleNoExpiry(t *testing.T) {
 	assert.Contains(t, out, "never")
 }
 
+func TestRenderRules_expiredRule_hidden(t *testing.T) {
+	rules := []access.PermissionRule{
+		{ID: "fresh", Tool: "Read", Action: access.RuleApprove},
+		{ID: "stale", Tool: "Bash", Action: access.RuleApprove, ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()},
+	}
+	out := renderRules(rules)
+	assert.Contains(t, out, "fresh")
+	assert.NotContains(t, out, "stale", "expired rule should not be rendered")
+	assert.NotContains(t, out, "-", "no negative durations in output")
+}
+
+func TestRenderRules_onlyExpiredRules_emptyMessage(t *testing.T) {
+	rules := []access.PermissionRule{
+		{ID: "a", Tool: "Read", Action: access.RuleApprove, ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()},
+		{ID: "b", Tool: "Bash", Action: access.RuleDeny, ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()},
+	}
+	out := renderRules(rules)
+	assert.Contains(t, out, "No permission rules")
+}
+
 func TestRenderRules_multiplerules_listed(t *testing.T) {
 	rules := []access.PermissionRule{
 		{ID: "r1", Tool: "Bash", Action: access.RuleApprove},
