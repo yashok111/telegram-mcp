@@ -128,7 +128,10 @@ func runDaemon(stateDir string) error {
 		return fmt.Errorf("telegram init: %w", err)
 	}
 
-	tgBot.SetBgRunner(daemonpkg.NewBgRunnerWithDeps(loadBgConfig(), tgBot, daemonpkg.NewExecCommander()))
+	bgRunner := daemonpkg.NewBgRunnerWithDeps(loadBgConfig(), tgBot, daemonpkg.NewExecCommander())
+	tgBot.SetBgRunner(bgRunner)
+
+	defer bgRunner.Stop()
 
 	idleSecs, _ := strconv.Atoi(os.Getenv("TELEGRAM_DAEMON_IDLE_EXIT"))
 	if idleSecs == 0 {

@@ -118,6 +118,25 @@ func (r *BgRunner) List() []bot.BgTaskInfo {
 	return out
 }
 
+// Stop cancels every in-flight task by invoking its CancelFunc. Used by the
+// daemon shutdown path so running /bg subprocesses don't outlive the daemon.
+// Best-effort: cancellation is fire-and-forget; callers that need a join
+// should wait on List() draining via require.Eventually-style polling.
+func (r *BgRunner) Stop() {
+	r.mu.Lock()
+
+	cancels := make([]func(), 0, len(r.tasks))
+	for _, t := range r.tasks {
+		cancels = append(cancels, t.cancel)
+	}
+
+	r.mu.Unlock()
+
+	for _, c := range cancels {
+		c()
+	}
+}
+
 func (r *BgRunner) Cancel(id string) error {
 	r.mu.Lock()
 	t, ok := r.tasks[id]

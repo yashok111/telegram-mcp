@@ -79,6 +79,26 @@ func TestBgRunner_DefaultsAppliedForZeroValues(t *testing.T) {
 	assert.Equal(t, 10, r.cfg.RatePerHourPerUser)
 }
 
+func TestBgRunner_StopCancelsAllTasks(t *testing.T) {
+	r := NewBgRunner(BgConfig{MaxParallel: 99, RatePerHourPerUser: 99})
+
+	canceled := make(map[string]bool)
+
+	for range 3 {
+		id, err := r.reserveSlot("u1")
+		require.NoError(t, err)
+
+		r.mu.Lock()
+		taskID := id
+		r.tasks[taskID].cancel = func() { canceled[taskID] = true }
+		r.mu.Unlock()
+	}
+
+	r.Stop()
+
+	assert.Len(t, canceled, 3, "every in-flight task should have been cancelled")
+}
+
 func TestBgRunner_ListReflectsReserve(t *testing.T) {
 	r := NewBgRunner(BgConfig{MaxParallel: 5, RatePerHourPerUser: 99})
 	id, err := r.reserveSlot("u1")
