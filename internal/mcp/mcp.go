@@ -264,7 +264,7 @@ func (s *Server) registerTools() {
 
 	s.srv.AddTool(
 		mcptypes.NewTool("telegram_peers",
-			mcptypes.WithDescription("Return a live snapshot of every Claude Code session connected to this Telegram bot via the daemon. Useful for multi-session coordination — agents can see siblings' aliases, workdirs, and how recently they were active. Returns a JSON array: [{alias, shim_id_prefix, workdir, label, idle_for, self}]. In embedded mode (no daemon), returns an explanatory string instead of a list."),
+			mcptypes.WithDescription("Return a live snapshot of every Claude Code session connected to this Telegram bot via the daemon. Useful for multi-session coordination — agents can see siblings' aliases, workdirs, and how recently they were active. Returns a JSON array: [{alias, shim_id_prefix, workdir, label, idle_for, self}]. Returns an explanatory string when no peer registry is attached (e.g. before the shim has wired)."),
 		),
 		s.handleTelegramPeers,
 	)

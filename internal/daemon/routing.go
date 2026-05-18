@@ -32,7 +32,7 @@ type Shim struct {
 	Notify      func(method string, params any) error // bound to the underlying ipc.Conn
 }
 
-// PermDetails caches the perm request fields embedded in
+// PermDetails caches the perm request fields carried by
 // bot.broadcastPermissionRequest so callback "See more" can render without
 // an additional daemon→shim RPC.
 type PermDetails struct {

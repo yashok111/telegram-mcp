@@ -23,7 +23,7 @@ func (f *fakePeerProvider) Peers(_ context.Context) ([]Peer, error) {
 	return f.out, f.err
 }
 
-func TestTelegramPeersEmbeddedMode(t *testing.T) {
+func TestTelegramPeersNoProviderAttached(t *testing.T) {
 	s, err := New(access.NewStore(t.TempDir(), false))
 	require.NoError(t, err)
 
@@ -31,7 +31,7 @@ func TestTelegramPeersEmbeddedMode(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 
-	assert.Contains(t, textOf(t, res), "embedded mode")
+	assert.Contains(t, textOf(t, res), "no peer registry attached")
 }
 
 func TestTelegramPeersReturnsJSON(t *testing.T) {

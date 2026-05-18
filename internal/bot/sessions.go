@@ -32,8 +32,9 @@ type ShimInfo struct {
 }
 
 // RouterView is the slice of the daemon Router the bot needs for /status,
-// /sessions, /use, /idle commands. Embedded mode passes nil; commands then
-// no-op with a friendly message.
+// /sessions, /use, /idle commands. Always non-nil in production (daemon owns
+// the Router); tests may pass nil to exercise bots that never invoke the
+// session-switcher commands.
 type RouterView interface {
 	Snapshot() []ShimInfo
 	Pin(chatID, shimIDPrefix string, ttl time.Duration) (ShimInfo, error)
@@ -46,7 +47,7 @@ const PinTTL = 30 * time.Minute
 
 func (b *Bot) renderShims(now time.Time) string {
 	if b.router == nil {
-		return "Session switcher is only available in daemon mode (TELEGRAM_DAEMON=1). Running in embedded mode."
+		return "Session switcher is unavailable: no router wired."
 	}
 
 	shims := b.router.Snapshot()
@@ -102,7 +103,7 @@ func (s ShimInfo) IdleFor(now time.Time) time.Duration {
 // any handled outcome so the caller can forward reply verbatim via SendMessage.
 func (b *Bot) handleUseCommand(chatID, text string) (string, bool) {
 	if b.router == nil {
-		return "Session switcher is only available in daemon mode.", true
+		return "Session switcher is unavailable: no router wired.", true
 	}
 
 	rest := strings.TrimSpace(text)
@@ -137,7 +138,7 @@ func (b *Bot) handleUseCommand(chatID, text string) (string, bool) {
 // sendSessions renders the inline-keyboard picker for /sessions.
 func (b *Bot) sendSessions(ctx context.Context, msg telego.Message) {
 	if b.router == nil {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Session switcher is only available in daemon mode."))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Session switcher is unavailable: no router wired."))
 		return
 	}
 
@@ -165,7 +166,7 @@ func (b *Bot) sendSessions(ctx context.Context, msg telego.Message) {
 }
 
 // pickIdle returns the shim whose IdleFor(now) is largest. Returns ok=false
-// when no shims are connected or the router isn't wired (embedded mode).
+// when no shims are connected or the router isn't wired (test-only path).
 func (b *Bot) pickIdle(now time.Time) (ShimInfo, bool) {
 	if b.router == nil {
 		return ShimInfo{}, false
@@ -191,7 +192,7 @@ func (b *Bot) sendIdle(ctx context.Context, msg telego.Message) {
 	if !ok {
 		text := "No active CC sessions connected."
 		if b.router == nil {
-			text = "Session switcher is only available in daemon mode."
+			text = "Session switcher is unavailable: no router wired."
 		}
 
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text))
@@ -226,7 +227,7 @@ func (b *Bot) sendIdle(ctx context.Context, msg telego.Message) {
 func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, action, prefix string) error {
 	if b.router == nil {
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-			CallbackQueryID: q.ID, Text: "Daemon mode only.",
+			CallbackQueryID: q.ID, Text: "Session switcher unavailable.",
 		})
 
 		return nil

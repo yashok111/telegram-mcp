@@ -1,13 +1,9 @@
 # systemd --user unit
 
-When the bot is invoked **as an MCP server**, Claude Code spawns it on demand
-and `PR_SET_PDEATHSIG` shuts it down when the session ends. That is the
-intended primary mode.
-
-This unit is for the **standalone** case — you want the bot to keep accepting
-DMs (and replying via the `/telegram:access` skill) even when no Claude Code
-session is running. Useful on a VPS that wants the pairing flow to survive
-between sessions.
+By default the daemon auto-spawns from the first Claude Code session that
+needs it and idles out 30 minutes after the last shim disconnects. This unit
+keeps the daemon alive permanently — useful when you want the bot to accept
+DMs (and replies via `/telegram:access`) across CC sessions and reboots.
 
 ## Install
 
@@ -29,10 +25,11 @@ systemctl --user restart telegram-mcp
 
 ## Caveats
 
-- **Token collision** — when both this unit AND Claude Code's MCP spawn are
-  running, both poll the same bot token and one gets 409 Conflict. Pick one.
-  If you want the unit, do not register the bot as an MCP server in Claude
-  Code (skip `claude mcp add telegram ...`).
+- **One daemon per host** — there is exactly one bot-token poller per host.
+  When this unit is running, `daemon.sock` is already present, so every shim
+  dials it immediately instead of spawning its own daemon. If the unit is
+  stopped, the next shim falls back to spawning a daemon itself. Registering
+  the binary as a CC MCP server is still required for shims to attach.
 - **`ExecStart`** assumes `~/projects/telegram-mcp/bin/telegram-mcp`. Adjust
   the path if you installed elsewhere.
 - **`ReadWritePaths`** is locked to `~/.claude/channels/telegram` — that's

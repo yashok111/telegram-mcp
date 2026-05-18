@@ -41,11 +41,12 @@ claude plugin disable telegram
 
 Restart the Claude Code session after registering.
 
-## Standalone mode
+## Persistent daemon (optional)
 
-If you want the bot to keep accepting DMs without an active Claude Code
-session, see `contrib/systemd/README.md` for the `--user` unit. Pick **one**
-mode — the bot token can have exactly one poller.
+The daemon auto-spawns on the first Claude Code session and idles out after the
+last shim disconnects. If you want the bot to keep accepting DMs across
+sessions (and reboots), install the systemd `--user` unit from
+`contrib/systemd/README.md`. The unit runs `telegram-mcp daemon` directly.
 
 ## Config
 

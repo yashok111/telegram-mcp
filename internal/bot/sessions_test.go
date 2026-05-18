@@ -147,7 +147,7 @@ func TestHandleUseNoRouter(t *testing.T) {
 	b := &Bot{}
 	reply, ok := b.handleUseCommand("123", "/use abc")
 	require.True(t, ok)
-	assert.Contains(t, reply, "daemon mode")
+	assert.Contains(t, reply, "no router wired")
 }
 
 func TestHandleUsePinError(t *testing.T) {
@@ -232,7 +232,7 @@ func TestHandleCommand_sessions_noRouter(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"], "daemon mode")
+	assert.Contains(t, calls[0].params["text"], "no router wired")
 }
 
 func TestHandleCommand_use_pinsShim(t *testing.T) {
@@ -344,7 +344,7 @@ func TestHandleCommand_idle_noRouter(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"], "daemon mode")
+	assert.Contains(t, calls[0].params["text"], "no router wired")
 }
 
 // ===== sess: callback =====
@@ -430,7 +430,7 @@ func TestHandleCallback_sessUseNotAllowed_denies(t *testing.T) {
 	assert.Contains(t, payloadString(acks[0].params), "Not authorized")
 }
 
-func TestHandleCallback_sessNoRouter_says_daemonOnly(t *testing.T) {
+func TestHandleCallback_sessNoRouter_says_unavailable(t *testing.T) {
 	b, api, _ := newTestBot(t, allowlistState("1"))
 	q := telego.CallbackQuery{
 		ID:   "cb4",
@@ -441,7 +441,7 @@ func TestHandleCallback_sessNoRouter_says_daemonOnly(t *testing.T) {
 
 	acks := api.recordedCalls("answerCallbackQuery")
 	require.Len(t, acks, 1)
-	assert.Contains(t, payloadString(acks[0].params), "Daemon mode only")
+	assert.Contains(t, payloadString(acks[0].params), "Session switcher unavailable")
 }
 
 func TestHandleCallback_sessPinError_acksMessage(t *testing.T) {
