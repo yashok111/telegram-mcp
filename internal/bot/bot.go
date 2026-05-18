@@ -210,9 +210,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	senderID := strconv.FormatInt(msg.From.ID, 10)
 
 	st := b.store.Load()
-	if access.PruneExpired(&st) {
-		_ = b.store.Save(st)
-	}
 
 	if st.DMPolicy == access.PolicyDisabled {
 		return nil
@@ -254,7 +251,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	case "idle":
 		b.sendIdle(ctx, msg)
 	case "rules":
-		b.handleRulesCommand(ctx, msg)
+		b.handleRulesCommand(ctx, msg, st)
 	}
 
 	return nil
@@ -296,32 +293,19 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 		return nil
 	}
 
-	slog.Info("inbound message",
-		"chat_id", msg.Chat.ID,
-		"message_id", msg.MessageID,
-		"user", userLabel(msg.From),
-		"user_id", msg.From.ID,
-		"kind", classifyMessageKind(&msg),
-		"text_len", len(msg.Text),
-	)
-
 	decision := b.gate(&msg)
-
-	slog.Info("gate decision",
-		"chat_id", msg.Chat.ID,
-		"user_id", msg.From.ID,
-		"action", decision.action,
-		"is_resend", decision.isResend,
-	)
 
 	switch decision.action {
 	case actionDrop:
+		slog.Info("inbound dropped", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "kind", classifyMessageKind(&msg))
 		return nil
 	case actionPair:
 		lead := "Pairing required"
 		if decision.isResend {
 			lead = "Still pending"
 		}
+
+		slog.Info("inbound pairing", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "is_resend", decision.isResend)
 
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
 			fmt.Sprintf("%s — run in Claude Code:\n\n/telegram:access pair %s", lead, decision.code)))
@@ -346,7 +330,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 			emoji = "✅"
 		}
 
-		slog.Info("permission reply intercepted", "request_id", strings.ToLower(m[2]), "behavior", behavior, "chat_id", chatID, "user_id", msg.From.ID)
+		slog.Info("inbound permission-reply", "request_id", strings.ToLower(m[2]), "behavior", behavior, "chat_id", chatID, "user_id", msg.From.ID)
 
 		b.notifier.ResolvePermission(strings.ToLower(m[2]), behavior)
 		_ = b.setReaction(ctx, chatID, msgID, emoji)
@@ -387,6 +371,14 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 	default:
 		maps.Copy(meta, attachmentMeta(&msg))
 	}
+
+	slog.Info("inbound delivered",
+		"chat_id", chatID,
+		"message_id", msgID,
+		"user", userLabel(msg.From),
+		"kind", classifyMessageKind(&msg),
+		"text_len", len(text),
+	)
 
 	b.notifier.DeliverInbound(text, meta)
 
@@ -584,10 +576,10 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 }
 
 func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
-	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
-		st := b.store.Load()
+	st := b.store.Load()
+	senderID := strconv.FormatInt(q.From.ID, 10)
 
-		senderID := strconv.FormatInt(q.From.ID, 10)
+	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
 		if !slices.Contains(st.AllowFrom, senderID) {
 			slog.Warn("sess callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
 			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
@@ -608,9 +600,6 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		return nil
 	}
 
-	st := b.store.Load()
-
-	senderID := strconv.FormatInt(q.From.ID, 10)
 	if !slices.Contains(st.AllowFrom, senderID) {
 		slog.Warn("callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
@@ -743,9 +732,6 @@ type gateResult struct {
 
 func (b *Bot) gate(msg *telego.Message) gateResult {
 	st := b.store.Load()
-	if access.PruneExpired(&st) {
-		_ = b.store.Save(st)
-	}
 
 	if st.DMPolicy == access.PolicyDisabled || msg.From == nil {
 		return gateResult{action: actionDrop}
@@ -1095,9 +1081,15 @@ func parseChatID(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
+// findPendingFor returns the live pairing code for senderID, skipping any
+// entry whose ExpiresAt has elapsed. The ExpiresAt filter is load-bearing —
+// PruneExpired runs on the daemon's RulesCleanup ticker now (no longer inline
+// in the per-message hot path), so callers will see stale entries on disk
+// until the next tick.
 func findPendingFor(pending map[string]access.Pending, senderID string) (string, access.Pending, bool) {
+	now := time.Now().UnixMilli()
 	for code, p := range pending {
-		if p.SenderID == senderID {
+		if p.SenderID == senderID && now < p.ExpiresAt {
 			return code, p, true
 		}
 	}

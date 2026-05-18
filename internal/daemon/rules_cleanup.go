@@ -37,26 +37,36 @@ func (rc *RulesCleanup) Run(ctx context.Context) {
 
 func (rc *RulesCleanup) pruneOnce() {
 	var (
-		pruned    bool
-		remaining int
+		rulesPruned     bool
+		pendingPruned   bool
+		rulesRemaining  int
+		pendingRemaining int
 	)
 
 	err := rc.store.Mutate(func(st *access.State) bool {
-		if !access.PruneRules(st) {
+		rulesPruned = access.PruneRules(st)
+		pendingPruned = access.PruneExpired(st)
+
+		if !rulesPruned && !pendingPruned {
 			return false
 		}
 
-		pruned = true
-		remaining = len(st.Rules)
+		rulesRemaining = len(st.Rules)
+		pendingRemaining = len(st.Pending)
 
 		return true
 	})
 	if err != nil {
-		slog.Error("rules cleanup save failed", "err", err)
+		slog.Error("state cleanup save failed", "err", err)
 		return
 	}
 
-	if pruned {
-		slog.Info("rules cleanup pruned expired rules", "remaining", remaining)
+	if rulesPruned || pendingPruned {
+		slog.Info("state cleanup pruned expired entries",
+			"rules_pruned", rulesPruned,
+			"rules_remaining", rulesRemaining,
+			"pending_pruned", pendingPruned,
+			"pending_remaining", pendingRemaining,
+		)
 	}
 }

@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 )
 
@@ -218,25 +220,56 @@ func (s *Server) dispatch(ctx context.Context, c *Conn, frame []byte) {
 }
 
 func (c *Conn) writeResponse(id uint64, result any, rpcErr *Error) error {
-	resp := Response{Jsonrpc: JSONRPCVersion, ID: id}
+	var (
+		raw json.RawMessage
+		err error
+	)
 
-	if rpcErr != nil {
-		resp.Error = rpcErr
-	} else if result != nil {
-		raw, err := json.Marshal(result)
+	if rpcErr == nil && result != nil {
+		raw, err = json.Marshal(result)
 		if err != nil {
-			resp.Error = &Error{Code: CodeInternal, Message: err.Error()}
-		} else {
-			resp.Result = raw
+			rpcErr = &Error{Code: CodeInternal, Message: err.Error()}
 		}
 	}
 
-	body, err := json.Marshal(resp)
+	body, err := encodeResponse(id, raw, rpcErr)
 	if err != nil {
 		return err
 	}
 
 	return c.fw.WriteFrame(body)
+}
+
+// encodeResponse builds the JSON-RPC 2.0 response envelope in a single pass:
+// the already-marshaled result bytes are embedded verbatim alongside the
+// envelope scaffolding, avoiding a second json.Marshal over the wrapper.
+func encodeResponse(id uint64, result json.RawMessage, rpcErr *Error) ([]byte, error) {
+	var buf bytes.Buffer
+
+	buf.Grow(64 + len(result))
+	buf.WriteString(`{"jsonrpc":"`)
+	buf.WriteString(JSONRPCVersion)
+	buf.WriteString(`","id":`)
+	buf.WriteString(strconv.FormatUint(id, 10))
+
+	switch {
+	case rpcErr != nil:
+		buf.WriteString(`,"error":`)
+
+		errBytes, err := json.Marshal(rpcErr)
+		if err != nil {
+			return nil, fmt.Errorf("marshal error: %w", err)
+		}
+
+		buf.Write(errBytes)
+	case len(result) > 0:
+		buf.WriteString(`,"result":`)
+		buf.Write(result)
+	}
+
+	buf.WriteByte('}')
+
+	return buf.Bytes(), nil
 }
 
 func (c *Conn) Notify(method string, params any) error {
@@ -245,12 +278,66 @@ func (c *Conn) Notify(method string, params any) error {
 		return err
 	}
 
-	body, err := json.Marshal(Notification{Jsonrpc: JSONRPCVersion, Method: method, Params: raw})
+	body, err := encodeNotification(method, raw)
 	if err != nil {
 		return err
 	}
 
 	return c.fw.WriteFrame(body)
+}
+
+// encodeNotification builds the JSON-RPC 2.0 notification envelope without
+// running json.Marshal over the wrapper. Params bytes are embedded verbatim.
+func encodeNotification(method string, params json.RawMessage) ([]byte, error) {
+	methodJSON, err := json.Marshal(method)
+	if err != nil {
+		return nil, fmt.Errorf("marshal method: %w", err)
+	}
+
+	var buf bytes.Buffer
+
+	buf.Grow(48 + len(methodJSON) + len(params))
+	buf.WriteString(`{"jsonrpc":"`)
+	buf.WriteString(JSONRPCVersion)
+	buf.WriteString(`","method":`)
+	buf.Write(methodJSON)
+
+	if len(params) > 0 {
+		buf.WriteString(`,"params":`)
+		buf.Write(params)
+	}
+
+	buf.WriteByte('}')
+
+	return buf.Bytes(), nil
+}
+
+// encodeRequest builds the JSON-RPC 2.0 request envelope, embedding the
+// already-marshaled params bytes without a second marshal pass.
+func encodeRequest(id uint64, method string, params json.RawMessage) ([]byte, error) {
+	methodJSON, err := json.Marshal(method)
+	if err != nil {
+		return nil, fmt.Errorf("marshal method: %w", err)
+	}
+
+	var buf bytes.Buffer
+
+	buf.Grow(64 + len(methodJSON) + len(params))
+	buf.WriteString(`{"jsonrpc":"`)
+	buf.WriteString(JSONRPCVersion)
+	buf.WriteString(`","id":`)
+	buf.WriteString(strconv.FormatUint(id, 10))
+	buf.WriteString(`,"method":`)
+	buf.Write(methodJSON)
+
+	if len(params) > 0 {
+		buf.WriteString(`,"params":`)
+		buf.Write(params)
+	}
+
+	buf.WriteByte('}')
+
+	return buf.Bytes(), nil
 }
 
 func (c *Conn) Close() error {

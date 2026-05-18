@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	mcptypes "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -36,7 +37,24 @@ type BotAPI interface {
 
 const (
 	MaxAttachmentBytes = 50 * 1024 * 1024
+
+	// pendingTTL bounds how long an unresolved permission_request can sit in
+	// Server.pending before the sweeper drops it. CC normally resolves within
+	// seconds; an hour is well past any legitimate prompt timeout.
+	pendingTTL = time.Hour
+
+	// pendingSweepInterval is how often the cleanup goroutine wakes to evict
+	// stale entries.
+	pendingSweepInterval = 10 * time.Minute
 )
+
+// pendingEntry tags a stored PermissionDetails with the time it was recorded
+// so the cleanup goroutine can evict stale entries from CC sessions that died
+// without ever resolving the request.
+type pendingEntry struct {
+	details   bot.PermissionDetails
+	createdAt time.Time
+}
 
 type Server struct {
 	store *access.Store
@@ -51,7 +69,7 @@ type Server struct {
 	// Pending Claude Code permission requests, keyed by request_id, kept for
 	// "See more" expansion in the Telegram inline-keyboard flow.
 	permMu  sync.Mutex
-	pending map[string]bot.PermissionDetails
+	pending map[string]pendingEntry
 
 	// Init state observed via MCP hooks for diagnostics.
 	sessionsRegistered atomic.Int32
@@ -61,7 +79,7 @@ type Server struct {
 func New(store *access.Store) (*Server, error) {
 	s := &Server{
 		store:   store,
-		pending: map[string]bot.PermissionDetails{},
+		pending: map[string]pendingEntry{},
 	}
 
 	hooks := &mcpserver.Hooks{}
@@ -121,7 +139,54 @@ func (s *Server) Bot() BotAPI {
 
 func (s *Server) ServeStdio(ctx context.Context) error {
 	stdio := mcpserver.NewStdioServer(s.srv)
+
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		s.pendingCleanup(ctx, pendingSweepInterval)
+	}()
+	defer func() { <-sweepDone }()
+
 	return stdio.Listen(ctx, os.Stdin, os.Stdout)
+}
+
+// pendingCleanup wakes every interval and evicts permission_request entries
+// older than pendingTTL. Returns when ctx is done so goleak stays happy.
+func (s *Server) pendingCleanup(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.evictStalePending(time.Now())
+		}
+	}
+}
+
+// evictStalePending drops any pending entry created more than pendingTTL ago,
+// returning the eviction count. Exported via lowercase for tests.
+func (s *Server) evictStalePending(now time.Time) int {
+	cutoff := now.Add(-pendingTTL)
+
+	s.permMu.Lock()
+	defer s.permMu.Unlock()
+
+	var evicted int
+	for id, e := range s.pending {
+		if e.createdAt.Before(cutoff) {
+			delete(s.pending, id)
+			evicted++
+		}
+	}
+
+	if evicted > 0 {
+		slog.Info("mcp pending cleanup", "evicted", evicted, "remaining", len(s.pending))
+	}
+
+	return evicted
 }
 
 // --- Notifier surface (called by bot package) ---
@@ -168,9 +233,9 @@ func (s *Server) LookupPermission(requestID string) (bot.PermissionDetails, bool
 	s.permMu.Lock()
 	defer s.permMu.Unlock()
 
-	d, ok := s.pending[requestID]
+	e, ok := s.pending[requestID]
 
-	return d, ok
+	return e.details, ok
 }
 
 func (s *Server) ResolvePermission(requestID, behavior string) {
@@ -212,10 +277,13 @@ func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolNam
 	}
 
 	s.permMu.Lock()
-	s.pending[requestID] = bot.PermissionDetails{
-		ToolName:     toolName,
-		Description:  description,
-		InputPreview: inputPreview,
+	s.pending[requestID] = pendingEntry{
+		details: bot.PermissionDetails{
+			ToolName:     toolName,
+			Description:  description,
+			InputPreview: inputPreview,
+		},
+		createdAt: time.Now(),
 	}
 	s.permMu.Unlock()
 
