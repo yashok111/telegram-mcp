@@ -210,9 +210,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	senderID := strconv.FormatInt(msg.From.ID, 10)
 
 	st := b.store.Load()
-	if access.PruneExpired(&st) {
-		_ = b.store.Save(st)
-	}
 
 	if st.DMPolicy == access.PolicyDisabled {
 		return nil
@@ -740,9 +737,6 @@ type gateResult struct {
 
 func (b *Bot) gate(msg *telego.Message) gateResult {
 	st := b.store.Load()
-	if access.PruneExpired(&st) {
-		_ = b.store.Save(st)
-	}
 
 	if st.DMPolicy == access.PolicyDisabled || msg.From == nil {
 		return gateResult{action: actionDrop}
@@ -1092,9 +1086,15 @@ func parseChatID(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
+// findPendingFor returns the live pairing code for senderID, skipping any
+// entry whose ExpiresAt has elapsed. The ExpiresAt filter is load-bearing —
+// PruneExpired runs on the daemon's RulesCleanup ticker now (no longer inline
+// in the per-message hot path), so callers will see stale entries on disk
+// until the next tick.
 func findPendingFor(pending map[string]access.Pending, senderID string) (string, access.Pending, bool) {
+	now := time.Now().UnixMilli()
 	for code, p := range pending {
-		if p.SenderID == senderID {
+		if p.SenderID == senderID && now < p.ExpiresAt {
 			return code, p, true
 		}
 	}

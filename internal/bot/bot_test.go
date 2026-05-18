@@ -99,9 +99,10 @@ func TestParseChatID(t *testing.T) {
 }
 
 func TestFindPendingFor(t *testing.T) {
+	future := time.Now().UnixMilli() + 60_000
 	pending := map[string]access.Pending{
-		"aaaaaa": {SenderID: "111"},
-		"bbbbbb": {SenderID: "222"},
+		"aaaaaa": {SenderID: "111", ExpiresAt: future},
+		"bbbbbb": {SenderID: "222", ExpiresAt: future},
 	}
 	code, p, ok := findPendingFor(pending, "222")
 	assert.True(t, ok)
@@ -110,6 +111,15 @@ func TestFindPendingFor(t *testing.T) {
 
 	_, _, ok = findPendingFor(pending, "999")
 	assert.False(t, ok)
+}
+
+func TestFindPendingFor_skipsExpired(t *testing.T) {
+	now := time.Now().UnixMilli()
+	pending := map[string]access.Pending{
+		"stale": {SenderID: "111", ExpiresAt: now - 1},
+	}
+	_, _, ok := findPendingFor(pending, "111")
+	assert.False(t, ok, "expired entry must not be returned even before next prune tick")
 }
 
 // ===== attachmentMeta =====
