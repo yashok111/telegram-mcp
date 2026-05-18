@@ -48,18 +48,8 @@ func DefaultBgConfig() BgConfig {
 	}
 }
 
-type BgTaskInfo struct {
-	ID         string
-	StartedAt  time.Time
-	Workdir    string
-	PromptHead string
-	UserID     string
-	ChatID     string
-	Status     BgTaskStatus
-}
-
 type bgTask struct {
-	info   BgTaskInfo
+	info   bot.BgTaskInfo
 	cancel func()
 }
 
@@ -116,11 +106,11 @@ func NewBgRunnerWithDeps(cfg BgConfig, b botSurface, cmder Commander) *BgRunner 
 	return r
 }
 
-func (r *BgRunner) List() []BgTaskInfo {
+func (r *BgRunner) List() []bot.BgTaskInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	out := make([]BgTaskInfo, 0, len(r.tasks))
+	out := make([]bot.BgTaskInfo, 0, len(r.tasks))
 	for _, t := range r.tasks {
 		out = append(out, t.info)
 	}
@@ -181,11 +171,11 @@ func (r *BgRunner) reserveSlot(userID string) (string, error) {
 
 	id := hex.EncodeToString(buf)
 	r.tasks[id] = &bgTask{
-		info: BgTaskInfo{
+		info: bot.BgTaskInfo{
 			ID:        id,
 			StartedAt: now,
 			UserID:    userID,
-			Status:    BgStatusRunning,
+			Status:    string(BgStatusRunning),
 		},
 		cancel: func() {},
 	}
@@ -198,7 +188,7 @@ func (r *BgRunner) releaseSlot(id string, finalStatus BgTaskStatus) {
 	defer r.mu.Unlock()
 
 	if t, ok := r.tasks[id]; ok {
-		t.info.Status = finalStatus
+		t.info.Status = string(finalStatus)
 
 		delete(r.tasks, id)
 	}
@@ -267,14 +257,7 @@ func (p *execProcess) Signal(sig os.Signal) error {
 
 func (p *execProcess) Wait() error { return p.cmd.Wait() }
 
-type BgSpawnRequest struct {
-	Prompt  string
-	Workdir string
-	ChatID  string
-	UserID  string
-}
-
-func (r *BgRunner) Spawn(ctx context.Context, req BgSpawnRequest) (string, error) {
+func (r *BgRunner) Spawn(ctx context.Context, req bot.BgSpawnRequest) (string, error) {
 	if strings.TrimSpace(req.Prompt) == "" {
 		return "", ErrEmptyPrompt
 	}
@@ -306,7 +289,6 @@ func (r *BgRunner) Spawn(ctx context.Context, req BgSpawnRequest) (string, error
 	r.mu.Lock()
 	t := r.tasks[id]
 	t.info.Workdir = workdir
-	t.info.ChatID = req.ChatID
 	t.info.PromptHead = truncate(req.Prompt, 60)
 	t.cancel = cancel
 	r.mu.Unlock()
@@ -316,7 +298,7 @@ func (r *BgRunner) Spawn(ctx context.Context, req BgSpawnRequest) (string, error
 	return id, nil
 }
 
-func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id string, req BgSpawnRequest, workdir string, progressMsgID int) {
+func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id string, req bot.BgSpawnRequest, workdir string, progressMsgID int) {
 	defer cancel()
 
 	args := []string{"--print", "--output-format=stream-json", "--verbose", req.Prompt}

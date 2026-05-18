@@ -88,7 +88,7 @@ func TestBgRunner_ListReflectsReserve(t *testing.T) {
 	require.Len(t, infos, 1)
 	assert.Equal(t, id, infos[0].ID)
 	assert.Equal(t, "u1", infos[0].UserID)
-	assert.Equal(t, BgStatusRunning, infos[0].Status)
+	assert.Equal(t, string(BgStatusRunning), infos[0].Status)
 }
 
 func mustReserve(t *testing.T, r *BgRunner, u string) string {
@@ -204,14 +204,14 @@ func TestBgRunner_SpawnSendFailureReleasesSlot(t *testing.T) {
 		&fakeCommander{startFn: nil},
 	)
 
-	_, err := r.Spawn(context.Background(), BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
 	require.Error(t, err)
 	assert.Empty(t, r.List(), "failed initial send must release the slot")
 }
 
 func TestBgRunner_SpawnRejectsEmptyPrompt(t *testing.T) {
 	r := NewBgRunnerWithDeps(DefaultBgConfig(), newLockedBot(), &fakeCommander{})
-	_, err := r.Spawn(context.Background(), BgSpawnRequest{Prompt: "   "})
+	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "   "})
 	assert.ErrorIs(t, err, ErrEmptyPrompt)
 }
 
@@ -238,7 +238,7 @@ func TestBgRunner_SpawnHappyPath(t *testing.T) {
 		Timeout:            5 * time.Second,
 	}, fb, cmder)
 
-	id, err := r.Spawn(context.Background(), BgSpawnRequest{Prompt: "say hi", ChatID: "1", UserID: "u"})
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "say hi", ChatID: "1", UserID: "u"})
 	require.NoError(t, err)
 	require.NotEmpty(t, id)
 
@@ -282,7 +282,7 @@ func TestBgRunner_CancelSendsSIGTERMAndMarks(t *testing.T) {
 		Timeout:            10 * time.Second,
 	}, fb, cmder)
 
-	id, err := r.Spawn(context.Background(), BgSpawnRequest{Prompt: "long task", ChatID: "1", UserID: "u"})
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "long task", ChatID: "1", UserID: "u"})
 	require.NoError(t, err)
 
 	require.NoError(t, r.Cancel(id))
@@ -315,7 +315,7 @@ func TestBgRunner_StartFailureMarksFailed(t *testing.T) {
 		Timeout:            time.Second,
 	}, fb, cmder)
 
-	id, err := r.Spawn(context.Background(), BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
@@ -347,7 +347,7 @@ func TestBgRunner_WorkdirFallbackHome(t *testing.T) {
 		Timeout:            time.Second,
 	}, fb, cmder)
 
-	_, err := r.Spawn(context.Background(), BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -379,9 +379,9 @@ func TestBgRunner_SpawnRespectsRateLimit(t *testing.T) {
 		Timeout:            time.Second,
 	}, fb, cmder)
 
-	_, _ = r.Spawn(context.Background(), BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	_, _ = r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
 
-	_, err := r.Spawn(context.Background(), BgSpawnRequest{Prompt: "y", ChatID: "1", UserID: "u"})
+	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "y", ChatID: "1", UserID: "u"})
 	require.ErrorIs(t, err, ErrRateLimited)
 
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, time.Second, 10*time.Millisecond)
