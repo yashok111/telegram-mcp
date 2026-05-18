@@ -63,7 +63,13 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 	if err != nil {
 		return err
 	}
-	defer release()
+
+	locked := true
+	defer func() {
+		if locked {
+			release()
+		}
+	}()
 
 	// Re-check under lock: a sibling shim may have finished spawning while we
 	// blocked on Flock.
@@ -74,6 +80,12 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 
 	if pid, err := readDaemonPID(opts.StateDir); err == nil && pid > 1 && processAlive(pid) && isOurDaemon(pid) {
 		slog.Info("daemon pid alive after lock — waiting for socket", "pid", pid)
+		// Drop the lock before polling the socket so additional sibling shims
+		// don't serialize behind us.
+		release()
+
+		locked = false
+
 		return waitForSocket(ctx, opts.SocketPath, opts.WaitTimeout*2)
 	}
 
@@ -89,6 +101,37 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 		}
 	}
 
+	cmd, err := spawnDaemonChild(bin)
+	if err != nil {
+		return err
+	}
+
+	slog.Info("daemon spawned", "bin", bin, "pid", cmd.Process.Pid)
+
+	// Hold the lock just long enough for the new daemon to land daemon.pid
+	// (claimPID has happened). After that, sibling shims can unblock and join
+	// waitForSocket in parallel — they'll see the PID alive in the recheck
+	// branch instead of trying to spawn a second daemon into the race window
+	// between cmd.Start and claimPID.
+	if opts.StateDir != "" {
+		if err := waitForDaemonPID(opts.StateDir, cmd.Process.Pid, opts.WaitTimeout); err != nil {
+			return err
+		}
+	}
+
+	release()
+
+	locked = false
+
+	return waitForSocket(ctx, opts.SocketPath, opts.WaitTimeout)
+}
+
+// spawnDaemonChild forks the daemon binary detached via setsid, redirects its
+// std streams to /dev/null, and starts a reaper goroutine that wait4()s the
+// child on exit (so it never lingers as a zombie under the shim's PID — see
+// PR #18). The caller is responsible for everything else: lock management,
+// PID-file synchronization, socket polling.
+func spawnDaemonChild(bin string) (*exec.Cmd, error) {
 	// We deliberately use exec.Command (not CommandContext): the daemon must
 	// outlive the shim's ctx — CommandContext would kill it on shim exit.
 	cmd := exec.Command(bin, "daemon") //nolint:noctx // see comment above; daemon detached.
@@ -96,8 +139,9 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("open /dev/null: %w", err)
+		return nil, fmt.Errorf("open /dev/null: %w", err)
 	}
+
 	defer func() { _ = devnull.Close() }()
 
 	cmd.Stdout = devnull
@@ -106,20 +150,12 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("spawn daemon: %w", err)
+		return nil, fmt.Errorf("spawn daemon: %w", err)
 	}
 
-	slog.Info("daemon spawned", "bin", bin, "pid", cmd.Process.Pid)
-
-	// Wait() instead of Release(): Release severs Go's handle to the child but
-	// does NOT call wait4(2). If the daemon exits while the shim is still
-	// alive, the kernel keeps the daemon as a zombie under the shim's PID.
-	// claimPID in a fresh daemon uses syscall.Kill(pid, 0), which returns
-	// success for zombies, so it thinks the old daemon is alive and bails out
-	// with 409-Conflict thrash. The goroutine exits as soon as the child does.
 	go func() { _, _ = cmd.Process.Wait() }()
 
-	return waitForSocket(ctx, opts.SocketPath, opts.WaitTimeout)
+	return cmd, nil
 }
 
 // acquireSpawnLock blocks until it holds an exclusive flock(2) on
@@ -145,6 +181,24 @@ func acquireSpawnLock(dir string) (func(), error) {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// waitForDaemonPID polls <stateDir>/daemon.pid until it contains expected or
+// the timeout elapses. EnsureDaemon uses this to hold the spawn lock just long
+// enough for the new daemon's claimPID to land — once the pid file exists,
+// sibling shims that unblock will see PID alive and join waitForSocket in
+// parallel instead of serializing on the lock.
+func waitForDaemonPID(stateDir string, expected int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pid, err := readDaemonPID(stateDir); err == nil && pid == expected {
+			return nil
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	return fmt.Errorf("daemon pid %d did not claim daemon.pid within %s", expected, timeout)
 }
 
 func waitForSocket(ctx context.Context, path string, timeout time.Duration) error {
