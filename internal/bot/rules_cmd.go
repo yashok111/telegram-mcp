@@ -1,0 +1,88 @@
+package bot
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mymmrac/telego"
+	tu "github.com/mymmrac/telego/telegoutil"
+
+	"github.com/yakov/telegram-mcp/internal/access"
+)
+
+func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message) {
+	parts := strings.Fields(strings.TrimSpace(msg.Text))
+
+	sub := ""
+	if len(parts) > 1 {
+		sub = strings.ToLower(parts[1])
+	}
+
+	chatID := tu.ID(msg.Chat.ID)
+	st := b.store.Load()
+
+	switch sub {
+	case "", "list":
+		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, renderRules(st.Rules)))
+	case "clear":
+		n := access.ClearRules(&st)
+		if err := b.store.Save(st); err != nil {
+			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Failed to save: "+err.Error()))
+			return
+		}
+
+		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, fmt.Sprintf("Cleared %d rule(s).", n)))
+	case "revoke":
+		if len(parts) < 3 {
+			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Usage: /rules revoke <id>"))
+			return
+		}
+
+		id := parts[2]
+		if !access.RevokeRule(&st, id) {
+			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "No rule with id "+id))
+			return
+		}
+
+		if err := b.store.Save(st); err != nil {
+			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Failed to save: "+err.Error()))
+			return
+		}
+
+		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Revoked rule "+id))
+	default:
+		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Usage: /rules [list|clear|revoke <id>]"))
+	}
+}
+
+func renderRules(rules []access.PermissionRule) string {
+	if len(rules) == 0 {
+		return "No permission rules. Tap a button on a permission prompt to add one."
+	}
+
+	now := time.Now().UnixMilli()
+
+	var sb strings.Builder
+
+	sb.WriteString("Active permission rules:\n")
+
+	for _, r := range rules {
+		exp := "never"
+		if r.ExpiresAt > 0 {
+			left := time.Duration(r.ExpiresAt-now) * time.Millisecond
+			exp = "expires in " + left.Round(time.Minute).String()
+		}
+
+		path := r.PathPattern
+		if path == "" {
+			path = "(any path)"
+		}
+
+		sb.WriteString(fmt.Sprintf("• %s — %s %s [%s] — %s\n",
+			r.ID, r.Action, r.Tool, path, exp))
+	}
+
+	return sb.String()
+}

@@ -144,6 +144,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "sessions", Description: "Pick which CC session to talk to"},
 				{Command: "use", Description: "/use <prefix> — pin a session"},
 				{Command: "idle", Description: "Show the most idle session"},
+				{Command: "rules", Description: "Manage auto-approve permission rules"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		})
@@ -235,7 +236,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/status — pairing + active sessions\n"+
 				"/sessions — pick which CC session to talk to\n"+
 				"/use <prefix> — pin a specific session\n"+
-				"/idle — show the most idle session"))
+				"/idle — show the most idle session\n"+
+				"/rules — list/clear/revoke auto-approve permission rules"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
@@ -245,6 +247,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply))
 	case "idle":
 		b.sendIdle(ctx, msg)
+	case "rules":
+		b.handleRulesCommand(ctx, msg)
 	}
 
 	return nil
