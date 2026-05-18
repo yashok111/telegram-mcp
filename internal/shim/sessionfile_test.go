@@ -31,7 +31,8 @@ func TestWriteSessionFile_createsAtomicallyWith0600(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o600), st.Mode().Perm())
 
 	var got SessionInfo
-	raw, _ := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &got))
 	assert.Equal(t, "s2", got.Alias)
 	assert.Equal(t, "abcdef012345", got.ShimID)
