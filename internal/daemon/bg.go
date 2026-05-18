@@ -110,13 +110,19 @@ func (r *BgRunner) List() []BgTaskInfo {
 func (r *BgRunner) Cancel(id string) error {
 	r.mu.Lock()
 	t, ok := r.tasks[id]
+
+	var cancel func()
+	if ok {
+		cancel = t.cancel
+	}
+
 	r.mu.Unlock()
 
 	if !ok {
 		return ErrTaskNotFound
 	}
 
-	t.cancel()
+	cancel()
 
 	return nil
 }
