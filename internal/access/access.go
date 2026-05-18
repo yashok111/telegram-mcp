@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -77,11 +78,14 @@ func defaultState() State {
 // Store wraps access.json with a mutex. Static mode snapshots state at boot
 // and refuses writes (matches TS plugin behavior).
 type Store struct {
-	dir    string
-	path   string
-	mu     sync.Mutex
-	static bool
-	boot   *State
+	dir       string
+	path      string
+	mu        sync.Mutex
+	static    bool
+	boot      *State
+	cacheMu   sync.Mutex
+	cached    *State
+	cachedMod time.Time
 }
 
 func NewStore(stateDir string, static bool) *Store {
@@ -104,12 +108,74 @@ func NewStore(stateDir string, static bool) *Store {
 	return s
 }
 
+// Load returns the current State. Hot path — cached by mtime; access.json is
+// re-read only when its mtime changes. Returned State's maps and slices are
+// fresh copies so callers may mutate without corrupting the cache.
 func (s *Store) Load() State {
 	if s.boot != nil {
-		return *s.boot
+		return cloneState(s.boot)
 	}
 
-	return s.readFile()
+	info, err := os.Stat(s.path)
+	if err != nil {
+		s.cacheMu.Lock()
+		s.cached = nil
+		s.cacheMu.Unlock()
+
+		return s.readFile()
+	}
+
+	s.cacheMu.Lock()
+	if s.cached != nil && info.ModTime().Equal(s.cachedMod) {
+		out := cloneState(s.cached)
+		s.cacheMu.Unlock()
+
+		return out
+	}
+	s.cacheMu.Unlock()
+
+	st := s.readFile()
+
+	s.cacheMu.Lock()
+	cached := st
+	s.cached = &cached
+	s.cachedMod = info.ModTime()
+	out := cloneState(&st)
+	s.cacheMu.Unlock()
+
+	return out
+}
+
+func cloneState(src *State) State {
+	out := *src
+	if src.AllowFrom != nil {
+		out.AllowFrom = slices.Clone(src.AllowFrom)
+	}
+
+	if src.MentionPatterns != nil {
+		out.MentionPatterns = slices.Clone(src.MentionPatterns)
+	}
+
+	if src.Rules != nil {
+		out.Rules = slices.Clone(src.Rules)
+	}
+
+	if src.Pending != nil {
+		out.Pending = maps.Clone(src.Pending)
+	}
+
+	if src.Groups != nil {
+		out.Groups = make(map[string]GroupPolicy, len(src.Groups))
+		for k, v := range src.Groups {
+			if v.AllowFrom != nil {
+				v.AllowFrom = slices.Clone(v.AllowFrom)
+			}
+
+			out.Groups[k] = v
+		}
+	}
+
+	return out
 }
 
 func (s *Store) readFile() State {
@@ -195,7 +261,7 @@ func (s *Store) saveLocked(st State) error {
 
 	tmp := s.path + ".tmp"
 
-	buf, err := json.MarshalIndent(st, "", "  ")
+	buf, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
@@ -216,6 +282,10 @@ func (s *Store) saveLocked(st State) error {
 		"pending", len(st.Pending),
 		"dm_policy", st.DMPolicy,
 	)
+
+	s.cacheMu.Lock()
+	s.cached = nil
+	s.cacheMu.Unlock()
 
 	return nil
 }

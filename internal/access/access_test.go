@@ -198,6 +198,35 @@ func TestStore_load_partialJSON_fillsDefaults(t *testing.T) {
 	assert.NotNil(t, got.Pending)
 }
 
+func TestStore_Load_returnedMapsAndSlicesAreIndependentOfCache(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+	require.NoError(t, s.Save(State{
+		DMPolicy:        PolicyAllowlist,
+		AllowFrom:       []string{"1"},
+		Groups:          map[string]GroupPolicy{"-100": {AllowFrom: []string{"99"}}},
+		Pending:         map[string]Pending{"abc": {SenderID: "1"}},
+		MentionPatterns: []string{"hello"},
+		Rules:           []PermissionRule{{ID: "r1", Tool: "Read", Action: RuleApprove}},
+	}))
+
+	a := s.Load()
+
+	a.AllowFrom = append(a.AllowFrom, "mutated")
+	a.Pending["mutated"] = Pending{SenderID: "X"}
+	a.Groups["-100"].AllowFrom[0] = "mutated"
+	a.MentionPatterns[0] = "mutated"
+	a.Rules[0].Tool = "mutated"
+
+	b := s.Load()
+
+	assert.Equal(t, []string{"1"}, b.AllowFrom, "AllowFrom mutation must not corrupt cache")
+	assert.NotContains(t, b.Pending, "mutated", "Pending mutation must not corrupt cache")
+	assert.Equal(t, []string{"99"}, b.Groups["-100"].AllowFrom, "nested GroupPolicy.AllowFrom mutation must not corrupt cache")
+	assert.Equal(t, []string{"hello"}, b.MentionPatterns, "MentionPatterns mutation must not corrupt cache")
+	assert.Equal(t, "Read", b.Rules[0].Tool, "Rules element mutation must not corrupt cache")
+}
+
 func TestStore_mutate_persistsWhenFnReturnsTrue(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir, false)
@@ -254,4 +283,131 @@ func TestStore_mutate_concurrentCallsSerializeWithoutLostUpdates(t *testing.T) {
 	}
 
 	assert.Len(t, seen, writers, "no duplicates / no losses")
+}
+
+func TestStore_Load_cachesUnchangedFile(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	original := State{
+		DMPolicy:  PolicyAllowlist,
+		AllowFrom: []string{"111"},
+		Groups:    map[string]GroupPolicy{},
+		Pending:   map[string]Pending{},
+	}
+	require.NoError(t, s.Save(original))
+
+	// Warm the cache.
+	first := s.Load()
+	assert.Equal(t, []string{"111"}, first.AllowFrom)
+
+	path := filepath.Join(dir, "access.json")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	originalMod := info.ModTime()
+
+	// Stomp the file out-of-band with different content, then roll mtime back.
+	tampered := State{
+		DMPolicy:  PolicyAllowlist,
+		AllowFrom: []string{"999"},
+		Groups:    map[string]GroupPolicy{},
+		Pending:   map[string]Pending{},
+	}
+	raw, err := json.Marshal(tampered)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+	require.NoError(t, os.Chtimes(path, originalMod, originalMod))
+
+	// Same mtime → cache should win and return the original content.
+	cached := s.Load()
+	assert.Equal(t, []string{"111"}, cached.AllowFrom, "Load must return cached State when mtime is unchanged")
+}
+
+func TestStore_Load_reloadsOnMtimeBump(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	require.NoError(t, s.Save(State{
+		DMPolicy:  PolicyAllowlist,
+		AllowFrom: []string{"old"},
+		Groups:    map[string]GroupPolicy{},
+		Pending:   map[string]Pending{},
+	}))
+
+	// Warm the cache.
+	first := s.Load()
+	assert.Equal(t, []string{"old"}, first.AllowFrom)
+
+	path := filepath.Join(dir, "access.json")
+
+	// Write fresh content and push mtime forward to invalidate cache.
+	fresh := State{
+		DMPolicy:  PolicyAllowlist,
+		AllowFrom: []string{"new"},
+		Groups:    map[string]GroupPolicy{},
+		Pending:   map[string]Pending{},
+	}
+	raw, err := json.Marshal(fresh)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+
+	bumped := time.Now().Add(time.Second)
+	require.NoError(t, os.Chtimes(path, bumped, bumped))
+
+	got := s.Load()
+	assert.Equal(t, []string{"new"}, got.AllowFrom, "mtime bump must invalidate cache")
+}
+
+func TestStore_Save_invalidatesCache(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	stateA := State{
+		DMPolicy:  PolicyAllowlist,
+		AllowFrom: []string{"A"},
+		Groups:    map[string]GroupPolicy{},
+		Pending:   map[string]Pending{},
+	}
+	require.NoError(t, s.Save(stateA))
+
+	// Warm the cache.
+	warmed := s.Load()
+	assert.Equal(t, []string{"A"}, warmed.AllowFrom)
+
+	stateB := State{
+		DMPolicy:  PolicyAllowlist,
+		AllowFrom: []string{"B"},
+		Groups:    map[string]GroupPolicy{},
+		Pending:   map[string]Pending{},
+	}
+	require.NoError(t, s.Save(stateB))
+
+	got := s.Load()
+	assert.Equal(t, []string{"B"}, got.AllowFrom, "Save must invalidate cache so next Load sees the new state")
+}
+
+func TestStore_Save_compactJSON(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	require.NoError(t, s.Save(State{
+		DMPolicy:  PolicyAllowlist,
+		AllowFrom: []string{"42"},
+		Groups:    map[string]GroupPolicy{"-100200": {RequireMention: true, AllowFrom: []string{"42"}}},
+		Pending:   map[string]Pending{},
+	}))
+
+	raw, err := os.ReadFile(filepath.Join(dir, "access.json"))
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(raw), "  ", "saveLocked must emit compact JSON (no two-space indent)")
+	assert.NotContains(t, string(raw), "\n  ", "saveLocked must emit compact JSON (no indented newlines)")
+
+	// Round-trip parses back correctly.
+	got := s.Load()
+	assert.Equal(t, PolicyAllowlist, got.DMPolicy)
+	assert.Equal(t, []string{"42"}, got.AllowFrom)
+	assert.True(t, got.Groups["-100200"].RequireMention)
 }

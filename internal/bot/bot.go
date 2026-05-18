@@ -76,6 +76,12 @@ type Bot struct {
 
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
+
+	mentionMu sync.Mutex
+	// Lives for daemon lifetime; patterns rarely change and access.json edits
+	// typically follow a process restart. nil entries negative-cache invalid
+	// regexes so a broken user pattern stops trying to compile.
+	mentionCache map[string]*regexp.Regexp
 }
 
 // NewWithRouter is the production constructor: rv carries the active Router
@@ -841,8 +847,8 @@ func (b *Bot) isMentioned(msg *telego.Message, extraPatterns []string) bool {
 
 	for _, pat := range extraPatterns {
 		// Invalid user-supplied patterns are silently skipped — mirrors TS behavior.
-		re, err := regexp.Compile("(?i)" + pat)
-		if err != nil {
+		re := b.compiledMentionPattern(pat)
+		if re == nil {
 			continue
 		}
 
@@ -852,6 +858,29 @@ func (b *Bot) isMentioned(msg *telego.Message, extraPatterns []string) bool {
 	}
 
 	return false
+}
+
+func (b *Bot) compiledMentionPattern(pat string) *regexp.Regexp {
+	b.mentionMu.Lock()
+	defer b.mentionMu.Unlock()
+
+	if b.mentionCache == nil {
+		b.mentionCache = map[string]*regexp.Regexp{}
+	}
+
+	if re, ok := b.mentionCache[pat]; ok {
+		return re
+	}
+
+	re, err := regexp.Compile("(?i)" + pat)
+	if err != nil {
+		b.mentionCache[pat] = nil
+		return nil
+	}
+
+	b.mentionCache[pat] = re
+
+	return re
 }
 
 func (b *Bot) approvalLoop(ctx context.Context) {
