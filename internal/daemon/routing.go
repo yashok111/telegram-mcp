@@ -107,11 +107,23 @@ func (rr *replyRing) lookup(msgID int) (string, bool) {
 }
 
 func (rr *replyRing) dropShim(shimID string) {
-	for mid, sid := range rr.owners {
+	keep := rr.fifo[:0]
+
+	for _, mid := range rr.fifo {
+		sid, ok := rr.owners[mid]
+		if !ok {
+			continue
+		}
+
 		if sid == shimID {
 			delete(rr.owners, mid)
+			continue
 		}
+
+		keep = append(keep, mid)
 	}
+
+	rr.fifo = keep
 }
 
 func NewRouter() *Router {

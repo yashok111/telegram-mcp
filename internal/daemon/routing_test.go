@@ -497,6 +497,24 @@ func TestRouterRouteInboundByReplyReassignsOnSameMsgID(t *testing.T) {
 	assert.Equal(t, "s2", got.ID)
 }
 
+func TestRouterDropCompactsReplyRingFifo(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+
+	for i := 1; i <= replyOwnerCapPerChat; i++ {
+		r.RecordOutbound("s1", "chat-1", i)
+	}
+
+	r.Drop("s1")
+	r.RecordOutbound("s2", "chat-1", replyOwnerCapPerChat+1)
+
+	ring, ok := r.replyOwners["chat-1"]
+	require.True(t, ok, "ring should survive — s2 has a live entry")
+	assert.Len(t, ring.fifo, 1, "dropShim must clear zombie IDs; only s2's single entry should remain")
+	assert.Len(t, ring.owners, 1)
+}
+
 func TestRouterDropClearsReplyOwners(t *testing.T) {
 	r := NewRouter()
 	r.Register(&Shim{ID: "s1"})
