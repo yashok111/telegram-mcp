@@ -70,11 +70,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 		m, _ := res.(map[string]any)
 		id, _ := m["shim_id"].(string)
 
-		shim := &Shim{ID: id, Notify: c.Notify}
+		label, _ := c.Meta.Load(metaLabel)
+		labelStr, _ := label.(string)
+		wd, _ := c.Meta.Load(metaWorkdir)
+		wdStr, _ := wd.(string)
+		cc, _ := c.Meta.Load(metaCCSessionID)
+		ccStr, _ := cc.(string)
+
+		shim := &Shim{
+			ID:          id,
+			Label:       labelStr,
+			Workdir:     wdStr,
+			CCSessionID: ccStr,
+			Notify:      c.Notify,
+		}
 		d.Router.Register(shim)
 		m["alias"] = shim.Alias
 
-		slog.Info("shim connected", "shim_id", id, "alias", shim.Alias)
+		slog.Info("shim connected", "shim_id", id, "alias", shim.Alias,
+			"label", labelStr, "workdir", wdStr, "cc_session_id", ccStr)
 
 		return m, nil
 	})

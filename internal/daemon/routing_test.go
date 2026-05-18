@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -228,4 +229,177 @@ func TestRouteInboundMultiMentionDoesNotChangeOwner(t *testing.T) {
 	owner, ok := r.RouteInbound("chat-1")
 	require.True(t, ok)
 	assert.Equal(t, "a", owner.ID, "mention dispatch must not rewrite chatOwners")
+}
+
+func TestRouterRegisterRecordsConnectedAt(t *testing.T) {
+	r := NewRouter()
+	before := time.Now()
+
+	r.Register(&Shim{ID: "s1", Workdir: "/tmp/wd", CCSessionID: "cc-1"})
+
+	after := time.Now()
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, "/tmp/wd", infos[0].Workdir)
+	assert.Equal(t, "cc-1", infos[0].CCSessionID)
+	assert.True(t, !infos[0].ConnectedAt.Before(before) && !infos[0].ConnectedAt.After(after))
+	assert.True(t, infos[0].LastOutbound.IsZero())
+}
+
+func TestRouterRecordOutboundSetsLastOutbound(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+
+	before := time.Now()
+
+	r.RecordOutbound("s1", "chat-1")
+
+	after := time.Now()
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 1)
+	assert.True(t, !infos[0].LastOutbound.Before(before) && !infos[0].LastOutbound.After(after))
+}
+
+func TestRouterPinOverridesOwner(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	r.RecordOutbound("s1", "chat-1") // s1 owns chat-1 via last-writer-wins
+
+	require.NoError(t, r.Pin("chat-1", "s2", time.Minute))
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "s2", got.ID)
+}
+
+func TestRouterPinUnknownShim(t *testing.T) {
+	r := NewRouter()
+	err := r.Pin("chat-1", "ghost", time.Minute)
+	require.ErrorIs(t, err, ErrShimNotFound)
+}
+
+func TestRouterPinExpires(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	r.RecordOutbound("s1", "chat-1")
+	require.NoError(t, r.Pin("chat-1", "s2", -time.Second)) // already expired
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "s1", got.ID)
+}
+
+func TestRouterOutboundFromOtherShimClearsPin(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	require.NoError(t, r.Pin("chat-1", "s2", time.Hour))
+	r.RecordOutbound("s1", "chat-1") // different shim writes
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "s1", got.ID, "pin should be cleared, last-writer-wins resumes")
+}
+
+func TestRouterOutboundFromPinnedShimKeepsPin(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	r.RecordOutbound("s1", "chat-1")
+	require.NoError(t, r.Pin("chat-1", "s2", time.Hour))
+	r.RecordOutbound("s2", "chat-1") // pinned shim writes — no-op for pin
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "s2", got.ID)
+}
+
+func TestRouterUnpin(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	r.RecordOutbound("s1", "chat-1")
+	require.NoError(t, r.Pin("chat-1", "s2", time.Hour))
+	r.Unpin("chat-1")
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "s1", got.ID)
+}
+
+func TestRouterSnapshotPinnedChatsActive(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	require.NoError(t, r.Pin("chatA", "s1", time.Hour))
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 2)
+
+	byID := map[string]ShimInfo{}
+	for _, info := range infos {
+		byID[info.ID] = info
+	}
+
+	require.Contains(t, byID, "s1")
+	require.Contains(t, byID, "s2")
+	assert.Equal(t, []string{"chatA"}, byID["s1"].PinnedChats)
+	assert.Empty(t, byID["s2"].PinnedChats)
+}
+
+func TestRouterSnapshotPinnedChatsExpiredFiltered(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	require.NoError(t, r.Pin("chatA", "s1", -time.Second))
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 2)
+
+	for _, info := range infos {
+		assert.Empty(t, info.PinnedChats, "expired pin must be filtered from snapshot for shim %s", info.ID)
+	}
+}
+
+func TestRouterDropClearsPinsHeldByDroppedShim(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	require.NoError(t, r.Pin("chatA", "s1", time.Hour))
+	require.NoError(t, r.Pin("chatB", "s2", time.Hour))
+
+	r.Drop("s1")
+
+	got, ok := r.RouteInbound("chatA")
+	require.True(t, ok, "chatA should still resolve via fallback after s1 dropped")
+	assert.Equal(t, "s2", got.ID, "chatA falls back to LRU (s2) since s1 gone and its pin cleared")
+
+	infos := r.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, "s2", infos[0].ID)
+	assert.Equal(t, []string{"chatB"}, infos[0].PinnedChats, "s2's pin must be untouched by s1 drop")
+}
+
+func TestRouterResolveShimByPrefix(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "abcdef012345"})
+	r.Register(&Shim{ID: "abcd99887766"})
+	r.Register(&Shim{ID: "ffffffffffff"})
+
+	s, err := r.ResolveShimByPrefix("abcdef")
+	require.NoError(t, err)
+	assert.Equal(t, "abcdef012345", s.ID)
+
+	_, err = r.ResolveShimByPrefix("abcd")
+	require.ErrorIs(t, err, ErrAmbiguousShimPrefix)
+
+	_, err = r.ResolveShimByPrefix("zz")
+	require.ErrorIs(t, err, ErrShimNotFound)
+
+	_, err = r.ResolveShimByPrefix("")
+	require.ErrorIs(t, err, ErrShimNotFound)
 }

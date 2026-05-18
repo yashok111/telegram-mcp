@@ -53,6 +53,7 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 			"content_len": len(p.Content),
 			"pid":         os.Getpid(),
 		}
+
 		if stats, ok := sink.(StatsSink); ok {
 			r, i := stats.SessionStats()
 			preFields["mcp_sessions_registered"] = r
@@ -67,6 +68,7 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 			"chat_id": p.Meta["chat_id"],
 			"pid":     os.Getpid(),
 		}
+
 		if stats, ok := sink.(StatsSink); ok {
 			r, i := stats.SessionStats()
 			postFields["mcp_sessions_registered"] = r
@@ -109,7 +111,7 @@ func writeDebug(event string, fields map[string]any) {
 		return
 	}
 
-	f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // debugLogPath is set internally from StateDir, not user input.
 	if err != nil {
 		return
 	}

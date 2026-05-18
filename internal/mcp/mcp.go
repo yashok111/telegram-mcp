@@ -150,6 +150,7 @@ func (s *Server) DeliverInbound(content string, meta map[string]string) {
 
 func wrapChannel(content string, meta map[string]string) string {
 	attrs := []string{`source="telegram"`}
+
 	for _, k := range []string{"chat_id", "message_id", "user", "ts", "image_path", "attachment_file_id"} {
 		if v, ok := meta[k]; ok && v != "" {
 			attrs = append(attrs, fmt.Sprintf(`%s=%q`, k, v))

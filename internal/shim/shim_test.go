@@ -80,6 +80,29 @@ func TestShimWireCapturesAlias(t *testing.T) {
 	assert.Equal(t, "s7", alias)
 }
 
+func TestShimWireSendsWorkdirAndSession(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-sess-id")
+	wd := t.TempDir()
+	t.Chdir(wd)
+
+	store := access.NewStore(t.TempDir(), false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id1","alias":"s1","daemon_version":"test"}`)}
+	sh := &Shim{
+		Client:      fc,
+		MCP:         mcpSrv,
+		Store:       store,
+		WireContext: context.Background,
+	}
+	require.NoError(t, sh.Wire())
+
+	require.Equal(t, ipc.MethodHello, fc.calledMethod)
+	assert.Contains(t, string(fc.calledParams), `"workdir":"`+wd+`"`)
+	assert.Contains(t, string(fc.calledParams), `"cc_session_id":"test-sess-id"`)
+}
+
 func TestShimRunStopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	store := access.NewStore(dir, false)

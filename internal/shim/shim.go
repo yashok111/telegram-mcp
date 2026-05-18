@@ -81,9 +81,16 @@ func (s *Shim) Wire() error {
 		Alias         string `json:"alias"`
 	}
 
+	wd, err := os.Getwd()
+	if err != nil {
+		slog.Warn("os.Getwd failed; sending empty workdir in Hello", "err", err)
+	}
+
 	if err := s.Client.Call(wctx, ipc.MethodHello, map[string]any{
-		"shim_pid": s.HelloPID,
-		"label":    s.HelloLabel,
+		"shim_pid":      s.HelloPID,
+		"label":         s.HelloLabel,
+		"workdir":       wd,
+		"cc_session_id": os.Getenv("CLAUDE_CODE_SESSION_ID"),
 	}, &hello); err != nil {
 		return err
 	}

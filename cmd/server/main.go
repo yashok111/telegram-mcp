@@ -184,7 +184,7 @@ func runDaemon(stateDir string) error {
 	router := daemonpkg.NewRouter()
 	notifier := daemonpkg.NewNotifier(router)
 
-	tgBot, err := bot.New(token, store, notifier)
+	tgBot, err := bot.NewWithRouter(token, store, notifier, &routerAdapter{r: router})
 	if err != nil {
 		return fmt.Errorf("telegram init: %w", err)
 	}
@@ -397,4 +397,69 @@ func isOurPoller(pid int) bool {
 	comm := strings.TrimSpace(string(raw))
 
 	return comm == "telegram-mcp" || comm == "bun"
+}
+
+// routerAdapter adapts daemon.Router to bot.RouterView, converting
+// daemon.ShimInfo into bot.ShimInfo at the boundary so internal/bot doesn't
+// import internal/daemon.
+type routerAdapter struct{ r *daemonpkg.Router }
+
+func (a *routerAdapter) Snapshot() []bot.ShimInfo {
+	in := a.r.Snapshot()
+	out := make([]bot.ShimInfo, len(in))
+
+	for i, s := range in {
+		out[i] = adaptShimInfo(s)
+	}
+
+	return out
+}
+
+func (a *routerAdapter) Pin(chatID, prefix string, ttl time.Duration) (bot.ShimInfo, error) {
+	sh, err := a.r.ResolveShimByPrefix(prefix)
+	if err != nil {
+		return bot.ShimInfo{}, fmt.Errorf("resolve shim prefix: %w", err)
+	}
+
+	if err := a.r.Pin(chatID, sh.ID, ttl); err != nil {
+		return bot.ShimInfo{}, fmt.Errorf("pin shim: %w", err)
+	}
+
+	return lookupShimInfo(a.r, sh.ID), nil
+}
+
+func (a *routerAdapter) Evict(prefix string) (bot.ShimInfo, error) {
+	sh, err := a.r.ResolveShimByPrefix(prefix)
+	if err != nil {
+		return bot.ShimInfo{}, fmt.Errorf("resolve shim prefix: %w", err)
+	}
+
+	info := lookupShimInfo(a.r, sh.ID)
+	a.r.Drop(sh.ID)
+
+	return info, nil
+}
+
+func lookupShimInfo(r *daemonpkg.Router, id string) bot.ShimInfo {
+	for _, s := range r.Snapshot() {
+		if s.ID == id {
+			return adaptShimInfo(s)
+		}
+	}
+
+	return bot.ShimInfo{}
+}
+
+func adaptShimInfo(s daemonpkg.ShimInfo) bot.ShimInfo {
+	return bot.ShimInfo{
+		ID:           s.ID,
+		IDPrefix:     s.IDPrefix(),
+		Alias:        s.Alias,
+		Label:        s.Label,
+		Workdir:      s.Workdir,
+		CCSessionID:  s.CCSessionID,
+		ConnectedAt:  s.ConnectedAt,
+		LastOutbound: s.LastOutbound,
+		PinnedChats:  s.PinnedChats,
+	}
 }

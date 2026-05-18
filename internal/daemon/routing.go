@@ -5,20 +5,31 @@ package daemon
 import (
 	"errors"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 )
 
 // ErrPermissionIDInUse is returned when a shim tries to register a permission
 // request_id that another (still-connected) shim already holds.
 var ErrPermissionIDInUse = errors.New("permission request_id already in use")
 
+var (
+	ErrShimNotFound        = errors.New("shim not found")
+	ErrAmbiguousShimPrefix = errors.New("shim prefix is ambiguous")
+)
+
 // Shim is the daemon-side handle for a connected shim. ID is stable for the
 // connection's lifetime; the Notify function pushes daemon→shim notifications.
 type Shim struct {
-	ID     string
-	Alias  string
-	Label  string
-	Notify func(method string, params any) error // bound to the underlying ipc.Conn
+	ID          string
+	Alias       string
+	Label       string
+	Workdir     string
+	CCSessionID string
+	ConnectedAt time.Time
+	Notify      func(method string, params any) error // bound to the underlying ipc.Conn
 }
 
 // PermDetails caches the perm request fields embedded in
@@ -41,16 +52,26 @@ type Router struct {
 
 	aliases   map[string]string // alias → shim_id
 	shimAlias map[string]string // shim_id → alias  (for O(1) release at Drop)
+
+	lastOutbound map[string]time.Time // shim_id → time
+	pins         map[string]pin       // chat_id → pin
+}
+
+type pin struct {
+	shimID    string
+	expiresAt time.Time
 }
 
 func NewRouter() *Router {
 	return &Router{
-		shims:       map[string]*Shim{},
-		chatOwners:  map[string]string{},
-		permOwners:  map[string]string{},
-		permDetails: map[string]PermDetails{},
-		aliases:     map[string]string{},
-		shimAlias:   map[string]string{},
+		shims:        map[string]*Shim{},
+		chatOwners:   map[string]string{},
+		permOwners:   map[string]string{},
+		permDetails:  map[string]PermDetails{},
+		aliases:      map[string]string{},
+		shimAlias:    map[string]string{},
+		lastOutbound: map[string]time.Time{},
+		pins:         map[string]pin{},
 	}
 }
 
@@ -62,6 +83,10 @@ func (r *Router) Register(s *Shim) {
 	s.Alias = alias
 	r.aliases[alias] = s.ID
 	r.shimAlias[s.ID] = alias
+
+	if s.ConnectedAt.IsZero() {
+		s.ConnectedAt = time.Now()
+	}
 
 	r.shims[s.ID] = s
 	r.lru = prepend(r.lru, s.ID)
@@ -91,6 +116,14 @@ func (r *Router) Drop(id string) {
 			delete(r.permDetails, pid)
 		}
 	}
+
+	delete(r.lastOutbound, id)
+
+	for chat, p := range r.pins {
+		if p.shimID == id {
+			delete(r.pins, chat)
+		}
+	}
 }
 
 func (r *Router) RecordOutbound(shimID, chatID string) {
@@ -104,19 +137,130 @@ func (r *Router) RecordOutbound(shimID, chatID string) {
 
 	prev := r.chatOwners[chatID]
 	r.chatOwners[chatID] = shimID
+	r.lastOutbound[shimID] = time.Now()
+
+	if p, ok := r.pins[chatID]; ok && p.shimID != shimID {
+		delete(r.pins, chatID)
+		slog.Info("router pin cleared by other shim outbound", "chat_id", chatID, "old_pin_shim", p.shimID, "new_owner", shimID)
+	}
 
 	slog.Info("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "prev_owner", prev)
 }
 
-func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
+// Snapshot returns a by-value list of connected shims, newest-first by ConnectedAt.
+// Safe to hand to bot code without leaking router-internal state.
+func (r *Router) Snapshot() []ShimInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	out := make([]ShimInfo, 0, len(r.shims))
+	pinsByShim := map[string][]string{}
+
+	now := time.Now()
+	for chat, p := range r.pins {
+		if now.After(p.expiresAt) {
+			continue
+		}
+
+		pinsByShim[p.shimID] = append(pinsByShim[p.shimID], chat)
+	}
+
+	for _, s := range r.shims {
+		out = append(out, ShimInfo{
+			ID:           s.ID,
+			Alias:        s.Alias,
+			Label:        s.Label,
+			Workdir:      s.Workdir,
+			CCSessionID:  s.CCSessionID,
+			ConnectedAt:  s.ConnectedAt,
+			LastOutbound: r.lastOutbound[s.ID],
+			PinnedChats:  pinsByShim[s.ID],
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ConnectedAt.After(out[j].ConnectedAt)
+	})
+
+	return out
+}
+
+// Pin overrides the chat→shim routing decision for ttl. A negative or zero ttl
+// is treated as already-expired (test fixture). Outbound by a different shim or
+// elapsed TTL clears the pin transparently in RouteInbound/RecordOutbound.
+func (r *Router) Pin(chatID, shimID string, ttl time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.shims[shimID]; !ok {
+		return ErrShimNotFound
+	}
+
+	r.pins[chatID] = pin{shimID: shimID, expiresAt: time.Now().Add(ttl)}
+	slog.Info("router pin set", "chat_id", chatID, "shim_id", shimID, "ttl_sec", int(ttl.Seconds()))
+
+	return nil
+}
+
+func (r *Router) Unpin(chatID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.pins[chatID]; ok {
+		delete(r.pins, chatID)
+		slog.Info("router pin cleared", "chat_id", chatID)
+	}
+}
+
+// ResolveShimByPrefix returns the unique shim whose ID starts with prefix.
+// Empty prefix is rejected (would match every shim).
+func (r *Router) ResolveShimByPrefix(prefix string) (*Shim, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if prefix == "" {
+		return nil, ErrShimNotFound
+	}
+
+	var found *Shim
+
+	for id, s := range r.shims {
+		if strings.HasPrefix(id, prefix) {
+			if found != nil {
+				return nil, ErrAmbiguousShimPrefix
+			}
+
+			found = s
+		}
+	}
+
+	if found == nil {
+		return nil, ErrShimNotFound
+	}
+
+	return found, nil
+}
+
+func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	return r.routeInboundLocked(chatID)
 }
 
-// routeInboundLocked is the owner→LRU resolver. Caller holds r.mu.
+// routeInboundLocked is the pin→owner→LRU resolver. Caller holds r.mu (write
+// lock — pin expiry may mutate r.pins).
 func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
+	if p, ok := r.pins[chatID]; ok {
+		if time.Now().After(p.expiresAt) {
+			delete(r.pins, chatID)
+			slog.Info("router pin expired", "chat_id", chatID)
+		} else if s, ok := r.shims[p.shimID]; ok {
+			slog.Info("RouteInbound pin", "chat_id", chatID, "shim_id", s.ID)
+			return s, true
+		}
+	}
+
 	if owner, ok := r.chatOwners[chatID]; ok {
 		if s, ok := r.shims[owner]; ok {
 			slog.Info("RouteInbound owner", "chat_id", chatID, "shim_id", s.ID)
@@ -146,8 +290,8 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 func (r *Router) RouteInboundMulti(chatID, content string) []*Shim {
 	mentions := parseMentions(content)
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	if len(mentions) > 0 {
 		targets := r.resolveMentionsLocked(chatID, mentions)
@@ -219,7 +363,7 @@ func (r *Router) RegisterPermission(reqID, shimID string, d PermDetails) error {
 	}
 
 	if _, ok := r.shims[shimID]; !ok {
-		return errors.New("unknown shim")
+		return ErrShimNotFound
 	}
 
 	r.permOwners[reqID] = shimID
