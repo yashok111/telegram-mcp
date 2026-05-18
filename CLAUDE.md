@@ -73,6 +73,39 @@ To bridge N Claude Code sessions to one Telegram bot:
 
 **Don't run both modes against the same token.** Kill the daemon (`kill $(cat ~/.claude/channels/telegram/daemon.pid)`) before reverting to embedded.
 
+## CC self-context (SessionStart hook)
+
+The agent should know its own shim alias from turn 1 so `@s2 do X` mentions work without needing inbound message metadata. Two pieces:
+
+1. **Shim side** — on `Wire()` success, the shim writes a per-session snapshot to:
+
+   ```
+   ~/.claude/channels/telegram/sessions/<cc_session_id>.json
+   ```
+
+   File is mode 0600, atomic (tmp+rename), removed when `Run()` exits. Schema:
+   `{alias, shim_id, shim_id_prefix, cc_session_id, workdir, label, started_at, mode}`.
+
+2. **CC side** — `telegram-mcp self` reads that file (env `CLAUDE_CODE_SESSION_ID`) and emits the context block. Wire it as a SessionStart hook in `~/.claude/settings.json`:
+
+   ```json
+   {
+     "hooks": {
+       "SessionStart": [
+         { "hooks": [ { "type": "command", "command": "/abs/path/to/bin/telegram-mcp self --hook" } ] }
+       ]
+     }
+   }
+   ```
+
+   Or use the bundled wrapper: `contrib/hooks/session-start.sh`. `--hook` emits CC's
+   `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"..."}}`
+   shape. Without `--hook`, plain text is printed (useful for `telegram-mcp self`
+   at the shell).
+
+**Embedded mode** (no daemon): no session file is written; `self` gracefully prints
+"embedded mode". No fatal errors — hooks must never abort a CC session.
+
 ## Testing
 
 `go.uber.org/goleak` in every package's `TestMain`. Ignored upstream leaks (documented inline): `fasthttp.HostClient.connsCleaner` / `Client.mCleaner` / `TCPDialer.tcpAddrsClean`, `telego.Bot.doLongPolling` (sleeps in backoff after ctx cancel).
