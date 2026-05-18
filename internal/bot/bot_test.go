@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -640,6 +642,45 @@ func TestCompiledMentionPattern_invalidPattern_returnsNilAndCachesIt(t *testing.
 	entry, ok := b.mentionCache["(unclosed"]
 	assert.True(t, ok)
 	assert.Nil(t, entry)
+}
+
+func TestBot_ensureInboxDir_runsOnce(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	b := &Bot{store: store}
+
+	// First call creates the inbox directory.
+	require.NoError(t, b.ensureInboxDir())
+
+	info, err := os.Stat(filepath.Join(dir, "inbox"))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+
+	// Remove the directory; a second call MUST NOT re-create it because
+	// sync.Once already fired. This proves the syscall isn't repeated.
+	require.NoError(t, os.RemoveAll(filepath.Join(dir, "inbox")))
+
+	require.NoError(t, b.ensureInboxDir())
+	_, err = os.Stat(filepath.Join(dir, "inbox"))
+	assert.True(t, os.IsNotExist(err), "inbox dir should NOT be re-created on second call")
+}
+
+func TestBot_ensureInboxDir_propagatesError(t *testing.T) {
+	// Point InboxDir at a path under a regular file — MkdirAll will fail
+	// because a non-directory exists in the path. The cached error must
+	// surface on every subsequent call.
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
+
+	store := access.NewStore(blocker, false)
+	b := &Bot{store: store}
+
+	err1 := b.ensureInboxDir()
+	require.Error(t, err1)
+
+	err2 := b.ensureInboxDir()
+	assert.Equal(t, err1, err2, "cached MkdirAll error must persist")
 }
 
 func TestIsMentioned_usesCacheAcrossCalls(t *testing.T) {
