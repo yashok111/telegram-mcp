@@ -62,6 +62,7 @@ type State struct {
 	ReplyToMode     ReplyToMode            `json:"replyToMode,omitempty"`
 	TextChunkLimit  int                    `json:"textChunkLimit,omitempty"`
 	ChunkMode       ChunkMode              `json:"chunkMode,omitempty"`
+	Rules           []PermissionRule       `json:"rules,omitempty"`
 }
 
 func defaultState() State {
