@@ -100,6 +100,23 @@ func (s *Shim) Wire() error {
 	s.alias = hello.Alias
 	s.idMu.Unlock()
 
+	if cc := os.Getenv("CLAUDE_CODE_SESSION_ID"); cc != "" && s.StateDir != "" {
+		info := SessionInfo{
+			Alias:        hello.Alias,
+			ShimID:       hello.ShimID,
+			ShimIDPrefix: shimIDPrefix(hello.ShimID),
+			CCSessionID:  cc,
+			Workdir:      wd,
+			Label:        s.HelloLabel,
+			Mode:         "shim",
+		}
+		if path, err := writeSessionFile(s.StateDir, info); err != nil {
+			slog.Warn("session file write failed", "err", err)
+		} else {
+			slog.Info("session file written", "path", path)
+		}
+	}
+
 	slog.Info("shim wired", "shim_id", hello.ShimID, "daemon_version", hello.DaemonVersion, "alias", hello.Alias, "shim_pid", s.HelloPID, "label", s.HelloLabel)
 
 	return nil
@@ -110,7 +127,14 @@ func (s *Shim) Run(ctx context.Context) error {
 		return err
 	}
 
-	defer func() { _ = s.Client.Notify(ipc.MethodGoodbye, map[string]any{}) }()
+	defer func() {
+		if cc := os.Getenv("CLAUDE_CODE_SESSION_ID"); cc != "" && s.StateDir != "" {
+			if err := removeSessionFile(s.StateDir, cc); err != nil {
+				slog.Warn("session file remove failed", "err", err)
+			}
+		}
+		_ = s.Client.Notify(ipc.MethodGoodbye, map[string]any{})
+	}()
 
 	go func() {
 		select {
