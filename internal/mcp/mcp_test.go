@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	mcptypes "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -422,7 +423,10 @@ func TestHandleDownload_apiError(t *testing.T) {
 func TestLookupPermission_roundTrip(t *testing.T) {
 	srv, _, _ := newServerWithAllowlist(t)
 	srv.permMu.Lock()
-	srv.pending["abcde"] = bot.PermissionDetails{ToolName: "Bash", Description: "run", InputPreview: `{"x":1}`}
+	srv.pending["abcde"] = pendingEntry{
+		details:   bot.PermissionDetails{ToolName: "Bash", Description: "run", InputPreview: `{"x":1}`},
+		createdAt: time.Now(),
+	}
 	srv.permMu.Unlock()
 
 	d, ok := srv.LookupPermission("abcde")
@@ -436,7 +440,7 @@ func TestLookupPermission_roundTrip(t *testing.T) {
 func TestResolvePermission_clearsPending(t *testing.T) {
 	srv, _, _ := newServerWithAllowlist(t)
 	srv.permMu.Lock()
-	srv.pending["abcde"] = bot.PermissionDetails{}
+	srv.pending["abcde"] = pendingEntry{createdAt: time.Now()}
 	srv.permMu.Unlock()
 
 	srv.ResolvePermission("abcde", "allow")
@@ -482,7 +486,10 @@ func TestRegisterNotifications_storesAndBroadcasts(t *testing.T) {
 	// underlying srv. We dig into the unexported map; the alternative would
 	// be a full JSON-RPC dispatch, which is overkill for verifying intent.
 	srv.permMu.Lock()
-	srv.pending["zzzzz"] = bot.PermissionDetails{ToolName: "Read", Description: "d", InputPreview: "{}"}
+	srv.pending["zzzzz"] = pendingEntry{
+		details:   bot.PermissionDetails{ToolName: "Read", Description: "d", InputPreview: "{}"},
+		createdAt: time.Now(),
+	}
 	srv.permMu.Unlock()
 	// Direct fan-out — simulates a permission_request arrival.
 	if b, ok := srv.Bot().(*fakeBot); ok {
