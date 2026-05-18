@@ -356,6 +356,115 @@ func TestBackoffDelayCapsAtMax(t *testing.T) {
 	assert.Equal(t, reconnectMaxBackoff, backoffDelay(100))
 }
 
+// TestShimRunReconnectsThroughRealIPC exercises the reconnect path against
+// real ipc.Server and ipc.Dial — the closest unit-level analogue of a live
+// `systemctl --user restart telegram-mcp` event short of spawning the daemon
+// binary. Server 1 accepts initial Hello, exits; server 2 binds the same
+// socket and accepts the reconnect Hello.
+func TestShimRunReconnectsThroughRealIPC(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "daemon.sock")
+
+	var helloCount atomic.Int32
+
+	helloHandler := func(alias string) func(_ context.Context, _ *ipc.Conn, _ json.RawMessage) (any, *ipc.Error) {
+		return func(_ context.Context, _ *ipc.Conn, _ json.RawMessage) (any, *ipc.Error) {
+			helloCount.Add(1)
+
+			return map[string]string{
+				"shim_id":        "real-" + alias,
+				"alias":          alias,
+				"daemon_version": "test",
+			}, nil
+		}
+	}
+
+	startServer := func(alias string) (*ipc.Server, context.CancelFunc, chan struct{}) {
+		srv := ipc.NewServer(sock)
+		srv.Handle(ipc.MethodHello, helloHandler(alias))
+
+		srvCtx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+
+		go func() {
+			_ = srv.Listen(srvCtx)
+
+			close(done)
+		}()
+
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(sock)
+			return err == nil
+		}, 2*time.Second, 10*time.Millisecond, "server %s never bound socket", alias)
+
+		return srv, cancel, done
+	}
+
+	_, cancel1, done1 := startServer("first")
+
+	client, err := ipc.Dial(sock)
+	require.NoError(t, err)
+
+	store := access.NewStore(dir, false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	sh := &Shim{
+		Client:      client,
+		MCP:         mcpSrv,
+		Store:       store,
+		StateDir:    dir,
+		SocketPath:  sock,
+		CCPID:       1234,
+		WireContext: context.Background,
+		DialIPC: func(p string) (IPCClient, error) {
+			return ipc.Dial(p)
+		},
+		ServeStdio: func(ctx context.Context) error {
+			<-ctx.Done()
+			return nil
+		},
+	}
+
+	runCtx, cancelRun := context.WithCancel(t.Context())
+	served := make(chan error, 1)
+
+	go func() { served <- sh.Run(runCtx) }()
+
+	require.Eventually(t, func() bool { return helloCount.Load() == 1 },
+		2*time.Second, 10*time.Millisecond, "initial Hello never observed by server")
+
+	alias, ok := sh.ShimAlias()
+	require.True(t, ok)
+	assert.Equal(t, "first", alias)
+
+	cancel1()
+	<-done1
+
+	_, cancel2, done2 := startServer("second")
+	defer func() {
+		cancel2()
+		<-done2
+	}()
+
+	require.Eventually(t, func() bool { return helloCount.Load() >= 2 },
+		5*time.Second, 50*time.Millisecond, "reconnect Hello never observed by second server")
+
+	require.Eventually(t, func() bool {
+		a, ok := sh.ShimAlias()
+		return ok && a == "second"
+	}, 2*time.Second, 10*time.Millisecond, "shim alias never updated after reconnect")
+
+	cancelRun()
+
+	select {
+	case err := <-served:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit after ctx cancel post-reconnect")
+	}
+}
+
 func TestShimRunStopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	store := access.NewStore(dir, false)
