@@ -211,7 +211,6 @@ func (r *Router) RecordOutbound(shimID, chatID string, messageID int) {
 		return
 	}
 
-	prev := r.chatOwners[chatID]
 	r.chatOwners[chatID] = shimID
 	r.lastOutbound[shimID] = time.Now()
 
@@ -230,7 +229,7 @@ func (r *Router) RecordOutbound(shimID, chatID string, messageID int) {
 		slog.Info("router pin cleared by other shim outbound", "chat_id", chatID, "old_pin_shim", p.shimID, "new_owner", shimID)
 	}
 
-	slog.Info("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "message_id", messageID, "prev_owner", prev)
+	slog.Debug("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "message_id", messageID)
 }
 
 // RouteInboundByReply resolves an inbound Telegram reply to the shim that sent

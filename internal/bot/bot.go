@@ -293,32 +293,19 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 		return nil
 	}
 
-	slog.Info("inbound message",
-		"chat_id", msg.Chat.ID,
-		"message_id", msg.MessageID,
-		"user", userLabel(msg.From),
-		"user_id", msg.From.ID,
-		"kind", classifyMessageKind(&msg),
-		"text_len", len(msg.Text),
-	)
-
 	decision := b.gate(&msg)
-
-	slog.Info("gate decision",
-		"chat_id", msg.Chat.ID,
-		"user_id", msg.From.ID,
-		"action", decision.action,
-		"is_resend", decision.isResend,
-	)
 
 	switch decision.action {
 	case actionDrop:
+		slog.Info("inbound dropped", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "kind", classifyMessageKind(&msg))
 		return nil
 	case actionPair:
 		lead := "Pairing required"
 		if decision.isResend {
 			lead = "Still pending"
 		}
+
+		slog.Info("inbound pairing", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "is_resend", decision.isResend)
 
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
 			fmt.Sprintf("%s — run in Claude Code:\n\n/telegram:access pair %s", lead, decision.code)))
@@ -343,7 +330,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 			emoji = "✅"
 		}
 
-		slog.Info("permission reply intercepted", "request_id", strings.ToLower(m[2]), "behavior", behavior, "chat_id", chatID, "user_id", msg.From.ID)
+		slog.Info("inbound permission-reply", "request_id", strings.ToLower(m[2]), "behavior", behavior, "chat_id", chatID, "user_id", msg.From.ID)
 
 		b.notifier.ResolvePermission(strings.ToLower(m[2]), behavior)
 		_ = b.setReaction(ctx, chatID, msgID, emoji)
@@ -384,6 +371,14 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 	default:
 		maps.Copy(meta, attachmentMeta(&msg))
 	}
+
+	slog.Info("inbound delivered",
+		"chat_id", chatID,
+		"message_id", msgID,
+		"user", userLabel(msg.From),
+		"kind", classifyMessageKind(&msg),
+		"text_len", len(text),
+	)
 
 	b.notifier.DeliverInbound(text, meta)
 

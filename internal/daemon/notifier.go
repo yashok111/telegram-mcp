@@ -37,13 +37,27 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 		"meta":    meta,
 	}
 
-	for _, t := range targets {
-		slog.Info("DeliverInbound dispatch", "chat_id", chatID, "shim_id", t.ID, "alias", t.Alias, "content_len", len(content), "user", meta["user"], "fanout", len(targets))
+	slog.Info("DeliverInbound dispatch",
+		"chat_id", chatID,
+		"fanout", len(targets),
+		"targets", shimIDs(targets),
+		"content_len", len(content),
+	)
 
+	for _, t := range targets {
 		if err := t.Notify(ipc.NotifyInbound, params); err != nil {
 			slog.Error("inbound notify failed", "shim_id", t.ID, "chat_id", chatID, "err", err)
 		}
 	}
+}
+
+func shimIDs(targets []*Shim) []string {
+	out := make([]string, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, t.ID)
+	}
+
+	return out
 }
 
 func (n *Notifier) LookupPermission(requestID string) (bot.PermissionDetails, bool) {
