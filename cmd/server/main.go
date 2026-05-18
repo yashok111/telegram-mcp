@@ -35,6 +35,7 @@ const (
 	modeEmbedded mode = iota
 	modeDaemon
 	modeShim
+	modeSelf
 )
 
 func selectMode(argv []string) mode {
@@ -44,6 +45,8 @@ func selectMode(argv []string) mode {
 			return modeDaemon
 		case "shim":
 			return modeShim
+		case "self":
+			return modeSelf
 		}
 	}
 
@@ -71,13 +74,21 @@ func main() {
 		slog.Warn(".env load failed", "err", err)
 	}
 
+	selected := selectMode(os.Args)
+
+	// `self` is a read-only context-rendering subcommand. It must not bind
+	// PR_SET_PDEATHSIG, claim bot.pid, or otherwise mutate process-global state.
+	if selected == modeSelf {
+		os.Exit(runSelf(stateDir, os.Args[2:], os.Stdout))
+	}
+
 	// PR_SET_PDEATHSIG binds our lifetime to the spawning Claude Code session
 	// for embedded and shim modes. Daemon mode must outlive any single shim,
 	// so it explicitly opts out — its lifetime is governed by IdleTimeout and
 	// systemd / signal handling instead.
 	var runErr error
 
-	switch selectMode(os.Args) {
+	switch selected {
 	case modeDaemon:
 		runErr = runDaemon(stateDir)
 	case modeShim:
@@ -88,6 +99,8 @@ func main() {
 		bindParentDeath()
 
 		runErr = runEmbedded(stateDir)
+	case modeSelf:
+		// Handled above; included so the switch is exhaustive for linters.
 	}
 
 	if runErr != nil {
