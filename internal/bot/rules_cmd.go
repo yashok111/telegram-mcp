@@ -12,7 +12,7 @@ import (
 	"github.com/yakov/telegram-mcp/internal/access"
 )
 
-func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message) {
+func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message, st access.State) {
 	parts := strings.Fields(strings.TrimSpace(msg.Text))
 
 	sub := ""
@@ -24,7 +24,6 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message) {
 
 	switch sub {
 	case "", "list":
-		st := b.store.Load()
 		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, renderRules(st.Rules)))
 	case "clear":
 		var n int

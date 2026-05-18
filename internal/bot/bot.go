@@ -254,7 +254,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	case "idle":
 		b.sendIdle(ctx, msg)
 	case "rules":
-		b.handleRulesCommand(ctx, msg)
+		b.handleRulesCommand(ctx, msg, st)
 	}
 
 	return nil
@@ -584,10 +584,10 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 }
 
 func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
-	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
-		st := b.store.Load()
+	st := b.store.Load()
+	senderID := strconv.FormatInt(q.From.ID, 10)
 
-		senderID := strconv.FormatInt(q.From.ID, 10)
+	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
 		if !slices.Contains(st.AllowFrom, senderID) {
 			slog.Warn("sess callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
 			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
@@ -608,9 +608,6 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		return nil
 	}
 
-	st := b.store.Load()
-
-	senderID := strconv.FormatInt(q.From.ID, 10)
 	if !slices.Contains(st.AllowFrom, senderID) {
 		slog.Warn("callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
 		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
