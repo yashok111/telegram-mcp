@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,8 +21,9 @@ import (
 )
 
 type tgFake struct {
-	mu    sync.Mutex
-	sends []map[string]any
+	mu        sync.Mutex
+	sends     []map[string]any
+	nextMsgID int
 }
 
 func (t *tgFake) handler() http.Handler {
@@ -45,7 +47,11 @@ func (t *tgFake) handler() http.Handler {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			body["method"] = "sendMessage"
 			t.sends = append(t.sends, body)
-			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42,"date":1,"chat":{"id":1,"type":"private"}}}`))
+
+			id := t.nextMsgID
+			t.nextMsgID++
+
+			_, _ = fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%d,"date":1,"chat":{"id":1,"type":"private"}}}`, id)
 		case "getUpdates":
 			time.Sleep(50 * time.Millisecond)
 
@@ -77,7 +83,7 @@ func newIntegration(t *testing.T) *integrationFixture {
 		Pending:   map[string]access.Pending{},
 	}))
 
-	tg := &tgFake{}
+	tg := &tgFake{nextMsgID: 42}
 	ts := httptest.NewServer(tg.handler())
 
 	router := NewRouter()
@@ -403,6 +409,188 @@ func TestIntegrationPeersListsAllShimsWithSelf(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, selfB, "exactly one peer marked self when called from B")
+}
+
+func TestIntegrationReplyRoutesToOriginalSender(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, idA := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, idB := connectShim(t, f.sock)
+	defer cB.Close()
+
+	var (
+		mu         sync.Mutex
+		gotA, gotB []string
+	)
+
+	cA.OnNotify(ipc.NotifyInbound, func(_ context.Context, params json.RawMessage) {
+		var p struct {
+			Content string `json:"content"`
+		}
+
+		_ = json.Unmarshal(params, &p)
+
+		mu.Lock()
+
+		gotA = append(gotA, p.Content)
+		mu.Unlock()
+	})
+	cB.OnNotify(ipc.NotifyInbound, func(_ context.Context, params json.RawMessage) {
+		var p struct {
+			Content string `json:"content"`
+		}
+
+		_ = json.Unmarshal(params, &p)
+
+		mu.Lock()
+
+		gotB = append(gotB, p.Content)
+		mu.Unlock()
+	})
+
+	var sendA struct {
+		MessageID int `json:"message_id"`
+	}
+	require.NoError(t, cA.Call(t.Context(), ipc.MethodBotSendMessage, map[string]any{
+		"chat_id": "123", "text": "from A",
+	}, &sendA))
+	require.Equal(t, 42, sendA.MessageID)
+
+	var sendB struct {
+		MessageID int `json:"message_id"`
+	}
+	require.NoError(t, cB.Call(t.Context(), ipc.MethodBotSendMessage, map[string]any{
+		"chat_id": "123", "text": "from B",
+	}, &sendB))
+	require.Equal(t, 43, sendB.MessageID)
+
+	require.Eventually(t, func() bool {
+		owner, ok := f.router.RouteInbound("123")
+		return ok && owner.ID == idB
+	}, time.Second, 20*time.Millisecond, "B owns chat 123 after its second outbound (last-writer-wins)")
+
+	n := NewNotifier(f.router)
+	n.DeliverInbound("reply to A", map[string]string{
+		"chat_id":             "123",
+		"user":                "tester",
+		"reply_to_message_id": "42",
+	})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return len(gotA) == 1 && len(gotB) == 0
+	}, time.Second, 20*time.Millisecond, "reply to A's msg 42 must route to A, not owner B")
+
+	_ = idA
+}
+
+func TestIntegrationReplyToUnknownMessageFallsThroughToOwner(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, _ := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, idB := connectShim(t, f.sock)
+	defer cB.Close()
+
+	var (
+		mu         sync.Mutex
+		gotA, gotB int
+	)
+
+	cA.OnNotify(ipc.NotifyInbound, func(_ context.Context, _ json.RawMessage) {
+		mu.Lock()
+		gotA++
+		mu.Unlock()
+	})
+	cB.OnNotify(ipc.NotifyInbound, func(_ context.Context, _ json.RawMessage) {
+		mu.Lock()
+		gotB++
+		mu.Unlock()
+	})
+
+	var send struct {
+		MessageID int `json:"message_id"`
+	}
+	require.NoError(t, cB.Call(t.Context(), ipc.MethodBotSendMessage, map[string]any{
+		"chat_id": "123", "text": "hi",
+	}, &send))
+
+	require.Eventually(t, func() bool {
+		owner, ok := f.router.RouteInbound("123")
+		return ok && owner.ID == idB
+	}, time.Second, 20*time.Millisecond, "B owns chat 123")
+
+	n := NewNotifier(f.router)
+	n.DeliverInbound("reply text", map[string]string{
+		"chat_id":             "123",
+		"reply_to_message_id": "9999",
+	})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return gotA == 0 && gotB == 1
+	}, time.Second, 20*time.Millisecond, "unknown reply_to falls back to owner B")
+}
+
+func TestIntegrationReplyAfterSenderDroppedFallsThrough(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, _ := connectShim(t, f.sock)
+
+	cB, _ := connectShim(t, f.sock)
+	defer cB.Close()
+
+	var (
+		mu         sync.Mutex
+		gotA, gotB int
+	)
+
+	cA.OnNotify(ipc.NotifyInbound, func(_ context.Context, _ json.RawMessage) {
+		mu.Lock()
+		gotA++
+		mu.Unlock()
+	})
+	cB.OnNotify(ipc.NotifyInbound, func(_ context.Context, _ json.RawMessage) {
+		mu.Lock()
+		gotB++
+		mu.Unlock()
+	})
+
+	var sendA struct {
+		MessageID int `json:"message_id"`
+	}
+	require.NoError(t, cA.Call(t.Context(), ipc.MethodBotSendMessage, map[string]any{
+		"chat_id": "123", "text": "from A",
+	}, &sendA))
+
+	_ = cA.Close()
+
+	require.Eventually(t, func() bool {
+		return f.router.ConnectedCount() == 1
+	}, time.Second, 20*time.Millisecond, "A drop must propagate to router")
+
+	n := NewNotifier(f.router)
+	n.DeliverInbound("reply to dropped A", map[string]string{
+		"chat_id":             "123",
+		"reply_to_message_id": "42",
+	})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return gotA == 0 && gotB == 1
+	}, time.Second, 20*time.Millisecond, "reply to A (dropped) falls through to surviving shim B")
 }
 
 func TestIntegrationGateBlocksUnknownChat(t *testing.T) {
