@@ -98,6 +98,34 @@ func AttachNotifier(c IPCClient, sink MCPSink) {
 	})
 }
 
+// LabelUpdater receives runtime label changes pushed by the daemon. The shim
+// implements this to rewrite its sessionfile so `telegram-mcp self` and the
+// statusline pick up the new label without a CC restart.
+type LabelUpdater interface {
+	UpdateLabel(label string)
+}
+
+// AttachLabelHandler registers the daemon→shim label-change notification handler.
+// nil updater disables the handler (test-only path).
+func AttachLabelHandler(c IPCClient, updater LabelUpdater) {
+	if updater == nil {
+		return
+	}
+
+	c.OnNotify(ipc.NotifyLabelChanged, func(_ context.Context, params json.RawMessage) {
+		var p struct {
+			Label string `json:"label"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			slog.Warn("label notify unmarshal", "err", err)
+			return
+		}
+
+		slog.Info("shim received label change", "label", p.Label)
+		updater.UpdateLabel(p.Label)
+	})
+}
+
 func writeDebug(event string, fields map[string]any) {
 	if debugLogPath == "" {
 		return

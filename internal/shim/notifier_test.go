@@ -3,6 +3,7 @@ package shim
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -82,4 +83,56 @@ func TestNotifierDispatchesPermissionResolved(t *testing.T) {
 	require.Len(t, mcp.resolved, 1)
 	assert.Equal(t, "ababc", mcp.resolved[0].requestID)
 	assert.Equal(t, "allow", mcp.resolved[0].behavior)
+}
+
+type labelSpy struct {
+	mu     sync.Mutex
+	labels []string
+}
+
+func (l *labelSpy) UpdateLabel(label string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.labels = append(l.labels, label)
+}
+
+func (l *labelSpy) seen() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.labels...)
+}
+
+func TestAttachLabelHandlerInvokesUpdater(t *testing.T) {
+	c := newSpyClient()
+	spy := &labelSpy{}
+	AttachLabelHandler(c, spy)
+
+	h, ok := c.handlers[ipc.NotifyLabelChanged]
+	require.True(t, ok, "AttachLabelHandler must register the notify handler")
+
+	body, err := json.Marshal(map[string]string{"label": "main"})
+	require.NoError(t, err)
+	h(context.Background(), body)
+
+	assert.Equal(t, []string{"main"}, spy.seen())
+}
+
+func TestAttachLabelHandlerNilUpdaterNoop(t *testing.T) {
+	c := newSpyClient()
+	AttachLabelHandler(c, nil)
+
+	_, ok := c.handlers[ipc.NotifyLabelChanged]
+	assert.False(t, ok, "nil updater must not register a handler")
+}
+
+func TestAttachLabelHandlerBadJSONIgnored(t *testing.T) {
+	c := newSpyClient()
+	spy := &labelSpy{}
+	AttachLabelHandler(c, spy)
+
+	h, ok := c.handlers[ipc.NotifyLabelChanged]
+	require.True(t, ok)
+
+	h(context.Background(), json.RawMessage(`{`))
+	assert.Empty(t, spy.seen())
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yakov/telegram-mcp/internal/ipc"
 )
 
 // ErrPermissionIDInUse is returned when a shim tries to register a permission
@@ -337,6 +339,38 @@ func (r *Router) Unpin(chatID string) {
 		delete(r.pins, chatID)
 		slog.Info("router pin cleared", "chat_id", chatID)
 	}
+}
+
+// SetLabel updates the runtime label for shimID and fires a NotifyLabelChanged
+// push to that shim so its sessionfile can be rewritten. Returns ErrShimNotFound
+// if the shim has disconnected. Empty label is allowed (clears the label).
+func (r *Router) SetLabel(shimID, label string) (ShimInfo, error) {
+	r.mu.Lock()
+
+	s, ok := r.shims[shimID]
+	if !ok {
+		r.mu.Unlock()
+		return ShimInfo{}, ErrShimNotFound
+	}
+
+	s.Label = label
+	notify := s.Notify
+
+	r.mu.Unlock()
+
+	if notify != nil {
+		if err := notify(ipc.NotifyLabelChanged, map[string]any{"label": label}); err != nil {
+			slog.Warn("label push failed", "shim_id", shimID, "label", label, "err", err)
+		}
+	}
+
+	for _, info := range r.Snapshot() {
+		if info.ID == shimID {
+			return info, nil
+		}
+	}
+
+	return ShimInfo{}, ErrShimNotFound
 }
 
 // ResolveShimByPrefix returns the unique shim whose ID starts with prefix.
