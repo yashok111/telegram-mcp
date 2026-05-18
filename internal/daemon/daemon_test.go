@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -236,6 +238,63 @@ func TestClaimPIDEscalatesToSIGKILLOnHang(t *testing.T) {
 
 	<-reaped
 	require.Error(t, syscall.Kill(oldPID, 0), "old process should be killed by SIGKILL")
+}
+
+// TestClaimPIDTreatsZombieAsStale verifies that a daemon.pid pointing at a
+// zombie process is treated as stale (overwritten) rather than alive.
+// syscall.Kill(zombiePID, 0) returns nil until the zombie is reaped, so without
+// an explicit State:Z guard, claimPID would SIGTERM/SIGKILL the zombie and
+// then spin waitForExit until killWaitTimeout — the failure mode from the
+// 2026-05-18 incident.
+func TestClaimPIDTreatsZombieAsStale(t *testing.T) {
+	if _, err := os.Stat("/bin/true"); err != nil {
+		t.Skipf("/bin/true unavailable: %v", err)
+	}
+
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "daemon.pid")
+
+	cmd := exec.Command("/bin/true") //nolint:noctx // intentionally not reaped — we want the zombie state.
+	require.NoError(t, cmd.Start())
+
+	zombiePID := cmd.Process.Pid
+
+	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
+
+	require.Eventually(t, func() bool {
+		raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", zombiePID))
+		if err != nil {
+			return false
+		}
+
+		return strings.Contains(string(raw), "State:\tZ")
+	}, 2*time.Second, 10*time.Millisecond, "child never reached zombie state")
+
+	require.NoError(t, os.WriteFile(pidPath, []byte(strconv.Itoa(zombiePID)), 0o600))
+
+	swapIsOurDaemonFn(t, func(int) bool { return true })
+	// Short timeouts: without the zombie guard, evictOldDaemon would
+	// SIGTERM-then-SIGKILL the zombie and waitForExit would spin for
+	// term+kill = 400ms before returning an error. With the guard, claimPID
+	// returns within a few milliseconds (file ops only).
+	swapWaitTimeouts(t, 200*time.Millisecond, 200*time.Millisecond)
+
+	d := &Daemon{PidPath: pidPath}
+
+	start := time.Now()
+	err := d.claimPID()
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.Less(t, elapsed, 100*time.Millisecond,
+		"claimPID escalated SIGTERM/SIGKILL on a zombie instead of treating it as stale")
+
+	raw, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+
+	got, err := strconv.Atoi(string(raw))
+	require.NoError(t, err)
+	require.Equal(t, os.Getpid(), got, "pid file should be overwritten with our pid")
 }
 
 func TestClaimPIDLeavesForeignProcessAlone(t *testing.T) {
