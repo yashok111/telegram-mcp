@@ -73,6 +73,7 @@ func (a *BotAdapter) SendMessage(ctx context.Context, chatID, text string, opts 
 	}
 
 	c := a.Client()
+
 	err := c.Call(ctx, ipc.MethodBotSendMessage, map[string]any{
 		"chat_id": chatID, "text": text, "reply_to": opts.ReplyTo, "parse_mode": opts.ParseMode,
 	}, &res)
@@ -89,6 +90,7 @@ func (a *BotAdapter) SendFile(ctx context.Context, chatID, path string, opts bot
 	}
 
 	c := a.Client()
+
 	err := c.Call(ctx, ipc.MethodBotSendFile, map[string]any{
 		"chat_id": chatID, "path": path, "reply_to": opts.ReplyTo,
 	}, &res)
@@ -105,6 +107,7 @@ func (a *BotAdapter) EditMessage(ctx context.Context, chatID string, msgID int, 
 	}
 
 	c := a.Client()
+
 	err := c.Call(ctx, ipc.MethodBotEditMessage, map[string]any{
 		"chat_id": chatID, "message_id": msgID, "text": text, "parse_mode": parseMode,
 	}, &res)
@@ -129,6 +132,7 @@ func (a *BotAdapter) DownloadFile(ctx context.Context, fileID string) (string, e
 	}
 
 	c := a.Client()
+
 	err := c.Call(ctx, ipc.MethodBotDownloadFile, map[string]any{"file_id": fileID}, &res)
 	if err != nil {
 		return "", mapErr(err)

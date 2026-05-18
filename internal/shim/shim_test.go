@@ -3,8 +3,10 @@ package shim
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,27 +218,39 @@ func TestShimRunRemovesSessionFile(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "session file should be gone after cleanup")
 }
 
-func TestShimRunExitsWhenClientDone(t *testing.T) {
+func TestShimRunReconnectsAfterClientDone(t *testing.T) {
 	dir := t.TempDir()
 	store := access.NewStore(dir, false)
 	mcpSrv, err := mcpkg.New(store)
 	require.NoError(t, err)
 
-	fc := &fakeClient{
+	initClient := &fakeClient{
 		returnResult: []byte(`{"shim_id":"abc","alias":"s1","daemon_version":"test"}`),
 		doneCh:       make(chan struct{}),
 	}
+
+	reconnClient := &fakeClient{
+		returnResult: []byte(`{"shim_id":"xyz","alias":"s7","daemon_version":"test"}`),
+		doneCh:       make(chan struct{}),
+	}
+
+	var dialed atomic.Int32
 
 	servedCtx := make(chan context.Context, 1)
 	served := make(chan error, 1)
 
 	sh := &Shim{
-		Client:      fc,
+		Client:      initClient,
 		MCP:         mcpSrv,
 		Store:       store,
 		StateDir:    dir,
+		SocketPath:  filepath.Join(dir, "daemon.sock"),
 		CCPID:       4321,
 		WireContext: context.Background,
+		DialIPC: func(string) (IPCClient, error) {
+			dialed.Add(1)
+			return reconnClient, nil
+		},
 		ServeStdio: func(ctx context.Context) error {
 			servedCtx <- ctx
 
@@ -246,7 +260,10 @@ func TestShimRunExitsWhenClientDone(t *testing.T) {
 		},
 	}
 
-	go func() { served <- sh.Run(t.Context()) }()
+	runCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	go func() { served <- sh.Run(runCtx) }()
 
 	select {
 	case <-servedCtx:
@@ -254,14 +271,89 @@ func TestShimRunExitsWhenClientDone(t *testing.T) {
 		t.Fatal("ServeStdio was never invoked")
 	}
 
-	fc.closeDone()
+	require.Eventually(t, func() bool { return initClient.helloCount.Load() == 1 },
+		2*time.Second, 10*time.Millisecond, "initial Hello never sent")
+
+	initClient.closeDone()
+
+	require.Eventually(t, func() bool {
+		return dialed.Load() >= 1 && reconnClient.helloCount.Load() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "reconnect Hello never sent")
+
+	alias, ok := sh.ShimAlias()
+	require.True(t, ok)
+	assert.Equal(t, "s7", alias, "alias updated after reconnect")
+
+	cancel()
 
 	select {
 	case err := <-served:
-		require.NoError(t, err)
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not exit after Client.Done fired")
+		t.Fatal("Run did not exit after ctx cancel post-reconnect")
 	}
+}
+
+func TestShimRunReconnectBackoffRespectsCtx(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	initClient := &fakeClient{
+		returnResult: []byte(`{"shim_id":"abc","alias":"s1","daemon_version":"test"}`),
+		doneCh:       make(chan struct{}),
+	}
+
+	var dialed atomic.Int32
+
+	sh := &Shim{
+		Client:      initClient,
+		MCP:         mcpSrv,
+		Store:       store,
+		StateDir:    dir,
+		SocketPath:  filepath.Join(dir, "daemon.sock"),
+		CCPID:       9999,
+		WireContext: context.Background,
+		DialIPC: func(string) (IPCClient, error) {
+			dialed.Add(1)
+			return nil, errors.New("daemon unreachable")
+		},
+		ServeStdio: func(ctx context.Context) error {
+			<-ctx.Done()
+			return nil
+		},
+	}
+
+	runCtx, cancel := context.WithCancel(t.Context())
+	served := make(chan error, 1)
+
+	go func() { served <- sh.Run(runCtx) }()
+
+	require.Eventually(t, func() bool { return initClient.helloCount.Load() == 1 },
+		2*time.Second, 10*time.Millisecond, "initial Hello never sent")
+
+	initClient.closeDone()
+
+	require.Eventually(t, func() bool { return dialed.Load() >= 1 },
+		2*time.Second, 10*time.Millisecond, "reconnect dial never attempted")
+
+	cancel()
+
+	select {
+	case err := <-served:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit during backoff after ctx cancel")
+	}
+}
+
+func TestBackoffDelayCapsAtMax(t *testing.T) {
+	assert.Equal(t, 100*time.Millisecond, backoffDelay(0))
+	assert.Equal(t, 200*time.Millisecond, backoffDelay(1))
+	assert.Equal(t, 400*time.Millisecond, backoffDelay(2))
+	assert.Equal(t, reconnectMaxBackoff, backoffDelay(20))
+	assert.Equal(t, reconnectMaxBackoff, backoffDelay(100))
 }
 
 func TestShimRunStopsOnContextCancel(t *testing.T) {

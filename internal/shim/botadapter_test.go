@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,18 +21,27 @@ func TestMain(m *testing.M) {
 }
 
 type fakeClient struct {
+	mu           sync.Mutex
 	calledMethod string
 	calledParams json.RawMessage
 	returnResult json.RawMessage
 	returnErr    error
+
+	helloCount atomic.Int32
 
 	doneCh    chan struct{}
 	doneClose sync.Once
 }
 
 func (f *fakeClient) Call(_ context.Context, method string, params, result any) error {
+	f.mu.Lock()
 	f.calledMethod = method
 	f.calledParams, _ = json.Marshal(params)
+	f.mu.Unlock()
+
+	if method == ipc.MethodHello {
+		f.helloCount.Add(1)
+	}
 
 	if f.returnErr != nil {
 		return f.returnErr
