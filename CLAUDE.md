@@ -28,10 +28,13 @@ cmd/server/
   main.go                       entry, mode dispatch (daemon|shim|self), env, PDEATHSIG, dotenv
   self.go                       SessionStart hook + statusline renderer (PPID-walk to find CC pid)
 internal/access/                access.json schema + atomic save + corrupt recovery
+  access.go                       State, DMPolicy/Pending/GroupPolicy, atomic Save
+  rules.go                        PermissionRule + Match (specificity-scored) + PruneRules + glob `**` matcher
 internal/bot/                   telego long-poller, gate, handlers, outbound API
   bot.go                          ~1100 LOC: Poll, handleCommand/Message/Callback, gate, send*
   markdown.go                     EscapeMarkdownV2 + EscapeMarkdownV2Code helpers
   sessions.go                     status dashboard + /sessions switcher (mention/pin/evict)
+  rules_cmd.go                    /rules list|clear|revoke + addRuleAndResolve callback helper
 internal/chunk/                 4096-cap message splitter (length or newline boundaries)
 internal/mcp/                   stdio MCP server, tool registry, notification surface
   mcp.go                          tools: reply, react, edit_message, download_attachment, telegram_peers
@@ -45,6 +48,7 @@ internal/daemon/                bot-owner process: holds telego, routes, fans ou
   handlers.go                     IPC method handlers (send*, react, edit, download, peers, broadcast_permission)
   notifier.go                     bot.Notifier impl that fans messages out through Router
   idle.go                         30-min idle timer (override via TELEGRAM_DAEMON_IDLE_EXIT)
+  rules_cleanup.go                1-min ticker: PruneRules + Save when anything expired
   aliases.go, mentions.go         @s1/@s2 alias allocation + mention parsing
   log_redirect.go                 dup stderr to daemon.log when shim-spawned and stderr isn't a tty
 internal/shim/                  per-CC-session process: speaks MCP up, IPC down
@@ -100,6 +104,8 @@ Single daemon per host; every Claude Code session attaches to it via shim.
 
 **Idle exit:** daemon dies 30 minutes after the last shim disconnects. Override with `TELEGRAM_DAEMON_IDLE_EXIT=<seconds>`; `=0` disables.
 
+**Rules cleanup:** background goroutine pulls `access.State`, calls `access.PruneRules`, and saves once a minute. Belt to the suspenders of the in-process `Match()` filter that already skips expired rules on each `permission_request` — keeps `/rules list` honest and disk size bounded over long runs.
+
 **Files:**
 - `~/.claude/channels/telegram/daemon.sock` (0600) — IPC unix socket
 - `~/.claude/channels/telegram/daemon.pid` — daemon's PID (comm-checked before any SIGTERM)
@@ -119,6 +125,18 @@ Registered in `internal/mcp/mcp.go:registerTools` via `s.srv.AddTool`:
 - `telegram_peers` (PR #9) — list other shims connected to this daemon (alias, shim_id, workdir, idle_seconds). Used by `@s2 do X` flows where one shim wants to know what's online.
 
 Any change to this surface MUST go through the `mcp-builder` skill — see `Skills` section.
+
+## Permission auto-approve
+
+CC sends `notifications/claude/channel/permission_request` for every Bash/Edit/Read/etc. tool call that needs human approval. By default the shim's `mcp.Server` fans the prompt out to allowlisted DMs via the daemon's `bot.BroadcastPermissionRequest`. Three escape hatches short-circuit the round-trip:
+
+1. **Inline buttons on the prompt** (extended in this PR): in addition to the legacy `✅ Allow` / `❌ Deny` / `ℹ See more`, every prompt now offers `⏳ Allow <Tool> 1h`, `♾ Always allow <Tool>`, and `🚫 Always deny <Tool>`. Tapping one writes a `PermissionRule` into `access.json` and resolves the current request in the same click.
+2. **`access.Match`** (`internal/access/rules.go`) — called inside `mcp.Server.handlePermissionRequest` BEFORE the broadcast. Specificity scoring: exact tool (+2), `path_pattern` present (+1 plus `len(pattern)/10`), recency tiebreak. Path is sniffed out of the `input_preview` blob via the `pathFieldRE` regex (`file_path` / `path` / `notebook_path` / `pattern`, quoted or bare). A match → `ResolvePermission("allow"|"deny")` and no IPC traffic.
+3. **`/rules` command** — list active rules (TTL countdown), `/rules clear`, `/rules revoke <id>`. DM-only via the existing `handleCommand` gate.
+
+Rules with `expires_at > 0` are pruned by the daemon's 1-minute ticker; the per-request `Match` already skips them so a stale rule never grants access between ticks.
+
+The MCP surface declares `claude/channel/permission` in its experimental capabilities (`mcp.go:New`) — only valid because gate()/allowlist authenticates the replier. Don't re-enable this declaration in any context where senders are unauthenticated.
 
 ## CC self-context (SessionStart hook)
 

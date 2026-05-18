@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -446,4 +447,162 @@ func TestCallbackRegex(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCallbackRE_acceptsAtool1h(t *testing.T) {
+	assert.True(t, callbackRE.MatchString("perm:atool1h:abcde"))
+}
+
+func TestCallbackRE_acceptsAtoolall(t *testing.T) {
+	assert.True(t, callbackRE.MatchString("perm:atoolall:abcde"))
+}
+
+func TestCallbackRE_acceptsDtoolall(t *testing.T) {
+	assert.True(t, callbackRE.MatchString("perm:dtoolall:abcde"))
+}
+
+func TestCallbackRE_rejectsBadBehavior(t *testing.T) {
+	assert.False(t, callbackRE.MatchString("perm:weird:abcde"))
+}
+
+// ===== addRuleAndResolve =====
+
+func newRuleCallbackQuery(id string) *telego.CallbackQuery {
+	return &telego.CallbackQuery{
+		ID:   "cq-rule",
+		From: telego.User{ID: 42},
+		Data: "perm:atool1h:" + id,
+		Message: &telego.Message{
+			MessageID: 1, Chat: telego.Chat{ID: 42, Type: "private"}, Text: "🔐 Permission: Bash",
+		},
+	}
+}
+
+func TestAddRuleAndResolve_atool1h_storesApproveRuleWithExpiry(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	before := time.Now().UnixMilli()
+	b.addRuleAndResolve(t.Context(), newRuleCallbackQuery("abcde"), "abcde", access.RuleApprove, time.Hour)
+
+	st := b.store.Load()
+	require.Len(t, st.Rules, 1)
+	rule := st.Rules[0]
+	assert.Equal(t, access.RuleApprove, rule.Action)
+	assert.Equal(t, "Bash", rule.Tool)
+	assert.Greater(t, rule.ExpiresAt, before)
+	assert.Less(t, rule.ExpiresAt, before+2*int64(time.Hour/time.Millisecond))
+}
+
+func TestAddRuleAndResolve_atoolall_storesApproveRuleNoExpiry(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	b.addRuleAndResolve(t.Context(), newRuleCallbackQuery("abcde"), "abcde", access.RuleApprove, 0)
+
+	st := b.store.Load()
+	require.Len(t, st.Rules, 1)
+	assert.Equal(t, access.RuleApprove, st.Rules[0].Action)
+	assert.Equal(t, "Bash", st.Rules[0].Tool)
+	assert.Equal(t, int64(0), st.Rules[0].ExpiresAt)
+}
+
+func TestAddRuleAndResolve_dtoolall_storesDenyRule(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	b.addRuleAndResolve(t.Context(), newRuleCallbackQuery("abcde"), "abcde", access.RuleDeny, 0)
+
+	st := b.store.Load()
+	require.Len(t, st.Rules, 1)
+	assert.Equal(t, access.RuleDeny, st.Rules[0].Action)
+	assert.Equal(t, "Bash", st.Rules[0].Tool)
+}
+
+func TestAddRuleAndResolve_unknownToolName_fallsBackToWildcard(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	// noopNotifier returns false for any id != "abcde"
+	q := newRuleCallbackQuery("zzzzz")
+	q.Data = "perm:atoolall:zzzzz"
+	b.addRuleAndResolve(t.Context(), q, "zzzzz", access.RuleApprove, 0)
+
+	st := b.store.Load()
+	require.Len(t, st.Rules, 1)
+	assert.Equal(t, "*", st.Rules[0].Tool)
+}
+
+func TestAddRuleAndResolve_callsResolvePermission(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	n, _ := b.notifier.(*noopNotifier)
+
+	b.addRuleAndResolve(t.Context(), newRuleCallbackQuery("abcde"), "abcde", access.RuleApprove, time.Hour)
+	require.Len(t, n.resolved, 1)
+	assert.Equal(t, "abcde", n.resolved[0].requestID)
+	assert.Equal(t, "allow", n.resolved[0].behavior)
+
+	b.addRuleAndResolve(t.Context(), newRuleCallbackQuery("abcde"), "abcde", access.RuleDeny, 0)
+	require.Len(t, n.resolved, 2)
+	assert.Equal(t, "deny", n.resolved[1].behavior)
+}
+
+func TestCallback_atool1h_notAllowlisted_doesNotAddRule(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	q := telego.CallbackQuery{
+		ID:   "cq-stranger",
+		From: telego.User{ID: 999},
+		Data: "perm:atool1h:abcde",
+		Message: &telego.Message{
+			MessageID: 1, Chat: telego.Chat{ID: 999, Type: "private"}, Text: "🔐 Permission: Bash",
+		},
+	}
+	require.NoError(t, b.handleCallback(t.Context(), q))
+
+	st := b.store.Load()
+	assert.Empty(t, st.Rules, "non-allowlisted callback must not add a rule")
+
+	calls := api.recordedCalls("answerCallbackQuery")
+	require.NotEmpty(t, calls)
+	assert.Contains(t, payloadString(calls[0].params), "Not authorized")
+
+	n, _ := b.notifier.(*noopNotifier)
+	assert.Empty(t, n.resolved, "non-allowlisted callback must not resolve permission")
+}
+
+func TestBroadcastPermissionRequest_keyboardIncludesNewRows(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	b.BroadcastPermissionRequest(t.Context(), "abcde", "Bash")
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	body := payloadString(calls[0].params)
+	assert.Contains(t, body, "perm:allow:abcde")
+	assert.Contains(t, body, "perm:deny:abcde")
+	assert.Contains(t, body, "perm:more:abcde")
+	assert.Contains(t, body, "perm:atool1h:abcde")
+	assert.Contains(t, body, "perm:atoolall:abcde")
+	assert.Contains(t, body, "perm:dtoolall:abcde")
+
+	// Three rows of inline keyboard expected.
+	assert.GreaterOrEqual(t, strings.Count(body, "callback_data"), 6)
 }

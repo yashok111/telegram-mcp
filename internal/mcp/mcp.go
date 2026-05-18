@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,28 +195,70 @@ func (s *Server) registerNotifications() {
 			description, _ := params["description"].(string)
 			inputPreview, _ := params["input_preview"].(string)
 
-			slog.Info("permission_request received", "request_id", requestID, "tool", toolName, "desc_len", len(description), "preview_len", len(inputPreview))
-
-			if requestID == "" {
-				slog.Warn("permission_request dropped: empty request_id")
-				return
-			}
-
-			s.permMu.Lock()
-			s.pending[requestID] = bot.PermissionDetails{
-				ToolName:     toolName,
-				Description:  description,
-				InputPreview: inputPreview,
-			}
-			s.permMu.Unlock()
-
-			if b := s.Bot(); b != nil {
-				b.BroadcastPermissionRequest(ctx, requestID, toolName)
-			} else {
-				slog.Warn("permission_request not broadcast: bot not attached", "request_id", requestID)
-			}
+			s.handlePermissionRequest(ctx, requestID, toolName, description, inputPreview)
 		},
 	)
+}
+
+// handlePermissionRequest is the testable body of the permission_request
+// notification. Pending-store always happens upfront so a concurrent "See more"
+// callback still works defensively, even when a rule short-circuits broadcast.
+func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolName, description, inputPreview string) {
+	slog.Info("permission_request received", "request_id", requestID, "tool", toolName, "desc_len", len(description), "preview_len", len(inputPreview))
+
+	if requestID == "" {
+		slog.Warn("permission_request dropped: empty request_id")
+		return
+	}
+
+	s.permMu.Lock()
+	s.pending[requestID] = bot.PermissionDetails{
+		ToolName:     toolName,
+		Description:  description,
+		InputPreview: inputPreview,
+	}
+	s.permMu.Unlock()
+
+	st := s.store.Load()
+	path := extractToolPath(toolName, inputPreview)
+	if rule := access.Match(st.Rules, toolName, path); rule != nil {
+		behavior := "deny"
+		if rule.Action == access.RuleApprove {
+			behavior = "allow"
+		}
+
+		slog.Info("permission auto-resolved by rule",
+			"request_id", requestID, "tool", toolName, "path", path,
+			"rule_id", rule.ID, "behavior", behavior)
+		s.ResolvePermission(requestID, behavior)
+
+		return
+	}
+
+	if b := s.Bot(); b != nil {
+		b.BroadcastPermissionRequest(ctx, requestID, toolName)
+	} else {
+		slog.Warn("permission_request not broadcast: bot not attached", "request_id", requestID)
+	}
+}
+
+// pathFieldRE accepts either a quoted value (preserving inner whitespace) or
+// a bare unquoted token. Quoted form matters: real file paths contain spaces
+// and bare matching would truncate "/home/user/my docs/x.go" at the space.
+var pathFieldRE = regexp.MustCompile(`(?m)(?:^|[\s,{])"?(file_path|path|notebook_path|pattern)"?\s*[:=]\s*(?:"([^"]*)"|([^,}\s]+))`)
+
+func extractToolPath(_, inputPreview string) string {
+	m := pathFieldRE.FindStringSubmatch(inputPreview)
+	if len(m) < 4 {
+		return ""
+	}
+
+	val := m[2]
+	if val == "" {
+		val = m[3]
+	}
+
+	return strings.TrimSpace(val)
 }
 
 // --- Tool registry ---

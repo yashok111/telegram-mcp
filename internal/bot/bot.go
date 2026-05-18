@@ -144,6 +144,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "sessions", Description: "Pick which CC session to talk to"},
 				{Command: "use", Description: "/use <prefix> — pin a session"},
 				{Command: "idle", Description: "Show the most idle session"},
+				{Command: "rules", Description: "Manage auto-approve permission rules"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		})
@@ -235,7 +236,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/status — pairing + active sessions\n"+
 				"/sessions — pick which CC session to talk to\n"+
 				"/use <prefix> — pin a specific session\n"+
-				"/idle — show the most idle session"))
+				"/idle — show the most idle session\n"+
+				"/rules — list/clear/revoke auto-approve permission rules"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
@@ -245,6 +247,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply))
 	case "idle":
 		b.sendIdle(ctx, msg)
+	case "rules":
+		b.handleRulesCommand(ctx, msg)
 	}
 
 	return nil
@@ -567,7 +571,7 @@ func (b *Bot) fetchFile(ctx context.Context, fileID, uniqueHint string) (string,
 // onCallback handles permission inline-button clicks ("perm:allow:xxxxx",
 // "perm:deny:xxxxx", "perm:more:xxxxx"). Allowlist check mirrors the
 // text-reply path so unpaired group members can't decide permissions.
-var callbackRE = regexp.MustCompile(`^perm:(allow|deny|more):([a-km-z]{5})$`)
+var callbackRE = regexp.MustCompile(`^perm:(allow|deny|more|atool1h|atoolall|dtoolall):([a-km-z]{5})$`)
 
 func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 	return b.handleCallback(ctx, q)
@@ -643,6 +647,18 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		return nil
 	}
 
+	switch behavior {
+	case "atool1h":
+		b.addRuleAndResolve(ctx, &q, requestID, access.RuleApprove, time.Hour)
+		return nil
+	case "atoolall":
+		b.addRuleAndResolve(ctx, &q, requestID, access.RuleApprove, 0)
+		return nil
+	case "dtoolall":
+		b.addRuleAndResolve(ctx, &q, requestID, access.RuleDeny, 0)
+		return nil
+	}
+
 	b.notifier.ResolvePermission(requestID, behavior)
 
 	label := "✅ Allowed"
@@ -661,6 +677,47 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 	}
 
 	return nil
+}
+
+func (b *Bot) addRuleAndResolve(ctx context.Context, q *telego.CallbackQuery, requestID string, action access.RuleAction, ttl time.Duration) {
+	details, ok := b.notifier.LookupPermission(requestID)
+	toolName := "*"
+	if ok && details.ToolName != "" {
+		toolName = details.ToolName
+	}
+
+	rule := access.PermissionRule{Tool: toolName, Action: action}
+	if ttl > 0 {
+		rule.ExpiresAt = time.Now().Add(ttl).UnixMilli()
+	}
+
+	if err := b.store.Mutate(func(st *access.State) bool {
+		access.AddRule(st, rule)
+		return true
+	}); err != nil {
+		slog.Error("addRule save failed", "request_id", requestID, "tool", toolName, "err", err)
+	}
+
+	behavior := "allow"
+	if action == access.RuleDeny {
+		behavior = "deny"
+	}
+
+	b.notifier.ResolvePermission(requestID, behavior)
+
+	label := fmt.Sprintf("✅ Allowed %s (rule added)", toolName)
+	if action == access.RuleDeny {
+		label = fmt.Sprintf("❌ Denied %s (rule added)", toolName)
+	}
+
+	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: q.ID, Text: label,
+	})
+
+	if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
+		_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
+			msg.Text+"\n\n"+label))
+	}
 }
 
 type gateAction int
@@ -966,11 +1023,20 @@ func (b *Bot) DownloadFile(ctx context.Context, fileID string) (string, error) {
 func (b *Bot) BroadcastPermissionRequest(ctx context.Context, requestID, toolName string) {
 	st := b.store.Load()
 	text := "🔐 Permission: " + toolName
-	keyboard := tu.InlineKeyboard(tu.InlineKeyboardRow(
-		tu.InlineKeyboardButton("See more").WithCallbackData("perm:more:"+requestID),
-		tu.InlineKeyboardButton("✅ Allow").WithCallbackData("perm:allow:"+requestID),
-		tu.InlineKeyboardButton("❌ Deny").WithCallbackData("perm:deny:"+requestID),
-	))
+	keyboard := tu.InlineKeyboard(
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("✅ Allow").WithCallbackData("perm:allow:"+requestID),
+			tu.InlineKeyboardButton("❌ Deny").WithCallbackData("perm:deny:"+requestID),
+			tu.InlineKeyboardButton("ℹ See more").WithCallbackData("perm:more:"+requestID),
+		),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("⏳ Allow "+toolName+" 1h").WithCallbackData("perm:atool1h:"+requestID),
+		),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("♾ Always allow "+toolName).WithCallbackData("perm:atoolall:"+requestID),
+			tu.InlineKeyboardButton("🚫 Always deny "+toolName).WithCallbackData("perm:dtoolall:"+requestID),
+		),
+	)
 
 	for _, dm := range st.AllowFrom {
 		id, err := parseChatID(dm)
