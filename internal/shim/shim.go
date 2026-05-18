@@ -30,6 +30,10 @@ type Shim struct {
 
 	WireContext func() context.Context // injected for tests; defaults to context.Background
 
+	// ServeStdio is injected for tests so Run can be exercised without blocking
+	// on os.Stdin. Production callers leave it nil; Run falls back to MCP.ServeStdio.
+	ServeStdio func(context.Context) error
+
 	idMu  sync.RWMutex
 	id    string
 	alias string
@@ -154,12 +158,23 @@ func (s *Shim) Run(ctx context.Context) error {
 		_ = s.Client.Notify(ipc.MethodGoodbye, map[string]any{})
 	}()
 
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	go func() {
 		select {
 		case <-ctx.Done():
 		case <-s.Client.Done():
+			slog.Info("daemon ipc client closed — cancelling MCP serve so CC re-spawns shim")
 		}
+
+		cancel()
 	}()
 
-	return s.MCP.ServeStdio(ctx)
+	serve := s.ServeStdio
+	if serve == nil {
+		serve = s.MCP.ServeStdio
+	}
+
+	return serve(sctx)
 }

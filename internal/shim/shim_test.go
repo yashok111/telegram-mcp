@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -203,14 +204,64 @@ func TestShimRunRemovesSessionFile(t *testing.T) {
 	}
 
 	require.NoError(t, sh.Wire())
+
 	path := filepath.Join(dir, "sessions", "9090.json")
 	_, err = os.Stat(path)
 	require.NoError(t, err, "session file should exist after Wire")
 
 	// Simulate the Run-exit cleanup.
 	require.NoError(t, removeSessionFile(sh.StateDir, sh.ccPID))
+
 	_, err = os.Stat(path)
 	assert.True(t, os.IsNotExist(err), "session file should be gone after cleanup")
+}
+
+func TestShimRunExitsWhenClientDone(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	fc := &fakeClient{
+		returnResult: []byte(`{"shim_id":"abc","alias":"s1","daemon_version":"test"}`),
+		doneCh:       make(chan struct{}),
+	}
+
+	servedCtx := make(chan context.Context, 1)
+	served := make(chan error, 1)
+
+	sh := &Shim{
+		Client:      fc,
+		MCP:         mcpSrv,
+		Store:       store,
+		StateDir:    dir,
+		CCPID:       4321,
+		WireContext: context.Background,
+		ServeStdio: func(ctx context.Context) error {
+			servedCtx <- ctx
+
+			<-ctx.Done()
+
+			return nil
+		},
+	}
+
+	go func() { served <- sh.Run(t.Context()) }()
+
+	select {
+	case <-servedCtx:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeStdio was never invoked")
+	}
+
+	fc.closeDone()
+
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit after Client.Done fired")
+	}
 }
 
 func TestShimRunStopsOnContextCancel(t *testing.T) {
