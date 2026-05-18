@@ -17,6 +17,11 @@ type Notifier struct {
 
 func NewNotifier(r *Router) *Notifier { return &Notifier{router: r} }
 
+// DeliverInbound fans an inbound Telegram message out to every target shim
+// resolved by the Router. RouteInboundMulti returns a snapshot of *Shim
+// pointers and the Router's mu is released on its return — so the per-target
+// Notify calls below run concurrently across DeliverInbound invocations for
+// different chats, never serialized on r.mu.
 func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 	chatID := meta["chat_id"]
 	replyToMsgID, _ := strconv.Atoi(meta["reply_to_message_id"])
