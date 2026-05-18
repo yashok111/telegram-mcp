@@ -262,8 +262,14 @@ func (r *Router) routeByReplyLocked(chatID string, replyToMsgID int) (*Shim, boo
 	}
 
 	s, ok := r.shims[sid]
+	if !ok {
+		slog.Warn("RouteInbound reply owner gone", "chat_id", chatID, "reply_to_message_id", replyToMsgID, "stale_owner", sid)
+		return nil, false
+	}
 
-	return s, ok
+	slog.Info("RouteInbound reply", "chat_id", chatID, "reply_to_message_id", replyToMsgID, "shim_id", s.ID)
+
+	return s, true
 }
 
 // Snapshot returns a by-value list of connected shims, newest-first by ConnectedAt.
