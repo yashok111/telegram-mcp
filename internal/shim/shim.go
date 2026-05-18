@@ -3,17 +3,23 @@ package shim
 import (
 	"context"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/ipc"
 	mcpkg "github.com/yakov/telegram-mcp/internal/mcp"
 )
 
+const reconnectMaxBackoff = 5 * time.Second
+
 // Shim composes the IPC client, the BotAdapter, and the mcp.Server.
-// Run drives ServeStdio until ctx is done.
+// Run drives ServeStdio until ctx is done, transparently reconnecting to the
+// daemon when the IPC client drops mid-session so the MCP tool surface in
+// Claude Code survives daemon restarts.
 type Shim struct {
 	Client IPCClient
 	MCP    *mcpkg.Server
@@ -28,6 +34,10 @@ type Shim struct {
 	// CCPID overrides os.Getppid() for tests. Production callers leave it zero.
 	CCPID int
 
+	// DialIPC opens a new IPC client during reconnect. Defaults to ipc.Dial;
+	// tests inject fakes.
+	DialIPC func(socketPath string) (IPCClient, error)
+
 	WireContext func() context.Context // injected for tests; defaults to context.Background
 
 	// ServeStdio is injected for tests so Run can be exercised without blocking
@@ -38,6 +48,10 @@ type Shim struct {
 	id    string
 	alias string
 	ccPID int
+
+	clientMu sync.RWMutex
+
+	adapter *BotAdapter
 }
 
 func (s *Shim) ShimID() (string, bool) {
@@ -54,18 +68,29 @@ func (s *Shim) ShimAlias() (string, bool) {
 	return s.alias, s.alias != ""
 }
 
-func (s *Shim) Wire() error {
-	adapter := &BotAdapter{
-		Client: s.Client,
-		PermDetails: func(reqID string) (string, string) {
-			d, ok := s.MCP.LookupPermission(reqID)
-			if !ok {
-				return "", ""
-			}
+func (s *Shim) currentClient() IPCClient {
+	s.clientMu.RLock()
+	defer s.clientMu.RUnlock()
 
-			return d.Description, d.InputPreview
-		},
-	}
+	return s.Client
+}
+
+func (s *Shim) setClient(c IPCClient) {
+	s.clientMu.Lock()
+	s.Client = c
+	s.clientMu.Unlock()
+}
+
+func (s *Shim) Wire() error {
+	adapter := NewBotAdapter(s.Client, func(reqID string) (string, string) {
+		d, ok := s.MCP.LookupPermission(reqID)
+		if !ok {
+			return "", ""
+		}
+
+		return d.Description, d.InputPreview
+	})
+	s.adapter = adapter
 	s.MCP.AttachBot(adapter)
 	s.MCP.AttachPeerProvider(adapter)
 
@@ -84,7 +109,15 @@ func (s *Shim) Wire() error {
 		ccPID = os.Getppid()
 	}
 
-	wctx := context.Background()
+	return s.hello(context.Background(), s.Client, ccPID)
+}
+
+func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
+	wctx := ctx
+	if wctx == nil {
+		wctx = context.Background()
+	}
+
 	if s.WireContext != nil {
 		wctx = s.WireContext()
 	}
@@ -100,7 +133,7 @@ func (s *Shim) Wire() error {
 		slog.Warn("os.Getwd failed; sending empty workdir in Hello", "err", err)
 	}
 
-	if err := s.Client.Call(wctx, ipc.MethodHello, map[string]any{
+	if err := c.Call(wctx, ipc.MethodHello, map[string]any{
 		"shim_pid":      s.HelloPID,
 		"label":         s.HelloLabel,
 		"workdir":       wd,
@@ -140,6 +173,10 @@ func (s *Shim) Wire() error {
 }
 
 func (s *Shim) Run(ctx context.Context) error {
+	if s.DialIPC == nil {
+		s.DialIPC = func(p string) (IPCClient, error) { return ipc.Dial(p) }
+	}
+
 	if err := s.Wire(); err != nil {
 		return err
 	}
@@ -155,26 +192,136 @@ func (s *Shim) Run(ctx context.Context) error {
 			}
 		}
 
-		_ = s.Client.Notify(ipc.MethodGoodbye, map[string]any{})
+		_ = s.currentClient().Notify(ipc.MethodGoodbye, map[string]any{})
 	}()
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-s.Client.Done():
-			slog.Info("daemon ipc client closed — cancelling MCP serve so CC re-spawns shim")
-		}
-
-		cancel()
-	}()
 
 	serve := s.ServeStdio
 	if serve == nil {
 		serve = s.MCP.ServeStdio
 	}
 
-	return serve(sctx)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- serve(sctx) }()
+
+	reconnDone := make(chan struct{})
+
+	go func() {
+		defer close(reconnDone)
+
+		s.reconnectLoop(sctx)
+	}()
+
+	var finalErr error
+	select {
+	case finalErr = <-serveErr:
+	case <-ctx.Done():
+		finalErr = ctx.Err()
+	}
+
+	cancel()
+	<-reconnDone
+
+	if ctxErr := ctx.Err(); ctxErr != nil && finalErr == nil {
+		finalErr = ctxErr
+	}
+
+	return finalErr
+}
+
+// reconnectLoop watches the current IPC client; when it drops, it re-dials
+// the daemon and re-wires the BotAdapter so the MCP server keeps serving.
+func (s *Shim) reconnectLoop(ctx context.Context) {
+	for {
+		cur := s.currentClient()
+		if cur == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-cur.Done():
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		slog.Warn("daemon ipc dropped, reconnecting")
+
+		if !s.reconnectWithBackoff(ctx) {
+			return
+		}
+
+		slog.Info("daemon reconnected", "socket", s.SocketPath)
+	}
+}
+
+func (s *Shim) reconnectWithBackoff(ctx context.Context) bool {
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return false
+		}
+
+		newClient, dialErr := s.DialIPC(s.SocketPath)
+		if dialErr == nil {
+			if err := s.rewire(ctx, newClient); err != nil {
+				slog.Warn("rewire after reconnect failed", "err", err)
+
+				_ = newClient.Close()
+			} else {
+				return true
+			}
+		} else {
+			slog.Warn("reconnect dial failed", "attempt", attempt, "err", dialErr)
+		}
+
+		if !waitBackoff(ctx, attempt) {
+			return false
+		}
+	}
+}
+
+func (s *Shim) rewire(ctx context.Context, newClient IPCClient) error {
+	s.idMu.RLock()
+	ccPID := s.ccPID
+	s.idMu.RUnlock()
+
+	if err := s.hello(ctx, newClient, ccPID); err != nil {
+		return err
+	}
+
+	AttachNotifier(newClient, s.MCP)
+	s.adapter.SwapClient(newClient)
+	s.setClient(newClient)
+
+	return nil
+}
+
+func backoffDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+
+	d := time.Duration(math.Pow(2, float64(attempt))) * 100 * time.Millisecond
+	if d <= 0 || d > reconnectMaxBackoff {
+		return reconnectMaxBackoff
+	}
+
+	return d
+}
+
+func waitBackoff(ctx context.Context, attempt int) bool {
+	t := time.NewTimer(backoffDelay(attempt))
+	defer t.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }

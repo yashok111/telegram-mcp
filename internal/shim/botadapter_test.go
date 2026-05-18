@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,18 +21,27 @@ func TestMain(m *testing.M) {
 }
 
 type fakeClient struct {
+	mu           sync.Mutex
 	calledMethod string
 	calledParams json.RawMessage
 	returnResult json.RawMessage
 	returnErr    error
+
+	helloCount atomic.Int32
 
 	doneCh    chan struct{}
 	doneClose sync.Once
 }
 
 func (f *fakeClient) Call(_ context.Context, method string, params, result any) error {
+	f.mu.Lock()
 	f.calledMethod = method
 	f.calledParams, _ = json.Marshal(params)
+	f.mu.Unlock()
+
+	if method == ipc.MethodHello {
+		f.helloCount.Add(1)
+	}
 
 	if f.returnErr != nil {
 		return f.returnErr
@@ -61,7 +71,7 @@ func (f *fakeClient) closeDone() {
 
 func TestBotAdapterSendMessage(t *testing.T) {
 	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":99}`)}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	id, err := a.SendMessage(context.Background(), "123", "hi", bot.SendOpts{ReplyTo: 4, ParseMode: "MarkdownV2"})
 	require.NoError(t, err)
@@ -73,7 +83,7 @@ func TestBotAdapterSendMessage(t *testing.T) {
 func TestBotAdapterSendMessageNotAllowlisted(t *testing.T) {
 	data, _ := json.Marshal(map[string]string{"chat_id": "9"})
 	fc := &fakeClient{returnErr: &ipc.Error{Code: ipc.CodeNotAllowlisted, Message: "no", Data: data}}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	_, err := a.SendMessage(context.Background(), "9", "x", bot.SendOpts{})
 	require.Error(t, err)
@@ -82,7 +92,7 @@ func TestBotAdapterSendMessageNotAllowlisted(t *testing.T) {
 
 func TestBotAdapterReact(t *testing.T) {
 	fc := &fakeClient{returnResult: json.RawMessage(`{}`)}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	require.NoError(t, a.React(context.Background(), "1", 5, "👍"))
 	assert.Equal(t, "bot.react", fc.calledMethod)
@@ -90,7 +100,7 @@ func TestBotAdapterReact(t *testing.T) {
 
 func TestBotAdapterDownloadFile(t *testing.T) {
 	fc := &fakeClient{returnResult: json.RawMessage(`{"path":"/tmp/x.bin"}`)}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	p, err := a.DownloadFile(context.Background(), "F123")
 	require.NoError(t, err)
@@ -99,7 +109,7 @@ func TestBotAdapterDownloadFile(t *testing.T) {
 
 func TestBotAdapterBroadcastPermissionRequest(t *testing.T) {
 	fc := &fakeClient{returnResult: json.RawMessage(`{}`)}
-	a := &BotAdapter{Client: fc, PermDetails: func(string) (string, string) { return "do the thing", "tool args here" }}
+	a := NewBotAdapter(fc, func(string) (string, string) { return "do the thing", "tool args here" })
 
 	a.BroadcastPermissionRequest(context.Background(), "ababc", "Bash")
 	assert.Equal(t, "bot.broadcastPermissionRequest", fc.calledMethod)
@@ -110,7 +120,7 @@ func TestBotAdapterBroadcastPermissionRequest(t *testing.T) {
 
 func TestBotAdapterEditMessage(t *testing.T) {
 	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":12}`)}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	id, err := a.EditMessage(context.Background(), "1", 12, "new", "MarkdownV2")
 	require.NoError(t, err)
@@ -122,7 +132,7 @@ func TestBotAdapterPeersForwardsToIPC(t *testing.T) {
 		{"alias":"s1","shim_id_prefix":"abcdef01","workdir":"/a","label":"","idle_seconds":42,"self":true},
 		{"alias":"s2","shim_id_prefix":"deadbeef","workdir":"/b","label":"hot","idle_seconds":0,"self":false}
 	]}`)}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	peers, err := a.Peers(context.Background())
 	require.NoError(t, err)
@@ -140,7 +150,7 @@ func TestBotAdapterPeersForwardsToIPC(t *testing.T) {
 
 func TestBotAdapterPeersIPCError(t *testing.T) {
 	fc := &fakeClient{returnErr: errors.New("ipc down")}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	_, err := a.Peers(context.Background())
 	require.Error(t, err)
@@ -150,9 +160,32 @@ func TestBotAdapterPeersIPCError(t *testing.T) {
 func TestBotAdapterSendFileAttachmentTooLarge(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{"path": "/big.bin", "size": 99999999, "limit": 50000000})
 	fc := &fakeClient{returnErr: &ipc.Error{Code: ipc.CodeAttachmentTooLarge, Message: "too large", Data: data}}
-	a := &BotAdapter{Client: fc}
+	a := NewBotAdapter(fc, nil)
 
 	_, err := a.SendFile(context.Background(), "1", "/big.bin", bot.SendOpts{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrAttachmentTooLarge)
+}
+
+func TestBotAdapterSwapClient(t *testing.T) {
+	old := &fakeClient{returnResult: json.RawMessage(`{"message_id":1}`)}
+	fresh := &fakeClient{returnResult: json.RawMessage(`{"message_id":2}`)}
+	a := NewBotAdapter(old, nil)
+
+	a.SwapClient(fresh)
+
+	id, err := a.SendMessage(context.Background(), "1", "x", bot.SendOpts{})
+	require.NoError(t, err)
+	assert.Equal(t, 2, id, "after SwapClient, calls must hit the new client")
+	assert.Empty(t, old.calledMethod, "old client must not be called after swap")
+	assert.Equal(t, "bot.sendMessage", fresh.calledMethod)
+}
+
+func TestBotAdapterMapsConnectionClosedToErrDaemonUnreachable(t *testing.T) {
+	fc := &fakeClient{returnErr: errors.New("connection closed")}
+	a := NewBotAdapter(fc, nil)
+
+	_, err := a.SendMessage(context.Background(), "1", "x", bot.SendOpts{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDaemonUnreachable)
 }
