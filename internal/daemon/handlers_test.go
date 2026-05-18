@@ -321,7 +321,7 @@ func TestHandlePeersUnknownCallerNoSelf(t *testing.T) {
 func TestHandlePeersIdleSecondsFromLastOutbound(t *testing.T) {
 	h, _, r, _ := newHandlersFixture(t)
 
-	r.RecordOutbound("shim-a", "999")
+	r.RecordOutbound("shim-a", "999", 0)
 
 	res, rpcErr := h.HandlePeers(context.Background(), conn("shim-a"), nil)
 	require.Nil(t, rpcErr)

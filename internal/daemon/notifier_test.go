@@ -32,7 +32,7 @@ func TestNotifierDeliverInboundUsesChatOwner(t *testing.T) {
 
 	r.Register(newCapturingShim("a", &aSink))
 	r.Register(newCapturingShim("b", &bSink))
-	r.RecordOutbound("a", "chat-1")
+	r.RecordOutbound("a", "chat-1", 0)
 
 	n := NewNotifier(r)
 	n.DeliverInbound("hi", map[string]string{"chat_id": "chat-1", "user": "alice"})
