@@ -66,6 +66,7 @@ func writeSessionFile(stateDir string, info SessionInfo) (string, error) {
 
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		_ = tmp.Close()
+
 		cleanup()
 
 		return "", fmt.Errorf("chmod tmp: %w", err)
@@ -73,6 +74,7 @@ func writeSessionFile(stateDir string, info SessionInfo) (string, error) {
 
 	if err := json.NewEncoder(tmp).Encode(info); err != nil {
 		_ = tmp.Close()
+
 		cleanup()
 
 		return "", fmt.Errorf("encode: %w", err)

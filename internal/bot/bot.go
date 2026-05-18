@@ -169,7 +169,11 @@ func (b *Bot) Poll(ctx context.Context) error {
 
 		_ = bh.StopWithContext(shutCtx)
 
-		<-done
+		select {
+		case <-done:
+		case <-shutCtx.Done():
+			slog.Warn("bot handler did not stop within deadline, abandoning")
+		}
 
 		return nil
 	case err := <-done:
