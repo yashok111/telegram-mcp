@@ -126,7 +126,7 @@ linters:
       # configured state dirs, not user input. G304 here is noise.
       - linters: [gosec]
         text: G304
-        path: 'cmd/server/main\.go|internal/bot/bot\.go|internal/daemon/daemon\.go|internal/daemon/log_redirect\.go'
+        path: 'cmd/server/main\.go|cmd/server/self\.go|internal/bot/bot\.go|internal/daemon/daemon\.go|internal/daemon/log_redirect\.go'
       # spawn.go execs /proc/self/exe (or operator-configured BinaryPath); G204
       # complains about subprocess-with-variable but the binary is trusted.
       - linters: [gosec]
