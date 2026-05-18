@@ -24,32 +24,60 @@ bash scripts/install-hooks.sh    # → .git/hooks/pre-commit
 ## Layout
 
 ```
-cmd/server/main.go              entry, lifecycle, env, PDEATHSIG, PID claim
+cmd/server/
+  main.go                       entry, mode dispatch (daemon|shim|self), env, PDEATHSIG, dotenv
+  self.go                       SessionStart hook + statusline renderer (PPID-walk to find CC pid)
 internal/access/                access.json schema + atomic save + corrupt recovery
 internal/bot/                   telego long-poller, gate, handlers, outbound API
-  bot.go                          ~900 LOC: Poll, handleCommand/Message/Callback, gate, send*
+  bot.go                          ~1100 LOC: Poll, handleCommand/Message/Callback, gate, send*
   markdown.go                     EscapeMarkdownV2 + EscapeMarkdownV2Code helpers
-internal/mcp/                   stdio MCP server, tool registry, notification surface
+  sessions.go                     status dashboard + /sessions switcher (mention/pin/evict)
 internal/chunk/                 4096-cap message splitter (length or newline boundaries)
-contrib/systemd/                user-mode unit for standalone (non-MCP) deployment
+internal/mcp/                   stdio MCP server, tool registry, notification surface
+  mcp.go                          tools: reply, react, edit_message, download_attachment, telegram_peers
+  peers.go                        telegram_peers tool (lists connected shims via PeerProvider)
+internal/ipc/                   shim<->daemon JSON-RPC over unix socket (line-framed)
+  proto.go, codec.go              wire format (Request/Response/Notify, base64 binary payloads)
+  client.go, server.go            Dial/Listen, OnConnect/OnDisconnect, Call/Notify
+internal/daemon/                bot-owner process: holds telego, routes, fans out
+  daemon.go                       Run lifecycle, PID claim, evict-old-daemon, idle exit
+  routing.go                      Router: replyRing (reply_to → shim), chat affinity, mention/pin/LRU
+  handlers.go                     IPC method handlers (send*, react, edit, download, peers, broadcast_permission)
+  notifier.go                     bot.Notifier impl that fans messages out through Router
+  idle.go                         30-min idle timer (override via TELEGRAM_DAEMON_IDLE_EXIT)
+  aliases.go, mentions.go         @s1/@s2 alias allocation + mention parsing
+  log_redirect.go                 dup stderr to daemon.log when shim-spawned and stderr isn't a tty
+internal/shim/                  per-CC-session process: speaks MCP up, IPC down
+  shim.go                         Run lifecycle, hello handshake, reconnectLoop (backoff)
+  spawn.go                        EnsureDaemon: dial existing or fork-detached daemon
+  botadapter.go                   bot.BotAPI impl that forwards calls over IPC to the daemon
+  notifier.go                     receives daemon push notifs, forwards to mcp.Server
+  sessionfile.go                  writes ~/.claude/channels/telegram/sessions/<cc_pid>.json
+contrib/systemd/                user-mode unit for keeping the daemon alive across reboots
+contrib/hooks/                  session-start.sh wrapper for `telegram-mcp self --hook`
+docs/superpowers/plans/         dated PRDs for shipped features (read-only history, not authoritative)
 .agents/skills/                 37 curated skills (gitignored, lockfile in repo)
 scripts/                        install-skills.sh, install-hooks.sh, pre-commit
 ```
 
 **Path discipline:**
-- `internal/bot` is the only place that talks to telego. MCP layer calls into the `BotAPI` interface — keep it that way so tests can swap a fake.
-- `mcp` imports `bot` for `bot.SendOpts` + `bot.PermissionDetails`. `bot` MUST NOT import `mcp` — it uses its own `Notifier` interface to call back.
-- `cmd/server` only wires; no business logic.
+- `internal/bot` is the only place that talks to telego. The daemon attaches a `Notifier` and is the sole caller of `bot.SendMessage`/`SendPhoto`/`EditMessage`/`React`/`DownloadFile`.
+- `internal/mcp` knows nothing about telego: it depends on `bot.BotAPI` (for tool semantics + `bot.SendOpts`/`bot.PermissionDetails` types) and is fed by `shim.BotAdapter` (forwards over IPC) — never wired to `bot` directly.
+- `bot` MUST NOT import `mcp`, `daemon`, `shim`, or `ipc`. It calls back via its own `Notifier` interface.
+- `daemon` ↔ `shim` communicate ONLY through `internal/ipc`. Neither imports the other.
+- `cmd/server` only wires; no business logic. `runDaemon`, `runShim`, `runSelf` live there.
 
 ## Lifecycle
 
-Three subprocesses, two long-lived:
+Two roles, daemon+shim. The legacy embedded mode (single-process, in-CC poller) was removed in #16 — there is no longer a code path where the shim runs the bot directly. Don't reintroduce it; the routing model assumes a separate daemon.
 
-1. **Shim (per Claude Code session)**: the binary launched by Claude Code with no args. Speaks stdio MCP to Claude Code; speaks IPC to the daemon. PR_SET_PDEATHSIG ties it to the parent CC session so it dies with Claude Code.
-2. **Daemon (one per host)**: owns the bot token, runs the long-poller, holds the access gate. Spawned by the first shim if not already running (or by systemd via `contrib/systemd/telegram-mcp.service`). Survives shim disconnects; idles out 30 minutes after the last shim leaves.
+1. **Shim (per Claude Code session)**: the binary launched by Claude Code with no args. Speaks stdio MCP to Claude Code; speaks IPC to the daemon. PR_SET_PDEATHSIG ties it to the parent CC session so it dies with Claude Code. On daemon disconnect, the shim reconnects with capped exponential backoff and re-issues `hello` — it does NOT exit to force a CC re-spawn.
+2. **Daemon (one per host)**: owns the bot token, runs the long-poller, holds the access gate, routes inbound traffic to the right shim. Spawned fork-detached by the first shim if not already running (or by systemd via `contrib/systemd/telegram-mcp.service`). Survives shim disconnects; idles out 30 minutes after the last shim leaves.
 3. **Self (`telegram-mcp self`)**: read-only context renderer for the SessionStart hook + statusline; does not touch the bot or daemon.
 
-Ctx-driven shutdown everywhere. `Poll` exits within ~2s of `ctx.Done()` via `StopWithContext`. `approvalLoop` is a 5s ticker that respects `ctx.Done()`.
+`cmd/server/main.go:selectMode` decides which role to run: explicit `daemon`/`shim`/`self` subcommand wins, otherwise `TELEGRAM_DAEMON=1` env → daemon, else shim. Auto-detect after dotenv load (PR #4).
+
+Ctx-driven shutdown everywhere. `Poll` exits within ~2s of `ctx.Done()` via `StopWithContext`. `approvalLoop` is a 5s ticker that respects `ctx.Done()`. The shim's `reconnectLoop` and daemon's idle timer both gate on ctx too — no orphan goroutines.
 
 ## Daemon
 
@@ -57,18 +85,40 @@ Single daemon per host; every Claude Code session attaches to it via shim.
 
 **Subcommands:** `telegram-mcp daemon` (run daemon foreground), `telegram-mcp shim` (run shim explicitly), `telegram-mcp` (no args; auto-detects — defaults to shim, auto-spawns daemon on first run).
 
-**Routing:** inbound messages go to the shim that last replied to that chat. Fresh chats fall back to the most-recently-connected shim. Permission replies route by `request_id`.
+**Routing (priority order, see `daemon/routing.go`):**
+1. **Reply-based** (PR #15) — if the inbound Telegram message has `reply_to_message_id`, look it up in the per-chat `replyRing` (LRU of recent outbound `(shimID, messageID)` pairs). If we sent that message, route to that shim. This is the primary mechanism for multi-shim disambiguation; the user simply replies in Telegram to the message they want answered.
+2. **Mention-based** — `@s1`/`@s2` etc. in message text routes (or fans out for multi-mentions) to those shims by alias prefix. Mentions can also pin a chat to a shim (`/pin @s2`).
+3. **Chat affinity** — chat→shim pin set by previous outbound, with TTL.
+4. **LRU fallback** — most-recently-connected shim if no other rule matches.
+5. **Permission replies** route by `request_id` regardless of chat (registered in `permRegistry` at broadcast time).
 
-**Daemon owns the bot token.** Shims never see it. Daemon enforces the access.json gate authoritatively.
+**EnsureDaemon split-brain fix (PR #12):** `shim.EnsureDaemon` dials `daemon.sock` first; only if dial fails does it `fork+exec` a new daemon. The daemon refuses to start if `daemon.pid` is held by a live `telegram-mcp` process (`daemon.go:claimPID`), and on stale PIDs it evicts the old daemon via SIGTERM with a bounded wait. Prevents two daemons fighting over the bot token after systemd restart.
+
+**Auto-reconnect (PRs #13, #14):** if the daemon dies or rotates, `shim.reconnectLoop` reattaches with capped backoff and replays `hello`. `botadapter` queues calls during reconnect (bounded; surfaces `daemon unavailable` after the cap). MCP serve is NOT cancelled — the CC session stays alive.
+
+**Daemon owns the bot token.** Shims never see it. Daemon enforces the access.json gate authoritatively — every IPC handler calls `Handlers.gate(chatID)` before forwarding to the bot. Shim-side checks are convenience only.
 
 **Idle exit:** daemon dies 30 minutes after the last shim disconnects. Override with `TELEGRAM_DAEMON_IDLE_EXIT=<seconds>`; `=0` disables.
 
 **Files:**
 - `~/.claude/channels/telegram/daemon.sock` (0600) — IPC unix socket
-- `~/.claude/channels/telegram/daemon.pid` — daemon's PID
+- `~/.claude/channels/telegram/daemon.pid` — daemon's PID (comm-checked before any SIGTERM)
 - `~/.claude/channels/telegram/daemon.log` — daemon stderr when shim-spawned (systemd captures it via journal otherwise)
+- `~/.claude/channels/telegram/sessions/<cc_pid>.json` — per-shim session snapshot for `self`
 
 **Systemd alternative:** install `contrib/systemd/telegram-mcp.service` to keep the daemon alive across reboots and outside any Claude Code session.
+
+## MCP tool surface
+
+Registered in `internal/mcp/mcp.go:registerTools` via `s.srv.AddTool`:
+
+- `reply` — send text or files to a chat; auto-chunks at 4096; honors `reply_to` for quote-replies
+- `react` — set/clear emoji reaction on a message
+- `edit_message` — edit a previously-sent message (caption for media, text for plain)
+- `download_attachment` — fetch a file_id from Telegram CDN into `~/.claude/channels/telegram/inbox/`
+- `telegram_peers` (PR #9) — list other shims connected to this daemon (alias, shim_id, workdir, idle_seconds). Used by `@s2 do X` flows where one shim wants to know what's online.
+
+Any change to this surface MUST go through the `mcp-builder` skill — see `Skills` section.
 
 ## CC self-context (SessionStart hook)
 
@@ -125,9 +175,12 @@ when present and silently dropped otherwise.
 **Mocking strategy:**
 - `internal/mcp` uses a hand-rolled `fakeBot` matching `BotAPI`.
 - `internal/bot/bot_api_test.go` runs a real httptest server impersonating `api.telegram.org/bot<TOKEN>/<method>`. `telego.WithAPIServer(URL)` points the client at it. File-CDN downloads route through `fileClient`, which tests swap to a `redirectTransport`.
+- `internal/ipc` is exercised via real `net.UnixConn` pairs in `client_server_test.go` — no mock socket.
+- `internal/shim` integration: `shim_test.go` spins a real `ipc.Server` in-process and verifies hello/reconnect/rewire against it. The shim's IPC client is the real one — only the upstream bot is faked via the daemon's test handlers.
+- `internal/daemon/integration_test.go` runs the full triangle: real `ipc.Server`, two real `Shim`s, a fake `botSurface`, and the real `Router`. Exercises reply/mention/affinity routing end-to-end.
 - Tests use `t.TempDir()` + `t.Setenv()` exclusively — no `os.Setenv` survives across tests.
 
-**Coverage:** ~84% LOC across the project (chunk 100%, access 92%, bot 90%, mcp 85%, main 42%). The 16% gap is `main.run()` and `Bot.Poll()` — entry points that need subprocess execution or live Telegram. Not worth the test scaffolding.
+**Coverage (414 tests, ~84% project LOC):** chunk 100% · access 91% · bot 89% · daemon 87% · mcp 85% · ipc 81% · shim 72% · cmd/server 45%. The cmd/server gap is `main.run()` wiring (subprocess execution to cover) and `Bot.Poll()` (live Telegram). Not worth the scaffolding. Re-check with `go test -count=1 -cover ./...` before claiming a coverage change.
 
 ## Rules
 
@@ -137,12 +190,12 @@ when present and silently dropped otherwise.
 - Errors: wrap with `fmt.Errorf("...: %w", err)`, lowercase, no trailing punctuation. Use `errors.Is`/`errors.As`, never bare `==`. Low-cardinality messages — variable data goes into `slog.Error("msg", "key", value)`, NOT into the message string.
 - Logs: `log/slog` JSON to stderr. Claude Code picks it up. `slog.Info` / `Warn` / `Error` only — no `fmt.Fprintf(os.Stderr, ...)`.
 - Modern Go: `slices.Contains`, `strings.Cut`, `strings.Lines`, `maps.Copy`, `range len(x)`. The `modernize` linter is enabled.
-- Pointer vs value receivers: `Store`, `Bot`, `Server` all carry mutexes — pointer receivers throughout. Value-type receivers on `State`, `Pending`, `GroupPolicy` (no mutex).
+- Pointer vs value receivers: anything with a mutex or a long-lived resource (`Store`, `Bot`, `mcp.Server`, `ipc.Server`/`Client`, `daemon.Daemon`/`Router`, `shim.Shim`/`BotAdapter`) gets pointer receivers throughout. Value-type receivers on plain data (`State`, `Pending`, `GroupPolicy`, `ipc.Request`/`Response`).
 - HTTP: NEVER `http.DefaultClient` for outbound. Use the package-level `fileClient` with timeout. Always pass `ctx`.
 
 ### Lint config (`.golangci.yml`)
 
-49 enabled linters, 0 expected findings. Disabled (with rationale inline): `paralleltest` (httptest mocks share state), `dupl` (table tests look duplicated), `goconst` (short repeated strings not worth factoring), `wrapcheck`/`err113`/`mnd`/`iface` (too noisy as defaults). funlen 200/120, gocyclo 20 — the gate switch and handler dispatchers are intentionally wide.
+50 enabled linters, 0 expected findings. Disabled (with rationale inline): `paralleltest` (httptest mocks share state), `dupl` (table tests look duplicated), `goconst` (short repeated strings not worth factoring), `wrapcheck`/`err113`/`mnd`/`iface`/`varnamelen`/`exhaustruct` (too noisy as defaults). funlen 200/120, gocyclo 20 — the gate switch and handler dispatchers are intentionally wide.
 
 ### Tests
 
@@ -154,20 +207,26 @@ when present and silently dropped otherwise.
 
 ### What NOT to do
 
-- Don't import `mcp` from `bot`. Use the `Notifier` interface.
-- Don't add a third package. The current four are the bottom of the carving.
+- Don't import `mcp` from `bot`, or `daemon`/`shim` from each other. The dependency arrows are: `cmd/server` → {`daemon`, `shim`, `mcp`, `bot`, `access`, `ipc`}; `daemon` → {`bot`, `access`, `ipc`}; `shim` → {`mcp`, `bot` (for types), `ipc`}; `mcp` → {`bot` (for types only)}; `bot` → {`access`, `chunk`}. Don't introduce a new edge.
+- Don't add an 8th internal package. The current seven are the bottom of the carving — if something doesn't fit, it usually belongs in `daemon` or `bot`.
+- Don't reintroduce embedded mode (bot poller inside the shim/CC process). Removed in #16; routing assumes a separate daemon and adding it back means undoing the IPC layer.
 - Don't reintroduce `fmt.Fprintf(os.Stderr, ...)`. slog only.
 - Don't commit `.env`, `bin/`, `bot.pid`, `*.log`, anything under `.claude/channels/telegram/`.
-- Don't bypass the gate. Every outbound `assertAllowedChat` / inbound `gate()` call exists because the TS predecessor had vulnerabilities here.
+- Don't bypass the gate. Every outbound `assertAllowedChat` / inbound `gate()` call exists because the TS predecessor had vulnerabilities here. The daemon-side `Handlers.gate` is the load-bearing one — shim-side checks are convenience only.
 - Don't silently swallow errors. Either return wrapped, or `slog.Error` + explicit reason for the swallow (`//nolint:nilerr` with a comment).
+- Don't make the shim exit on daemon disconnect to force a CC re-spawn — #13 replaced that with reconnect-with-backoff. Exiting kills the CC session's MCP server, which is user-hostile.
 
 ## Gotchas
 
 - **fasthttp/telego goroutine leak** is a known upstream limitation; `goleak.IgnoreAnyFunction` masks it in `TestMain`. Don't add more ignores without a strong reason.
 - **`real` shadows the builtin** — use `resolved` / `realPath` for `filepath.EvalSymlinks` results. revive's `redefines-builtin-id` catches this.
 - **`golangci-lint --fix` rewrites `fmt.Errorf("plain string")` → `errors.New(...)` but doesn't add the import**. Re-run build after `make lint-fix` and add `errors` if needed.
-- **Telego `MessageID` is `int`**, but `Chat.ID` / `User.ID` are `int64`. Don't crosswire — strconv.Atoi vs strconv.ParseInt.
-- **`bot.pid` claim is comm-checked** — only PIDs whose `/proc/<pid>/comm` is `telegram-mcp` or `bun` get SIGTERMed. Anything else is left alone. Same logic prevents PID recycling from making us murder an unrelated user process.
+- **Telego `MessageID` is `int`**, but `Chat.ID` / `User.ID` are `int64`. Don't crosswire — strconv.Atoi vs strconv.ParseInt. The IPC wire format uses string `chat_id` and int `message_id` for the same reason.
+- **`daemon.pid` and `bot.pid` claims are comm-checked** — only PIDs whose `/proc/<pid>/comm` is `telegram-mcp` (or `bun`, for legacy TS-plugin handoff) get SIGTERMed. Anything else is left alone. Prevents PID recycling from making us murder an unrelated user process.
+- **Routing key is `reply_to_message_id`, not chat** — if a user types a fresh message in a chat that has multiple connected shims pinned/affinitied, it goes to the LRU/mention/pinned shim. To direct a reply at a specific shim's prior message, the user must use Telegram's "reply to" UI. Tests that assert "next inbound goes to shim X" must set `reply_to_message_id` explicitly.
+- **IPC reconnect drops in-flight calls** — `botadapter` waits briefly for the reconnect to land, but a long disconnection surfaces `daemon unavailable` to the MCP tool caller. The daemon-side response was lost; the user will see the tool error and can retry.
+- **Session file race** — `telegram-mcp self --hook` can fire before `shim.Wire()` writes `sessions/<cc_pid>.json`. It must print a fallback and exit 0; never abort the CC session. The session file is removed on shim exit, so its absence after that is correct, not an error.
+- **PR_SET_PDEATHSIG only on shim** — `cmd/server/main.go:bindParentDeath` skips it in daemon mode (#3 / commit 50c8773). The daemon's parent is systemd or the original shim's grandparent shell, and dying with either is wrong.
 
 ## Skills
 
