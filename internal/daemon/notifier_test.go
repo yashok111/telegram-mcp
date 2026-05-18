@@ -32,7 +32,7 @@ func TestNotifierDeliverInboundUsesChatOwner(t *testing.T) {
 
 	r.Register(newCapturingShim("a", &aSink))
 	r.Register(newCapturingShim("b", &bSink))
-	r.RecordOutbound("a", "chat-1")
+	r.RecordOutbound("a", "chat-1", 0)
 
 	n := NewNotifier(r)
 	n.DeliverInbound("hi", map[string]string{"chat_id": "chat-1", "user": "alice"})
@@ -133,6 +133,64 @@ func TestDeliverInboundDispatchesToEveryTargetOnBroadcast(t *testing.T) {
 	assert.Equal(t, 1, delivered["a"])
 	assert.Equal(t, 1, delivered["b"])
 	assert.Equal(t, 1, delivered["c"])
+}
+
+func TestDeliverInboundRoutesByReplyOverOwner(t *testing.T) {
+	r := NewRouter()
+	n := NewNotifier(r)
+
+	var aSink, bSink []capturedNotify
+
+	r.Register(newCapturingShim("a", &aSink))
+	r.Register(newCapturingShim("b", &bSink))
+
+	r.RecordOutbound("a", "chat-1", 42) // a sent msg 42
+	r.RecordOutbound("b", "chat-1", 99) // b owns chat-1 (last-writer-wins)
+
+	n.DeliverInbound("hi", map[string]string{
+		"chat_id":             "chat-1",
+		"reply_to_message_id": "42",
+	})
+
+	require.Len(t, aSink, 1, "reply must route to a (original sender)")
+	assert.Empty(t, bSink, "owner b must not receive when reply targets a")
+}
+
+func TestDeliverInboundReplyMissFallsThroughToOwner(t *testing.T) {
+	r := NewRouter()
+	n := NewNotifier(r)
+
+	var aSink, bSink []capturedNotify
+
+	r.Register(newCapturingShim("a", &aSink))
+	r.Register(newCapturingShim("b", &bSink))
+
+	r.RecordOutbound("a", "chat-1", 0) // a owns chat-1; no reply index
+
+	n.DeliverInbound("hi", map[string]string{
+		"chat_id":             "chat-1",
+		"reply_to_message_id": "999",
+	})
+
+	require.Len(t, aSink, 1, "unknown reply_to falls through to owner")
+	assert.Empty(t, bSink)
+}
+
+func TestDeliverInboundMalformedReplyHeaderIsIgnored(t *testing.T) {
+	r := NewRouter()
+	n := NewNotifier(r)
+
+	var aSink []capturedNotify
+
+	r.Register(newCapturingShim("a", &aSink))
+	r.RecordOutbound("a", "chat-1", 0)
+
+	n.DeliverInbound("hi", map[string]string{
+		"chat_id":             "chat-1",
+		"reply_to_message_id": "not-a-number",
+	})
+
+	require.Len(t, aSink, 1, "garbage reply_to_message_id is silently ignored")
 }
 
 func TestDeliverInboundDispatchesToMentionTargetOnly(t *testing.T) {

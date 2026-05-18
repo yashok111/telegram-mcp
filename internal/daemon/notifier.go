@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"log/slog"
+	"strconv"
 
 	"github.com/yakov/telegram-mcp/internal/bot"
 	"github.com/yakov/telegram-mcp/internal/ipc"
@@ -18,8 +19,9 @@ func NewNotifier(r *Router) *Notifier { return &Notifier{router: r} }
 
 func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 	chatID := meta["chat_id"]
+	replyToMsgID, _ := strconv.Atoi(meta["reply_to_message_id"])
 
-	targets := n.router.RouteInboundMulti(chatID, content)
+	targets := n.router.RouteInboundMulti(chatID, content, replyToMsgID)
 	if len(targets) == 0 {
 		slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "user", meta["user"])
 		return

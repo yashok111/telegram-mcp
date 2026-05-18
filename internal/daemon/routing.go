@@ -53,13 +53,77 @@ type Router struct {
 	aliases   map[string]string // alias → shim_id
 	shimAlias map[string]string // shim_id → alias  (for O(1) release at Drop)
 
-	lastOutbound map[string]time.Time // shim_id → time
-	pins         map[string]pin       // chat_id → pin
+	lastOutbound map[string]time.Time  // shim_id → time
+	pins         map[string]pin        // chat_id → pin
+	replyOwners  map[string]*replyRing // chat_id → per-chat bounded message_id ownership
 }
 
 type pin struct {
 	shimID    string
 	expiresAt time.Time
+}
+
+// replyOwnerCapPerChat bounds the per-chat (message_id → shim_id) ring so
+// replies to long-gone outbounds don't grow the daemon's memory unboundedly.
+const replyOwnerCapPerChat = 1000
+
+// replyRing is a bounded FIFO map: oldest message_id is evicted once cap is
+// reached. Not safe for concurrent use — caller (Router) holds r.mu.
+type replyRing struct {
+	cap    int
+	fifo   []int          // FIFO order, eldest at index 0
+	owners map[int]string // message_id → shim_id
+}
+
+func newReplyRing(capacity int) *replyRing {
+	return &replyRing{cap: capacity, owners: map[int]string{}}
+}
+
+func (rr *replyRing) add(msgID int, shimID string) {
+	if _, exists := rr.owners[msgID]; exists {
+		rr.owners[msgID] = shimID
+		return
+	}
+
+	for len(rr.fifo) >= rr.cap {
+		evicted := rr.fifo[0]
+		rr.fifo = rr.fifo[1:]
+		delete(rr.owners, evicted)
+	}
+
+	rr.fifo = append(rr.fifo, msgID)
+	rr.owners[msgID] = shimID
+
+	if cap(rr.fifo) > 4*rr.cap {
+		compact := make([]int, len(rr.fifo))
+		copy(compact, rr.fifo)
+		rr.fifo = compact
+	}
+}
+
+func (rr *replyRing) lookup(msgID int) (string, bool) {
+	sid, ok := rr.owners[msgID]
+	return sid, ok
+}
+
+func (rr *replyRing) dropShim(shimID string) {
+	keep := rr.fifo[:0]
+
+	for _, mid := range rr.fifo {
+		sid, ok := rr.owners[mid]
+		if !ok {
+			continue
+		}
+
+		if sid == shimID {
+			delete(rr.owners, mid)
+			continue
+		}
+
+		keep = append(keep, mid)
+	}
+
+	rr.fifo = keep
 }
 
 func NewRouter() *Router {
@@ -72,6 +136,7 @@ func NewRouter() *Router {
 		shimAlias:    map[string]string{},
 		lastOutbound: map[string]time.Time{},
 		pins:         map[string]pin{},
+		replyOwners:  map[string]*replyRing{},
 	}
 }
 
@@ -124,14 +189,25 @@ func (r *Router) Drop(id string) {
 			delete(r.pins, chat)
 		}
 	}
+
+	for chat, ring := range r.replyOwners {
+		ring.dropShim(id)
+
+		if len(ring.owners) == 0 {
+			delete(r.replyOwners, chat)
+		}
+	}
 }
 
-func (r *Router) RecordOutbound(shimID, chatID string) {
+// RecordOutbound updates chat ownership (last-writer-wins) and, when messageID
+// is non-zero, records (chat_id, message_id) → shim_id so a Telegram reply to
+// that message can be routed back to the original sender.
+func (r *Router) RecordOutbound(shimID, chatID string, messageID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if _, ok := r.shims[shimID]; !ok {
-		slog.Warn("RecordOutbound dropped: unknown shim", "shim_id", shimID, "chat_id", chatID)
+		slog.Warn("RecordOutbound dropped: unknown shim", "shim_id", shimID, "chat_id", chatID, "message_id", messageID)
 		return
 	}
 
@@ -139,12 +215,61 @@ func (r *Router) RecordOutbound(shimID, chatID string) {
 	r.chatOwners[chatID] = shimID
 	r.lastOutbound[shimID] = time.Now()
 
+	if messageID > 0 {
+		ring, ok := r.replyOwners[chatID]
+		if !ok {
+			ring = newReplyRing(replyOwnerCapPerChat)
+			r.replyOwners[chatID] = ring
+		}
+
+		ring.add(messageID, shimID)
+	}
+
 	if p, ok := r.pins[chatID]; ok && p.shimID != shimID {
 		delete(r.pins, chatID)
 		slog.Info("router pin cleared by other shim outbound", "chat_id", chatID, "old_pin_shim", p.shimID, "new_owner", shimID)
 	}
 
-	slog.Info("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "prev_owner", prev)
+	slog.Info("RecordOutbound", "shim_id", shimID, "chat_id", chatID, "message_id", messageID, "prev_owner", prev)
+}
+
+// RouteInboundByReply resolves an inbound Telegram reply to the shim that sent
+// the replied-to message. Returns false if replyToMsgID is zero, the chat has
+// no recorded outbounds, the message_id was evicted from the ring, or the
+// owning shim has since disconnected.
+func (r *Router) RouteInboundByReply(chatID string, replyToMsgID int) (*Shim, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.routeByReplyLocked(chatID, replyToMsgID)
+}
+
+// routeByReplyLocked is shared by RouteInboundByReply and RouteInboundMulti.
+// Caller holds r.mu (read or write — function only reads).
+func (r *Router) routeByReplyLocked(chatID string, replyToMsgID int) (*Shim, bool) {
+	if replyToMsgID == 0 {
+		return nil, false
+	}
+
+	ring, ok := r.replyOwners[chatID]
+	if !ok {
+		return nil, false
+	}
+
+	sid, ok := ring.lookup(replyToMsgID)
+	if !ok {
+		return nil, false
+	}
+
+	s, ok := r.shims[sid]
+	if !ok {
+		slog.Warn("RouteInbound reply owner gone", "chat_id", chatID, "reply_to_message_id", replyToMsgID, "stale_owner", sid)
+		return nil, false
+	}
+
+	slog.Info("RouteInbound reply", "chat_id", chatID, "reply_to_message_id", replyToMsgID, "shim_id", s.ID)
+
+	return s, true
 }
 
 // Snapshot returns a by-value list of connected shims, newest-first by ConnectedAt.
@@ -284,14 +409,19 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 }
 
 // RouteInboundMulti resolves an inbound message to a set of target shims using
-// the precedence chain: mentions (incl. @all broadcast) → chat owner → LRU.
-// A mention dispatch never rewrites chatOwners — it's a one-shot address.
-// Returns nil if no shims are connected.
-func (r *Router) RouteInboundMulti(chatID, content string) []*Shim {
+// the precedence chain: reply-to → mentions (incl. @all broadcast) → chat
+// owner → LRU. Reply wins because the user explicitly targeted the prior
+// sender via Telegram's quote-reply UI. A mention dispatch never rewrites
+// chatOwners — it's a one-shot address. Returns nil if no shims are connected.
+func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID int) []*Shim {
 	mentions := parseMentions(content)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if s, ok := r.routeByReplyLocked(chatID, replyToMsgID); ok {
+		return []*Shim{s}
+	}
 
 	if len(mentions) > 0 {
 		targets := r.resolveMentionsLocked(chatID, mentions)

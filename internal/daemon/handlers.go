@@ -117,7 +117,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params js
 
 	slog.Info("bot.SendMessage ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "text_len", len(p.Text), "reply_to", p.ReplyTo, "parse_mode", p.ParseMode)
 
-	h.router.RecordOutbound(h.shimID(c), p.ChatID)
+	h.router.RecordOutbound(h.shimID(c), p.ChatID, id)
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -144,7 +144,7 @@ func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.
 
 	slog.Info("bot.SendFile ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "path", p.Path, "reply_to", p.ReplyTo)
 
-	h.router.RecordOutbound(h.shimID(c), p.ChatID)
+	h.router.RecordOutbound(h.shimID(c), p.ChatID, id)
 
 	return map[string]any{"message_id": id}, nil
 }
