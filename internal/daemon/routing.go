@@ -238,12 +238,18 @@ func (r *Router) RecordOutbound(shimID, chatID string, messageID int) {
 // no recorded outbounds, the message_id was evicted from the ring, or the
 // owning shim has since disconnected.
 func (r *Router) RouteInboundByReply(chatID string, replyToMsgID int) (*Shim, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.routeByReplyLocked(chatID, replyToMsgID)
+}
+
+// routeByReplyLocked is shared by RouteInboundByReply and RouteInboundMulti.
+// Caller holds r.mu (read or write — function only reads).
+func (r *Router) routeByReplyLocked(chatID string, replyToMsgID int) (*Shim, bool) {
 	if replyToMsgID == 0 {
 		return nil, false
 	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
 
 	ring, ok := r.replyOwners[chatID]
 	if !ok {
@@ -397,14 +403,19 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 }
 
 // RouteInboundMulti resolves an inbound message to a set of target shims using
-// the precedence chain: mentions (incl. @all broadcast) → chat owner → LRU.
-// A mention dispatch never rewrites chatOwners — it's a one-shot address.
-// Returns nil if no shims are connected.
-func (r *Router) RouteInboundMulti(chatID, content string) []*Shim {
+// the precedence chain: reply-to → mentions (incl. @all broadcast) → chat
+// owner → LRU. Reply wins because the user explicitly targeted the prior
+// sender via Telegram's quote-reply UI. A mention dispatch never rewrites
+// chatOwners — it's a one-shot address. Returns nil if no shims are connected.
+func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID int) []*Shim {
 	mentions := parseMentions(content)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if s, ok := r.routeByReplyLocked(chatID, replyToMsgID); ok {
+		return []*Shim{s}
+	}
 
 	if len(mentions) > 0 {
 		targets := r.resolveMentionsLocked(chatID, mentions)

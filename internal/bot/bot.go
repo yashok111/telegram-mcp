@@ -371,6 +371,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 		"ts":         time.Unix(msg.Date, 0).UTC().Format(time.RFC3339),
 	}
 
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.MessageID != 0 {
+		meta["reply_to_message_id"] = strconv.Itoa(msg.ReplyToMessage.MessageID)
+	}
+
 	switch {
 	case msg.Photo != nil:
 		// Deferred download — only spend API calls + disk on gate-approved senders.
