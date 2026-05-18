@@ -143,9 +143,13 @@ func (b *Bot) Poll(ctx context.Context) error {
 	// Background: deliver any approval confirmations dropped by /telegram:access.
 	go b.approvalLoop(ctx)
 
-	// Fire-and-forget — best-effort, command list isn't load-bearing.
+	// Fire-and-forget — best-effort, command list isn't load-bearing. 5s cap
+	// keeps the goroutine from sitting forever against a wedged CDN.
 	go func() {
-		_ = b.api.SetMyCommands(ctx, &telego.SetMyCommandsParams{
+		cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		if err := b.api.SetMyCommands(cmdCtx, &telego.SetMyCommandsParams{
 			Commands: []telego.BotCommand{
 				{Command: "start", Description: "Welcome and setup guide"},
 				{Command: "help", Description: "What this bot can do"},
@@ -156,7 +160,9 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "rules", Description: "Manage auto-approve permission rules"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
-		})
+		}); err != nil {
+			slog.Warn("SetMyCommands failed", "err", err)
+		}
 	}()
 
 	// bh.Start blocks; ctx-driven shutdown goes through StopWithContext.
