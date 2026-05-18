@@ -198,6 +198,35 @@ func TestStore_load_partialJSON_fillsDefaults(t *testing.T) {
 	assert.NotNil(t, got.Pending)
 }
 
+func TestStore_Load_returnedMapsAndSlicesAreIndependentOfCache(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+	require.NoError(t, s.Save(State{
+		DMPolicy:        PolicyAllowlist,
+		AllowFrom:       []string{"1"},
+		Groups:          map[string]GroupPolicy{"-100": {AllowFrom: []string{"99"}}},
+		Pending:         map[string]Pending{"abc": {SenderID: "1"}},
+		MentionPatterns: []string{"hello"},
+		Rules:           []PermissionRule{{ID: "r1", Tool: "Read", Action: RuleApprove}},
+	}))
+
+	a := s.Load()
+
+	a.AllowFrom = append(a.AllowFrom, "mutated")
+	a.Pending["mutated"] = Pending{SenderID: "X"}
+	a.Groups["-100"].AllowFrom[0] = "mutated"
+	a.MentionPatterns[0] = "mutated"
+	a.Rules[0].Tool = "mutated"
+
+	b := s.Load()
+
+	assert.Equal(t, []string{"1"}, b.AllowFrom, "AllowFrom mutation must not corrupt cache")
+	assert.NotContains(t, b.Pending, "mutated", "Pending mutation must not corrupt cache")
+	assert.Equal(t, []string{"99"}, b.Groups["-100"].AllowFrom, "nested GroupPolicy.AllowFrom mutation must not corrupt cache")
+	assert.Equal(t, []string{"hello"}, b.MentionPatterns, "MentionPatterns mutation must not corrupt cache")
+	assert.Equal(t, "Read", b.Rules[0].Tool, "Rules element mutation must not corrupt cache")
+}
+
 func TestStore_mutate_persistsWhenFnReturnsTrue(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir, false)

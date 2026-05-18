@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -108,11 +109,11 @@ func NewStore(stateDir string, static bool) *Store {
 }
 
 // Load returns the current State. Hot path — cached by mtime; access.json is
-// re-read only when its mtime changes. Returned State shares its maps with
-// future Load callers; treat as read-only.
+// re-read only when its mtime changes. Returned State's maps and slices are
+// fresh copies so callers may mutate without corrupting the cache.
 func (s *Store) Load() State {
 	if s.boot != nil {
-		return *s.boot
+		return cloneState(s.boot)
 	}
 
 	info, err := os.Stat(s.path)
@@ -126,22 +127,55 @@ func (s *Store) Load() State {
 
 	s.cacheMu.Lock()
 	if s.cached != nil && info.ModTime().Equal(s.cachedMod) {
-		st := *s.cached
+		out := cloneState(s.cached)
 		s.cacheMu.Unlock()
 
-		return st
+		return out
 	}
 	s.cacheMu.Unlock()
 
 	st := s.readFile()
 
 	s.cacheMu.Lock()
-	stCopy := st
-	s.cached = &stCopy
+	cached := st
+	s.cached = &cached
 	s.cachedMod = info.ModTime()
+	out := cloneState(&st)
 	s.cacheMu.Unlock()
 
-	return st
+	return out
+}
+
+func cloneState(src *State) State {
+	out := *src
+	if src.AllowFrom != nil {
+		out.AllowFrom = slices.Clone(src.AllowFrom)
+	}
+
+	if src.MentionPatterns != nil {
+		out.MentionPatterns = slices.Clone(src.MentionPatterns)
+	}
+
+	if src.Rules != nil {
+		out.Rules = slices.Clone(src.Rules)
+	}
+
+	if src.Pending != nil {
+		out.Pending = maps.Clone(src.Pending)
+	}
+
+	if src.Groups != nil {
+		out.Groups = make(map[string]GroupPolicy, len(src.Groups))
+		for k, v := range src.Groups {
+			if v.AllowFrom != nil {
+				v.AllowFrom = slices.Clone(v.AllowFrom)
+			}
+
+			out.Groups[k] = v
+		}
+	}
+
+	return out
 }
 
 func (s *Store) readFile() State {
