@@ -106,6 +106,22 @@ The agent should know its own shim alias from turn 1 so `@s2 do X` mentions work
 **Embedded mode** (no daemon, no alias): no session file is written; `self` gracefully prints
 "embedded mode". No fatal errors — hooks must never abort a CC session.
 
+**Statusline** — `telegram-mcp self --statusline` prints a compact `tg:@sN` tag (or empty
+string if there's no session file). Compose into CC's `statusLine.command` so the user
+sees their addressable alias at a glance:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/abs/path/to/bin/telegram-mcp self --statusline"
+  }
+}
+```
+
+If you already have a custom statusline command, wrap it so the `tg:` tag is appended
+when present and silently dropped otherwise.
+
 ## Testing
 
 `go.uber.org/goleak` in every package's `TestMain`. Ignored upstream leaks (documented inline): `fasthttp.HostClient.connsCleaner` / `Client.mCleaner` / `TCPDialer.tcpAddrsClean`, `telego.Bot.doLongPolling` (sleeps in backoff after ctx cancel).
