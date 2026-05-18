@@ -156,7 +156,7 @@ func (d *Daemon) evictOldDaemon() error {
 		return nil //nolint:nilerr // garbage / self / pid<=1 means no prior daemon to evict.
 	}
 
-	alive := syscall.Kill(old, 0) == nil
+	alive := processIsLive(old)
 	ours := isOurDaemonFn(old)
 
 	switch {
@@ -192,14 +192,33 @@ func terminateOldDaemon(pid int) error {
 func waitForExit(pid int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) != nil {
-			return nil //nolint:nilerr // Kill(pid,0) returning error means ESRCH — process gone, that's success.
+		if !processIsLive(pid) {
+			return nil
 		}
 
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	return fmt.Errorf("process %d still alive after %s", pid, timeout)
+}
+
+// processIsLive reports whether pid refers to a running process. A zombie
+// passes syscall.Kill(pid, 0) (the kernel still has its entry), so without the
+// /proc/<pid>/status check this returns true for any unreaped child. Zombies
+// cannot be terminated by any signal, so treating them as alive triggers a
+// futile SIGTERM/SIGKILL escalation and a "still alive after SIGKILL" error.
+func processIsLive(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		// Non-Linux or /proc unmounted: fall back to Kill(0) semantics.
+		return true
+	}
+
+	return !strings.Contains(string(raw), "State:\tZ")
 }
 
 func isOurDaemon(pid int) bool {

@@ -163,6 +163,39 @@ func TestEnsureDaemonSpawnsWhenPidStale(t *testing.T) {
 	assert.Contains(t, err.Error(), "spawn disabled")
 }
 
+func TestAcquireSpawnLockSerializesConcurrentCallers(t *testing.T) {
+	dir := t.TempDir()
+
+	release1, err := acquireSpawnLock(dir)
+	require.NoError(t, err)
+	require.NotNil(t, release1)
+
+	got := make(chan struct{})
+
+	go func() {
+		defer close(got)
+
+		release2, err := acquireSpawnLock(dir)
+		if err == nil && release2 != nil {
+			release2()
+		}
+	}()
+
+	select {
+	case <-got:
+		t.Fatal("second acquire returned while first lock still held")
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	release1()
+
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second acquire never returned after first release")
+	}
+}
+
 // TestEnsureDaemonReapsExitedChild verifies the spawn goroutine calls Wait()
 // rather than Release(): a daemon binary that exits before the socket appears
 // must not leave a zombie under the shim's PID. Regression test for the
