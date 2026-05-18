@@ -418,6 +418,26 @@ func TestHandleDownload_apiError(t *testing.T) {
 	assert.Contains(t, contentText(res), "expired")
 }
 
+func TestServer_ensureInboxDir_idempotent(t *testing.T) {
+	srv, _, dir := newServerWithAllowlist(t, "123")
+	inbox := filepath.Join(dir, "inbox")
+
+	require.NoError(t, srv.ensureInboxDir(), "first call should succeed")
+	info, err := os.Stat(inbox)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+
+	require.NoError(t, srv.ensureInboxDir(), "second call should succeed (cached)")
+
+	// Delete the dir; sync.Once has already fired so ensureInboxDir must NOT
+	// recreate it. This is the proof that the syscall is gated.
+	require.NoError(t, os.RemoveAll(inbox))
+	require.NoError(t, srv.ensureInboxDir(), "third call should still return nil from cached err")
+
+	_, err = os.Stat(inbox)
+	assert.True(t, os.IsNotExist(err), "inbox dir must NOT have been recreated: %v", err)
+}
+
 // ===== notifier surface =====
 
 func TestLookupPermission_roundTrip(t *testing.T) {

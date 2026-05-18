@@ -77,6 +77,9 @@ type Bot struct {
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
 
+	inboxOnce sync.Once
+	inboxErr  error
+
 	mentionMu sync.Mutex
 	// Lives for daemon lifetime; patterns rarely change and access.json edits
 	// typically follow a process restart. nil entries negative-cache invalid
@@ -140,9 +143,13 @@ func (b *Bot) Poll(ctx context.Context) error {
 	// Background: deliver any approval confirmations dropped by /telegram:access.
 	go b.approvalLoop(ctx)
 
-	// Fire-and-forget — best-effort, command list isn't load-bearing.
+	// Fire-and-forget — best-effort, command list isn't load-bearing. 5s cap
+	// keeps the goroutine from sitting forever against a wedged CDN.
 	go func() {
-		_ = b.api.SetMyCommands(ctx, &telego.SetMyCommandsParams{
+		cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		if err := b.api.SetMyCommands(cmdCtx, &telego.SetMyCommandsParams{
 			Commands: []telego.BotCommand{
 				{Command: "start", Description: "Welcome and setup guide"},
 				{Command: "help", Description: "What this bot can do"},
@@ -153,7 +160,9 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "rules", Description: "Manage auto-approve permission rules"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
-		})
+		}); err != nil {
+			slog.Warn("SetMyCommands failed", "err", err)
+		}
 	}()
 
 	// bh.Start blocks; ctx-driven shutdown goes through StopWithContext.
@@ -506,6 +515,16 @@ func (b *Bot) downloadPhoto(ctx context.Context, sizes []telego.PhotoSize) (stri
 	return b.fetchFile(ctx, best.FileID, best.FileUniqueID)
 }
 
+// ensureInboxDir runs os.MkdirAll once per Bot lifetime. The directory rarely
+// changes and the syscall isn't free on every photo/attachment download.
+func (b *Bot) ensureInboxDir() error {
+	b.inboxOnce.Do(func() {
+		b.inboxErr = os.MkdirAll(b.store.InboxDir(), 0o700)
+	})
+
+	return b.inboxErr
+}
+
 // fetchFile resolves a file_id via getFile then downloads the bytes into
 // inbox/. Returns the on-disk path. uniqueHint becomes part of the filename
 // so multiple downloads of the same file don't collide.
@@ -546,7 +565,7 @@ func (b *Bot) fetchFile(ctx context.Context, fileID, uniqueHint string) (string,
 		unique = "dl"
 	}
 
-	if err := os.MkdirAll(b.store.InboxDir(), 0o700); err != nil {
+	if err := b.ensureInboxDir(); err != nil {
 		return "", err
 	}
 
@@ -870,7 +889,10 @@ func (b *Bot) compiledMentionPattern(pat string) *regexp.Regexp {
 }
 
 func (b *Bot) approvalLoop(ctx context.Context) {
-	t := time.NewTicker(5 * time.Second)
+	// 30s is plenty for a manual pairing flow — the user runs
+	// /telegram:access on their terminal, walks to their phone, and looks
+	// at the bot. Sub-second latency just spins the daemon.
+	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 
 	for {
