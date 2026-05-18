@@ -765,6 +765,97 @@ func TestRouterSetLabelUnknownShim(t *testing.T) {
 	require.ErrorIs(t, err, ErrShimNotFound)
 }
 
+func TestRouteInboundMultiLabelMatches(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"}) // alias s1
+	r.Register(&Shim{ID: "b"}) // alias s2
+
+	_, err := r.SetLabel("b", "main-bot")
+	require.NoError(t, err)
+
+	got := r.RouteInboundMulti("chat-1", "@main-bot please", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID)
+}
+
+func TestRouteInboundMultiAliasBeatsLabel(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"}) // alias s1
+	r.Register(&Shim{ID: "b"}) // alias s2
+
+	_, err := r.SetLabel("a", "s2") // label collides with b's alias
+	require.NoError(t, err)
+
+	got := r.RouteInboundMulti("chat-1", "@s2 hi", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "alias wins over same-name label")
+}
+
+func TestRouteInboundMultiLabelCollisionFansOut(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+	r.Register(&Shim{ID: "b"})
+	r.Register(&Shim{ID: "c"})
+
+	_, err := r.SetLabel("a", "dup")
+	require.NoError(t, err)
+	_, err = r.SetLabel("b", "dup")
+	require.NoError(t, err)
+
+	got := r.RouteInboundMulti("chat-1", "@dup go", 0)
+	require.Len(t, got, 2)
+	ids := []string{got[0].ID, got[1].ID}
+	assert.ElementsMatch(t, []string{"a", "b"}, ids)
+}
+
+func TestRouteInboundMultiUnknownLabelFallsThroughToOwner(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+	r.Register(&Shim{ID: "b"})
+	r.RecordOutbound("a", "chat-1", 0)
+
+	got := r.RouteInboundMulti("chat-1", "@no-such-label", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID)
+}
+
+func TestRouteInboundMultiLabelCaseInsensitive(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+
+	_, err := r.SetLabel("a", "Main-Bot")
+	require.NoError(t, err)
+
+	got := r.RouteInboundMulti("chat-1", "@main-bot ping", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID)
+}
+
+func TestRouteInboundMultiEmptyLabelNotMatched(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"}) // Label=""
+	r.Register(&Shim{ID: "b"})
+	r.RecordOutbound("b", "chat-1", 0)
+
+	got := r.RouteInboundMulti("chat-1", "@whatever", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "empty Label never matches mentions")
+}
+
+func TestRouteInboundMultiLabelMixedWithAlias(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"}) // s1
+	r.Register(&Shim{ID: "b"}) // s2
+
+	_, err := r.SetLabel("b", "worker")
+	require.NoError(t, err)
+
+	got := r.RouteInboundMulti("chat-1", "@s1 and @worker do this", 0)
+	require.Len(t, got, 2)
+	ids := []string{got[0].ID, got[1].ID}
+	assert.ElementsMatch(t, []string{"a", "b"}, ids)
+}
+
 func TestRouterSetLabelPushesNotify(t *testing.T) {
 	r := NewRouter()
 

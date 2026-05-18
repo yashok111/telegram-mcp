@@ -91,7 +91,13 @@ Single daemon per host; every Claude Code session attaches to it via shim.
 
 **Routing (priority order, see `daemon/routing.go`):**
 1. **Reply-based** (PR #15) — if the inbound Telegram message has `reply_to_message_id`, look it up in the per-chat `replyRing` (LRU of recent outbound `(shimID, messageID)` pairs). If we sent that message, route to that shim. This is the primary mechanism for multi-shim disambiguation; the user simply replies in Telegram to the message they want answered.
-2. **Mention-based** — `@s1`/`@s2` etc. in message text routes (or fans out for multi-mentions) to those shims by alias prefix. Mentions can also pin a chat to a shim (`/pin @s2`).
+2. **Mention-based** — tokens of the form `@<word>` (grammar `[A-Za-z0-9_-]+`, case-insensitive) route to one or more shims. Resolution order inside the mention step:
+   - `@all` → broadcast to every connected shim.
+   - exact alias match (`@s1`, `@s2`, …) → that shim.
+   - `Shim.Label` match (case-insensitive) → every shim with that label. Example: `/label main-bot` makes the shim addressable as `@main-bot`.
+   - Alias **wins** over a same-named label.
+   - Multiple shims sharing one label → fan-out (broadcast to all of them) plus a `slog.Warn`.
+   - Labels containing characters outside `[A-Za-z0-9_-]` are not addressable by `@mention`; they still show in `/sessions` and `telegram_peers`. A separate `/use <prefix>` DM command pins a chat to a specific shim by shim_id prefix.
 3. **Chat affinity** — chat→shim pin set by previous outbound, with TTL.
 4. **LRU fallback** — most-recently-connected shim if no other rule matches.
 5. **Permission replies** route by `request_id` regardless of chat (registered in `permRegistry` at broadcast time).
