@@ -28,6 +28,7 @@ type Daemon struct {
 	Router *Router
 
 	IdleTimeout time.Duration // 0 disables
+	InboxTTL    time.Duration // 0 disables inbox sweep
 
 	//nolint:containedctx // dctx is an internal cancel signal scoped to Run(); IdleExit needs it.
 	dctx    context.Context
@@ -113,6 +114,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	idleWG.Go(func() {
 		cleanup.Run(d.dctx)
 	})
+
+	if ic := NewInboxCleanup(d.Store, d.InboxTTL, time.Hour); ic != nil {
+		idleWG.Go(func() {
+			ic.Run(d.dctx)
+		})
+	}
 
 	listenErr := server.Listen(d.dctx)
 	d.dcancel()

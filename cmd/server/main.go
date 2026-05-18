@@ -133,6 +133,15 @@ func runDaemon(stateDir string) error {
 		idleSecs = 1800
 	}
 
+	inboxTTL := 7 * 24 * time.Hour
+	if v := os.Getenv("TELEGRAM_INBOX_TTL"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			inboxTTL = parsed
+		} else {
+			slog.Warn("invalid TELEGRAM_INBOX_TTL, using default", "value", v, "default", inboxTTL)
+		}
+	}
+
 	d := &daemonpkg.Daemon{
 		StateDir:    stateDir,
 		SocketPath:  filepath.Join(stateDir, "daemon.sock"),
@@ -141,6 +150,7 @@ func runDaemon(stateDir string) error {
 		Bot:         tgBot,
 		Router:      router,
 		IdleTimeout: time.Duration(idleSecs) * time.Second,
+		InboxTTL:    inboxTTL,
 	}
 
 	sigs := make(chan os.Signal, 1)
