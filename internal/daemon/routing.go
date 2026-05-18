@@ -527,8 +527,13 @@ func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID int) []*
 	return nil
 }
 
-// resolveMentionsLocked translates alias tokens into Shim pointers. @all expands
-// to every connected shim. Unknown aliases are silently dropped. Caller holds r.mu.
+// resolveMentionsLocked translates mention tokens into Shim pointers.
+//
+//	@all     → every connected shim (broadcast)
+//	@<alias> → exact alias match; alias wins over a same-named label
+//	@<label> → case-insensitive Shim.Label match; multiple matches fan out
+//
+// Unknown tokens are silently dropped (slog.Warn). Caller holds r.mu.
 func (r *Router) resolveMentionsLocked(chatID string, mentions []string) []*Shim {
 	seen := make(map[string]struct{}, len(mentions))
 	out := make([]*Shim, 0, len(mentions))
@@ -550,22 +555,67 @@ func (r *Router) resolveMentionsLocked(chatID string, mentions []string) []*Shim
 			continue
 		}
 
-		id, ok := r.aliases[m]
-		if !ok {
-			slog.Warn("mention resolved to unknown alias", "alias", m, "chat_id", chatID)
+		if id, ok := r.aliases[m]; ok {
+			if _, dup := seen[id]; dup {
+				continue
+			}
+
+			if s, ok := r.shims[id]; ok {
+				seen[id] = struct{}{}
+
+				out = append(out, s)
+			}
+
 			continue
 		}
 
-		if _, dup := seen[id]; dup {
+		labelMatches := r.matchByLabelLocked(m)
+		if len(labelMatches) == 0 {
+			slog.Warn("mention resolved to unknown alias or label", "token", m, "chat_id", chatID)
 			continue
 		}
 
+		if len(labelMatches) > 1 {
+			ids := make([]string, len(labelMatches))
+			for i, s := range labelMatches {
+				ids[i] = s.ID
+			}
+
+			slog.Warn("label collision — fanning out", "label", m, "chat_id", chatID, "shim_ids", ids)
+		}
+
+		for _, s := range labelMatches {
+			if _, dup := seen[s.ID]; dup {
+				continue
+			}
+
+			seen[s.ID] = struct{}{}
+
+			out = append(out, s)
+		}
+	}
+
+	return out
+}
+
+// matchByLabelLocked returns every shim whose non-empty Label equals token
+// (case-insensitive). Iterates r.lru for deterministic order. Caller holds r.mu.
+func (r *Router) matchByLabelLocked(token string) []*Shim {
+	var out []*Shim
+
+	for _, id := range r.lru {
 		s, ok := r.shims[id]
 		if !ok {
 			continue
 		}
 
-		seen[id] = struct{}{}
+		if s.Label == "" {
+			continue
+		}
+
+		if !strings.EqualFold(s.Label, token) {
+			continue
+		}
 
 		out = append(out, s)
 	}
