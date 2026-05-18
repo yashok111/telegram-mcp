@@ -889,7 +889,10 @@ func (b *Bot) compiledMentionPattern(pat string) *regexp.Regexp {
 }
 
 func (b *Bot) approvalLoop(ctx context.Context) {
-	t := time.NewTicker(5 * time.Second)
+	// 30s is plenty for a manual pairing flow — the user runs
+	// /telegram:access on their terminal, walks to their phone, and looks
+	// at the bot. Sub-second latency just spins the daemon.
+	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 
 	for {
