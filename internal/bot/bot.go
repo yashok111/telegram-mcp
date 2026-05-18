@@ -77,6 +77,9 @@ type Bot struct {
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
 
+	inboxOnce sync.Once
+	inboxErr  error
+
 	mentionMu sync.Mutex
 	// Lives for daemon lifetime; patterns rarely change and access.json edits
 	// typically follow a process restart. nil entries negative-cache invalid
@@ -506,6 +509,16 @@ func (b *Bot) downloadPhoto(ctx context.Context, sizes []telego.PhotoSize) (stri
 	return b.fetchFile(ctx, best.FileID, best.FileUniqueID)
 }
 
+// ensureInboxDir runs os.MkdirAll once per Bot lifetime. The directory rarely
+// changes and the syscall isn't free on every photo/attachment download.
+func (b *Bot) ensureInboxDir() error {
+	b.inboxOnce.Do(func() {
+		b.inboxErr = os.MkdirAll(b.store.InboxDir(), 0o700)
+	})
+
+	return b.inboxErr
+}
+
 // fetchFile resolves a file_id via getFile then downloads the bytes into
 // inbox/. Returns the on-disk path. uniqueHint becomes part of the filename
 // so multiple downloads of the same file don't collide.
@@ -546,7 +559,7 @@ func (b *Bot) fetchFile(ctx context.Context, fileID, uniqueHint string) (string,
 		unique = "dl"
 	}
 
-	if err := os.MkdirAll(b.store.InboxDir(), 0o700); err != nil {
+	if err := b.ensureInboxDir(); err != nil {
 		return "", err
 	}
 
