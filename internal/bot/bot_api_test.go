@@ -777,9 +777,9 @@ func TestApprovalLoop_exitsOnCtxCancel(t *testing.T) {
 	}
 }
 
-// New() and Stop() smoke.
-func TestNew_invalidToken_errors(t *testing.T) {
-	_, err := New("", access.NewStore(t.TempDir(), false), &noopNotifier{})
+// NewWithRouter() and Stop() smoke.
+func TestNewWithRouter_invalidToken_errors(t *testing.T) {
+	_, err := NewWithRouter("", access.NewStore(t.TempDir(), false), &noopNotifier{}, nil)
 	assert.Error(t, err)
 }
 

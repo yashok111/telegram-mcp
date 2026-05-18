@@ -78,13 +78,9 @@ type Bot struct {
 	stopOnce    sync.Once
 }
 
-func New(token string, store *access.Store, notifier Notifier) (*Bot, error) {
-	return NewWithRouter(token, store, notifier, nil)
-}
-
-// NewWithRouter is the daemon-mode constructor: rv carries the active Router.
-// Embedded mode goes through New() with rv == nil, and the session commands
-// degrade to a friendly "daemon mode only" message.
+// NewWithRouter is the production constructor: rv carries the active Router
+// owned by the daemon process. Tests that pass nil for rv must avoid the
+// session-switcher commands (renderShims / sendSessions / sendIdle).
 func NewWithRouter(token string, store *access.Store, notifier Notifier, rv RouterView) (*Bot, error) {
 	api, err := telego.NewBot(token, telego.WithDefaultDebugLogger())
 	if err != nil {
@@ -94,14 +90,9 @@ func NewWithRouter(token string, store *access.Store, notifier Notifier, rv Rout
 	return &Bot{api: api, token: token, store: store, notifier: notifier, router: rv}, nil
 }
 
-// NewFromAPI builds a Bot with a custom telego API server URL (for tests).
-// Production code uses New(); tests use this to point at httptest.
-func NewFromAPI(token string, store *access.Store, notifier Notifier, apiURL string) (*Bot, error) {
-	return NewFromAPIWithRouter(token, store, notifier, apiURL, nil)
-}
-
-// NewFromAPIWithRouter is the router-aware test constructor: pairs with
-// NewWithRouter to let session-command tests stub a RouterView.
+// NewFromAPIWithRouter is the test constructor: points telego at a custom API
+// server URL (httptest) and accepts either a stubbed RouterView or nil for
+// tests that don't exercise session-switcher commands.
 func NewFromAPIWithRouter(token string, store *access.Store, notifier Notifier, apiURL string, rv RouterView) (*Bot, error) {
 	opts := []telego.BotOption{telego.WithDefaultDebugLogger()}
 	if apiURL != "" {

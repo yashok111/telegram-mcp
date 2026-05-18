@@ -1,8 +1,9 @@
 // telegram-mcp — local MCP bridge between Telegram and Claude Code.
 //
 // State lives in ~/.claude/channels/telegram (compat with the original TS
-// plugin). Lifecycle: bound to parent via PR_SET_PDEATHSIG so we die with
-// Claude Code even if the supervisor leaks us.
+// plugin). Lifecycle: shim is bound to its parent CC session via
+// PR_SET_PDEATHSIG; daemon outlives any single shim and idles out 30 minutes
+// after the last shim disconnects.
 package main
 
 import (
@@ -32,8 +33,7 @@ import (
 type mode int
 
 const (
-	modeEmbedded mode = iota
-	modeDaemon
+	modeDaemon mode = iota
 	modeShim
 	modeSelf
 )
@@ -50,11 +50,7 @@ func selectMode(argv []string) mode {
 		}
 	}
 
-	if v := os.Getenv("TELEGRAM_DAEMON"); v != "" && v != "0" {
-		return modeShim
-	}
-
-	return modeEmbedded
+	return modeShim
 }
 
 func main() {
@@ -66,10 +62,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load .env before selectMode: TELEGRAM_DAEMON commonly lives only in
-	// ~/.claude/channels/telegram/.env (not in the spawning shell's env), so
-	// reading it later inside runEmbedded/runDaemon is too late — selectMode
-	// would have already dispatched to embedded and started a second poller.
+	// Load .env so TELEGRAM_BOT_TOKEN (commonly set only inside
+	// ~/.claude/channels/telegram/.env) is visible to loadConfig.
 	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn(".env load failed", "err", err)
 	}
@@ -77,15 +71,14 @@ func main() {
 	selected := selectMode(os.Args)
 
 	// `self` is a read-only context-rendering subcommand. It must not bind
-	// PR_SET_PDEATHSIG, claim bot.pid, or otherwise mutate process-global state.
+	// PR_SET_PDEATHSIG or otherwise mutate process-global state.
 	if selected == modeSelf {
 		os.Exit(runSelf(stateDir, os.Args[2:], os.Stdout))
 	}
 
 	// PR_SET_PDEATHSIG binds our lifetime to the spawning Claude Code session
-	// for embedded and shim modes. Daemon mode must outlive any single shim,
-	// so it explicitly opts out — its lifetime is governed by IdleTimeout and
-	// systemd / signal handling instead.
+	// in shim mode. Daemon mode must outlive any single shim, so it opts out —
+	// its lifetime is governed by IdleTimeout and systemd / signal handling.
 	var runErr error
 
 	switch selected {
@@ -95,10 +88,6 @@ func main() {
 		bindParentDeath()
 
 		runErr = runShim(stateDir)
-	case modeEmbedded:
-		bindParentDeath()
-
-		runErr = runEmbedded(stateDir)
 	case modeSelf:
 		// Handled above; included so the switch is exhaustive for linters.
 	}
@@ -107,69 +96,6 @@ func main() {
 		slog.Error("fatal", "err", runErr)
 		os.Exit(1)
 	}
-}
-
-func runEmbedded(stateDir string) error {
-	token, err := loadConfig(stateDir)
-	if err != nil {
-		return err
-	}
-
-	if err := claimPID(filepath.Join(stateDir, "bot.pid")); err != nil {
-		return fmt.Errorf("claim pid: %w", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	store := access.NewStore(stateDir, os.Getenv("TELEGRAM_ACCESS_MODE") == "static")
-
-	mcpSrv, err := mcp.New(store)
-	if err != nil {
-		return fmt.Errorf("mcp init: %w", err)
-	}
-
-	tgBot, err := bot.New(token, store, mcpSrv)
-	if err != nil {
-		return fmt.Errorf("telegram init: %w", err)
-	}
-
-	mcpSrv.AttachBot(tgBot)
-
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		defer cancel()
-
-		if err := mcpSrv.ServeStdio(ctx); err != nil {
-			slog.Error("mcp loop exited", "err", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		defer cancel()
-
-		if err := tgBot.Poll(ctx); err != nil {
-			slog.Error("poll loop exited", "err", err)
-		}
-	}()
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
-	select {
-	case <-ctx.Done():
-	case sig := <-sigs:
-		slog.Info("shutting down", "signal", sig.String())
-		cancel()
-	}
-
-	tgBot.Stop()
-	wg.Wait()
-
-	return nil
 }
 
 func runDaemon(stateDir string) error {
@@ -407,35 +333,6 @@ func loadDotEnv(path string) error {
 	}
 
 	return nil
-}
-
-// claimPID writes our PID to bot.pid. If a previous live process owns it AND
-// /proc says it's one of our binaries (bun or telegram-mcp), send SIGTERM and
-// replace — Telegram allows exactly one getUpdates consumer per token.
-// Refuses to signal a PID with an unrelated comm so PID recycling can't hijack
-// us into killing a random process.
-func claimPID(path string) error {
-	if raw, err := os.ReadFile(path); err == nil {
-		if old, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && old > 1 && old != os.Getpid() {
-			if syscall.Kill(old, 0) == nil && isOurPoller(old) {
-				slog.Info("replacing stale poller", "pid", old)
-				_ = syscall.Kill(old, syscall.SIGTERM)
-			}
-		}
-	}
-
-	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
-}
-
-func isOurPoller(pid int) bool {
-	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err != nil {
-		return false
-	}
-
-	comm := strings.TrimSpace(string(raw))
-
-	return comm == "telegram-mcp" || comm == "bun"
 }
 
 // routerAdapter adapts daemon.Router to bot.RouterView, converting

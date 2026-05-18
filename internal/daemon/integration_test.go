@@ -89,7 +89,7 @@ func newIntegration(t *testing.T) *integrationFixture {
 	router := NewRouter()
 	notifier := NewNotifier(router)
 
-	tgBot, err := bot.NewFromAPI("1234567890:AAH00000000000000000000000000000000", store, notifier, ts.URL)
+	tgBot, err := bot.NewFromAPIWithRouter("1234567890:AAH00000000000000000000000000000000", store, notifier, ts.URL, nil)
 	require.NoError(t, err)
 
 	sock := filepath.Join(dir, "daemon.sock")
