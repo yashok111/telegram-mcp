@@ -35,11 +35,22 @@ const maxAncestorHops = 8
 // when our state is missing.
 func runSelf(stateDir string, argv []string, out io.Writer) int {
 	wantHook := false
+	wantStatusline := false
 
 	for _, a := range argv {
-		if a == "--hook" {
+		switch a {
+		case "--hook":
 			wantHook = true
+		case "--statusline":
+			wantStatusline = true
 		}
+	}
+
+	// --statusline wins when both flags are passed: statusline output is the
+	// narrower contract (one tag, no newline) and tolerates being chained.
+	if wantStatusline {
+		_, _ = fmt.Fprint(out, renderStatuslineText(stateDir, findCCPID))
+		return 0
 	}
 
 	text := renderSelfText(stateDir, findCCPID)
@@ -59,6 +70,34 @@ func runSelf(stateDir string, argv []string, out io.Writer) int {
 	_, _ = fmt.Fprintln(out, text)
 
 	return 0
+}
+
+// renderStatuslineText returns a compact "tg:@sN" tag suitable for Claude Code
+// statusline composition. Returns an empty string when no session file exists
+// (embedded mode or pre-Wire race) so the caller can drop the segment silently.
+func renderStatuslineText(stateDir string, ccPIDFn func() int) string {
+	ccPID := ccPIDFn()
+	if ccPID <= 0 {
+		return ""
+	}
+
+	path := filepath.Join(stateDir, "sessions", strconv.Itoa(ccPID)+".json")
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	var info sessionInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return ""
+	}
+
+	if info.Alias == "" {
+		return ""
+	}
+
+	return "tg:@" + info.Alias
 }
 
 // renderSelfText loads the session snapshot keyed by the CC process PID. The

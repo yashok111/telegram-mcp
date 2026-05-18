@@ -99,6 +99,67 @@ func TestRunSelf_hookMode_emitsSessionStartJSON(t *testing.T) {
 	assert.Contains(t, payload.HookSpecificOutput.AdditionalContext, "@s3")
 }
 
+func TestRunSelf_statusline_emitsCompactAliasTag(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CC_PID", "44444")
+	writeFixtureSession(t, dir, 44444)
+
+	var out bytes.Buffer
+
+	code := runSelf(dir, []string{"--statusline"}, &out)
+	require.Equal(t, 0, code)
+	assert.Equal(t, "tg:@s3", out.String())
+}
+
+func TestRunSelf_statuslineBeatsHookWhenBothFlagsPresent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CC_PID", "66666")
+	writeFixtureSession(t, dir, 66666)
+
+	var out bytes.Buffer
+
+	code := runSelf(dir, []string{"--hook", "--statusline"}, &out)
+	require.Equal(t, 0, code)
+	assert.Equal(t, "tg:@s3", out.String(), "--statusline takes precedence over --hook")
+}
+
+func TestRunSelf_statusline_missingFile_emptyOutput(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CC_PID", "55555")
+
+	var out bytes.Buffer
+
+	code := runSelf(dir, []string{"--statusline"}, &out)
+	require.Equal(t, 0, code)
+	assert.Empty(t, out.String())
+}
+
+func TestRenderStatuslineText_ccPIDZero_empty(t *testing.T) {
+	dir := t.TempDir()
+	got := renderStatuslineText(dir, func() int { return 0 })
+	assert.Empty(t, got)
+}
+
+func TestRenderStatuslineText_corruptJSON_empty(t *testing.T) {
+	dir := t.TempDir()
+	sessDir := filepath.Join(dir, "sessions")
+	require.NoError(t, os.MkdirAll(sessDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "1.json"), []byte("not json"), 0o600))
+
+	got := renderStatuslineText(dir, func() int { return 1 })
+	assert.Empty(t, got)
+}
+
+func TestRenderStatuslineText_emptyAlias_empty(t *testing.T) {
+	dir := t.TempDir()
+	sessDir := filepath.Join(dir, "sessions")
+	require.NoError(t, os.MkdirAll(sessDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "2.json"), []byte(`{"alias":"","cc_pid":2}`), 0o600))
+
+	got := renderStatuslineText(dir, func() int { return 2 })
+	assert.Empty(t, got)
+}
+
 func TestSelectModeSelfSubcommand(t *testing.T) {
 	t.Setenv("TELEGRAM_DAEMON", "")
 	assert.Equal(t, modeSelf, selectMode([]string{"telegram-mcp", "self"}))
