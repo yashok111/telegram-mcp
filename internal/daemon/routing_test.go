@@ -776,6 +776,7 @@ func TestRouterSetLabelPushesNotify(t *testing.T) {
 	notify := func(method string, params any) error {
 		gotMethod = method
 		gotParams = params
+
 		return nil
 	}
 
@@ -784,6 +785,7 @@ func TestRouterSetLabelPushesNotify(t *testing.T) {
 	_, err := r.SetLabel("s1", "x")
 	require.NoError(t, err)
 	assert.Equal(t, ipc.NotifyLabelChanged, gotMethod)
+
 	m, ok := gotParams.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "x", m["label"])

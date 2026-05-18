@@ -93,12 +93,14 @@ type labelSpy struct {
 func (l *labelSpy) UpdateLabel(label string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	l.labels = append(l.labels, label)
 }
 
 func (l *labelSpy) seen() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	return append([]string(nil), l.labels...)
 }
 

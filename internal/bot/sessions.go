@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,18 @@ import (
 // by /sessions and /idle. Lowercase-hex is what daemon.ShimInfo.IDPrefix
 // returns, so any other casing is rejected as a forged/garbled payload.
 var sessCallbackRE = regexp.MustCompile(`^sess:(use|kill):([a-f0-9]{1,12})$`)
+
+// labelCallbackRE matches "sess:label:<hex-prefix>" — the label text itself is
+// looked up out-of-band in Bot.pendingLabel because Telegram's 64-byte
+// callback_data limit doesn't comfortably fit utf-8 label strings.
+var labelCallbackRE = regexp.MustCompile(`^sess:label:([a-f0-9]{1,12})$`)
+
+const pendingLabelTTL = 60 * time.Second
+
+type pendingLabel struct {
+	text      string
+	expiresAt time.Time
+}
 
 // ShimInfo mirrors daemon.ShimInfo for bot-side rendering. Kept duplicated to
 // avoid a bot→daemon import. Conversion happens at the wiring boundary in main.
@@ -39,6 +52,7 @@ type RouterView interface {
 	Snapshot() []ShimInfo
 	Pin(chatID, shimIDPrefix string, ttl time.Duration) (ShimInfo, error)
 	Evict(shimIDPrefix string) (ShimInfo, error)
+	SetLabel(shimIDPrefix, label string) (ShimInfo, error)
 }
 
 // PinTTL is how long /use and /sessions pins last. Matches the daemon's
@@ -284,6 +298,185 @@ func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, ac
 			_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
 				msg.Text+"\n\n❌ Evicted "+info.IDPrefix+" ["+info.Alias+"]"))
 		}
+	}
+
+	return nil
+}
+
+// handleLabelCommand parses "/label <text>" and either dispatches the label
+// change to the pinned/sole shim, or stashes the label and emits an inline
+// picker when ambiguous. Empty text clears the label.
+func (b *Bot) handleLabelCommand(ctx context.Context, msg telego.Message) {
+	if b.router == nil {
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Session switcher is unavailable: no router wired."))
+		return
+	}
+
+	rest := msg.Text
+	if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+		rest = strings.TrimSpace(rest[idx+1:])
+	} else {
+		rest = ""
+	}
+
+	label := rest
+
+	shims := b.router.Snapshot()
+	if len(shims) == 0 {
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "No active CC sessions connected."))
+		return
+	}
+
+	chatID := strconv.FormatInt(msg.Chat.ID, 10)
+
+	if target, ok := b.pinnedShim(chatID, shims); ok {
+		b.applyLabel(ctx, msg, target.IDPrefix, label)
+		return
+	}
+
+	if len(shims) == 1 {
+		b.applyLabel(ctx, msg, shims[0].IDPrefix, label)
+		return
+	}
+
+	b.stashPendingLabel(chatID, label)
+	b.sendLabelPicker(ctx, msg, label, shims)
+}
+
+func (b *Bot) pinnedShim(chatID string, shims []ShimInfo) (ShimInfo, bool) {
+	for _, s := range shims {
+		if slices.Contains(s.PinnedChats, chatID) {
+			return s, true
+		}
+	}
+
+	return ShimInfo{}, false
+}
+
+func (b *Bot) applyLabel(ctx context.Context, msg telego.Message, prefix, label string) {
+	info, err := b.router.SetLabel(prefix, label)
+	if err != nil {
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Set label failed: "+err.Error()))
+		return
+	}
+
+	display := label
+	if display == "" {
+		display = "(no label)"
+	}
+
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
+		fmt.Sprintf("✅ %s [%s] → %s", info.IDPrefix, info.Alias, display)))
+}
+
+func (b *Bot) stashPendingLabel(chatID, label string) {
+	b.pendingLabelMu.Lock()
+	defer b.pendingLabelMu.Unlock()
+
+	if b.pendingLabel == nil {
+		b.pendingLabel = map[string]pendingLabel{}
+	}
+
+	now := time.Now()
+	for cid, pl := range b.pendingLabel {
+		if now.After(pl.expiresAt) {
+			delete(b.pendingLabel, cid)
+		}
+	}
+
+	b.pendingLabel[chatID] = pendingLabel{text: label, expiresAt: now.Add(pendingLabelTTL)}
+}
+
+func (b *Bot) takePendingLabel(chatID string) (string, bool) {
+	b.pendingLabelMu.Lock()
+	defer b.pendingLabelMu.Unlock()
+
+	pl, ok := b.pendingLabel[chatID]
+	if !ok {
+		return "", false
+	}
+
+	delete(b.pendingLabel, chatID)
+
+	if time.Now().After(pl.expiresAt) {
+		return "", false
+	}
+
+	return pl.text, true
+}
+
+func (b *Bot) sendLabelPicker(ctx context.Context, msg telego.Message, label string, shims []ShimInfo) {
+	display := label
+	if display == "" {
+		display = "(no label)"
+	}
+
+	rows := make([][]telego.InlineKeyboardButton, 0, len(shims))
+
+	for _, s := range shims {
+		shimLabel := s.Label
+		if shimLabel == "" {
+			shimLabel = "(no label)"
+		}
+
+		btn := tu.InlineKeyboardButton(fmt.Sprintf("%s [%s] %s", s.IDPrefix, s.Alias, shimLabel)).
+			WithCallbackData("sess:label:" + s.IDPrefix)
+		rows = append(rows, tu.InlineKeyboardRow(btn))
+	}
+
+	keyboard := tu.InlineKeyboard(rows...)
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
+		fmt.Sprintf("Which session should get label %q? (expires in %s)", display, pendingLabelTTL)).
+		WithReplyMarkup(keyboard))
+}
+
+// handleLabelCallback resolves a "sess:label:<prefix>" callback by looking up
+// the stashed pending label for the chat and applying it. Caller must enforce
+// the allowlist before reaching here, mirroring handleSessCallback.
+func (b *Bot) handleLabelCallback(ctx context.Context, q telego.CallbackQuery, prefix string) error {
+	chatID := strconv.FormatInt(q.From.ID, 10)
+	if msg, ok := q.Message.(*telego.Message); ok && msg != nil {
+		chatID = strconv.FormatInt(msg.Chat.ID, 10)
+	}
+
+	label, ok := b.takePendingLabel(chatID)
+	if !ok {
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID, Text: "Label expired — send /label <text> again.",
+		})
+
+		return nil
+	}
+
+	if b.router == nil {
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID, Text: "Session switcher unavailable.",
+		})
+
+		return nil
+	}
+
+	info, err := b.router.SetLabel(prefix, label)
+	if err != nil {
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID, Text: "Set label failed: " + err.Error(),
+		})
+
+		return nil //nolint:nilerr // error already surfaced to user via callback ack
+	}
+
+	display := label
+	if display == "" {
+		display = "(no label)"
+	}
+
+	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: q.ID, Text: "✅ " + info.Alias + " → " + display,
+	})
+
+	if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
+		_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
+			msg.Text+"\n\n✅ "+info.IDPrefix+" ["+info.Alias+"] → "+display))
 	}
 
 	return nil

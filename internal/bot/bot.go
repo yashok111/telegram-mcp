@@ -85,6 +85,9 @@ type Bot struct {
 	// typically follow a process restart. nil entries negative-cache invalid
 	// regexes so a broken user pattern stops trying to compile.
 	mentionCache map[string]*regexp.Regexp
+
+	pendingLabelMu sync.Mutex
+	pendingLabel   map[string]pendingLabel
 }
 
 // NewWithRouter is the production constructor: rv carries the active Router
@@ -158,6 +161,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "use", Description: "/use <prefix> — pin a session"},
 				{Command: "idle", Description: "Show the most idle session"},
 				{Command: "rules", Description: "Manage auto-approve permission rules"},
+				{Command: "label", Description: "/label <text> — set session label (empty clears)"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		}); err != nil {
@@ -249,7 +253,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/sessions — pick which CC session to talk to\n"+
 				"/use <prefix> — pin a specific session\n"+
 				"/idle — show the most idle session\n"+
-				"/rules — list/clear/revoke auto-approve permission rules"))
+				"/rules — list/clear/revoke auto-approve permission rules\n"+
+				"/label <text> — set session label (empty clears)"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
@@ -261,6 +266,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.sendIdle(ctx, msg)
 	case "rules":
 		b.handleRulesCommand(ctx, msg, st)
+	case "label":
+		b.handleLabelCommand(ctx, msg)
 	}
 
 	return nil
@@ -597,6 +604,19 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
 	st := b.store.Load()
 	senderID := strconv.FormatInt(q.From.ID, 10)
+
+	if lm := labelCallbackRE.FindStringSubmatch(q.Data); lm != nil {
+		if !slices.Contains(st.AllowFrom, senderID) {
+			slog.Warn("label callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
+			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: q.ID, Text: "Not authorized.",
+			})
+
+			return nil
+		}
+
+		return b.handleLabelCallback(ctx, q, lm[1])
+	}
 
 	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
 		if !slices.Contains(st.AllowFrom, senderID) {

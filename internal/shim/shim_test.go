@@ -534,7 +534,7 @@ func TestShimUpdateLabelEmptyClears(t *testing.T) {
 	assert.NotContains(t, string(b), `"label"`)
 }
 
-func TestShimUpdateLabelNoStateDirNoop(t *testing.T) {
+func TestShimUpdateLabelNoStateDirNoop(_ *testing.T) {
 	s := &Shim{HelloPID: 1234}
 	s.id = "abcdef012345"
 	s.ccPID = 1234
