@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,9 @@ type fakeClient struct {
 	calledParams json.RawMessage
 	returnResult json.RawMessage
 	returnErr    error
+
+	doneCh    chan struct{}
+	doneClose sync.Once
 }
 
 func (f *fakeClient) Call(_ context.Context, method string, params, result any) error {
@@ -43,7 +47,17 @@ func (f *fakeClient) Call(_ context.Context, method string, params, result any) 
 func (f *fakeClient) Notify(string, any) error           { return nil }
 func (f *fakeClient) OnNotify(string, ipc.NotifyHandler) {}
 func (f *fakeClient) Close() error                       { return nil }
-func (f *fakeClient) Done() <-chan struct{}              { return nil }
+func (f *fakeClient) Done() <-chan struct{}              { return f.doneCh }
+
+// closeDone shuts down the simulated IPC client. Idempotent so tests can
+// double-signal without panicking on a closed channel.
+func (f *fakeClient) closeDone() {
+	if f.doneCh == nil {
+		return
+	}
+
+	f.doneClose.Do(func() { close(f.doneCh) })
+}
 
 func TestBotAdapterSendMessage(t *testing.T) {
 	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":99}`)}
