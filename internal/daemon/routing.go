@@ -54,6 +54,7 @@ type Router struct {
 	shimAlias map[string]string // shim_id → alias  (for O(1) release at Drop)
 
 	lastOutbound map[string]time.Time  // shim_id → time
+	lastAssigned map[string]time.Time  // shim_id → most recent inbound-route resolution
 	pins         map[string]pin        // chat_id → pin
 	replyOwners  map[string]*replyRing // chat_id → per-chat bounded message_id ownership
 }
@@ -135,6 +136,7 @@ func NewRouter() *Router {
 		aliases:      map[string]string{},
 		shimAlias:    map[string]string{},
 		lastOutbound: map[string]time.Time{},
+		lastAssigned: map[string]time.Time{},
 		pins:         map[string]pin{},
 		replyOwners:  map[string]*replyRing{},
 	}
@@ -183,6 +185,7 @@ func (r *Router) Drop(id string) {
 	}
 
 	delete(r.lastOutbound, id)
+	delete(r.lastAssigned, id)
 
 	for chat, p := range r.pins {
 		if p.shimID == id {
@@ -372,8 +375,8 @@ func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
 	return r.routeInboundLocked(chatID)
 }
 
-// routeInboundLocked is the pin→owner→LRU resolver. Caller holds r.mu (write
-// lock — pin expiry may mutate r.pins).
+// routeInboundLocked is the pin→owner→LRA→LRU resolver. Caller holds r.mu
+// (write lock — pin expiry may mutate r.pins).
 func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	if p, ok := r.pins[chatID]; ok {
 		if time.Now().After(p.expiresAt) {
@@ -381,6 +384,8 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 			slog.Info("router pin expired", "chat_id", chatID)
 		} else if s, ok := r.shims[p.shimID]; ok {
 			slog.Info("RouteInbound pin", "chat_id", chatID, "shim_id", s.ID)
+			r.lastAssigned[s.ID] = time.Now()
+
 			return s, true
 		}
 	}
@@ -388,10 +393,21 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	if owner, ok := r.chatOwners[chatID]; ok {
 		if s, ok := r.shims[owner]; ok {
 			slog.Info("RouteInbound owner", "chat_id", chatID, "shim_id", s.ID)
+			r.lastAssigned[s.ID] = time.Now()
+
 			return s, true
 		}
 
 		slog.Warn("RouteInbound owner gone", "chat_id", chatID, "stale_owner", owner)
+	}
+
+	if len(r.shims) >= 2 {
+		if s, ok := r.lraPickLocked(); ok {
+			slog.Info("RouteInbound LRA", "chat_id", chatID, "shim_id", s.ID)
+			r.lastAssigned[s.ID] = time.Now()
+
+			return s, true
+		}
 	}
 
 	if len(r.lru) == 0 {
@@ -402,16 +418,56 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	s, ok := r.shims[r.lru[0]]
 	if ok {
 		slog.Info("RouteInbound LRU fallback", "chat_id", chatID, "shim_id", s.ID, "lru", r.lru)
+		r.lastAssigned[s.ID] = time.Now()
 	}
 
 	return s, ok
 }
 
+// lraPickLocked picks the connected shim with the smallest
+// max(lastOutbound, lastAssigned) timestamp. Ties broken lexicographically
+// by shim ID. Returns (nil, false) when no shims are connected.
+// Caller holds r.mu.
+func (r *Router) lraPickLocked() (*Shim, bool) {
+	if len(r.shims) == 0 {
+		return nil, false
+	}
+
+	ids := make([]string, 0, len(r.shims))
+	for id := range r.shims {
+		ids = append(ids, id)
+	}
+
+	sort.Strings(ids)
+
+	var (
+		best  *Shim
+		bestT time.Time
+	)
+
+	for _, id := range ids {
+		s := r.shims[id]
+
+		t := r.lastOutbound[id]
+		if a := r.lastAssigned[id]; a.After(t) {
+			t = a
+		}
+
+		if best == nil || t.Before(bestT) {
+			best = s
+			bestT = t
+		}
+	}
+
+	return best, true
+}
+
 // RouteInboundMulti resolves an inbound message to a set of target shims using
-// the precedence chain: reply-to → mentions (incl. @all broadcast) → chat
-// owner → LRU. Reply wins because the user explicitly targeted the prior
-// sender via Telegram's quote-reply UI. A mention dispatch never rewrites
-// chatOwners — it's a one-shot address. Returns nil if no shims are connected.
+// the precedence chain: reply-to → mentions (incl. @all broadcast) → pin →
+// chat owner → LRA (least-recently-assigned, when 2+ shims) → LRU. Reply wins
+// because the user explicitly targeted the prior sender via Telegram's
+// quote-reply UI. A mention dispatch never rewrites chatOwners — it's a
+// one-shot address. Returns nil if no shims are connected.
 func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID int) []*Shim {
 	mentions := parseMentions(content)
 

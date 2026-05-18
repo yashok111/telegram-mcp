@@ -33,17 +33,19 @@ func TestRouterRecordOutboundAndRouteInbound(t *testing.T) {
 	assert.Equal(t, "a", got.ID)
 }
 
-func TestRouterLRUFallback(t *testing.T) {
+func TestRouterLRATieBreakLex(t *testing.T) {
 	r := NewRouter()
 	a := &Shim{ID: "a"}
 	b := &Shim{ID: "b"}
 
 	r.Register(a)
-	r.Register(b) // b is most recent
+	r.Register(b) // b is most-recently-connected, but LRA tie-break is lex.
 
+	// Both shims have zero lastOutbound/lastAssigned; explicit LRA tie-break
+	// picks the lex-smallest shim ID.
 	got, ok := r.RouteInbound("never-seen")
 	require.True(t, ok)
-	assert.Equal(t, "b", got.ID)
+	assert.Equal(t, "a", got.ID)
 }
 
 func TestRouterNoShims(t *testing.T) {
@@ -610,4 +612,124 @@ func TestRouterResolveShimByPrefix(t *testing.T) {
 
 	_, err = r.ResolveShimByPrefix("")
 	require.ErrorIs(t, err, ErrShimNotFound)
+}
+
+func TestRouterLRARoundRobinBetweenTwoShims(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"}) // s1
+	r.Register(&Shim{ID: "b"}) // s2
+
+	// "a" just replied — bumps r.lastOutbound["a"]. Next unaddressed inbound
+	// should go to "b" because it's the least-recently-assigned/touched.
+	r.RecordOutbound("a", "chatA", 0)
+
+	got, ok := r.RouteInbound("chatB") // fresh chat, no pin, no owner
+	require.True(t, ok)
+	assert.Equal(t, "b", got.ID, "after a's outbound, fresh inbound goes to least-recently-touched shim b")
+}
+
+func TestRouterLRARoundRobinThreeShims(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+	r.Register(&Shim{ID: "b"})
+	r.Register(&Shim{ID: "c"})
+
+	// First inbound: all at zero, lex tie-break picks "a".
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "a", got.ID)
+
+	// Second inbound on a different fresh chat: a was just assigned, b and c still zero → b.
+	got, ok = r.RouteInbound("chat-2")
+	require.True(t, ok)
+	assert.Equal(t, "b", got.ID)
+
+	// Third inbound: a and b assigned, c still zero → c.
+	got, ok = r.RouteInbound("chat-3")
+	require.True(t, ok)
+	assert.Equal(t, "c", got.ID)
+
+	// Fourth inbound: all assigned; oldest is a again → a.
+	got, ok = r.RouteInbound("chat-4")
+	require.True(t, ok)
+	assert.Equal(t, "a", got.ID)
+}
+
+func TestRouterLRAMentionStillBeatsRoundRobin(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"}) // s1
+	r.Register(&Shim{ID: "b"}) // s2
+	r.Register(&Shim{ID: "c"}) // s3
+
+	// LRA alone (no mention, no pin, no owner) would prefer a by lex.
+	// A mention of @s3 must still win.
+	got := r.RouteInboundMulti("chat-1", "@s3 do this", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "c", got[0].ID)
+}
+
+func TestRouterLRAPinStillBeatsRoundRobin(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+	r.Register(&Shim{ID: "b"})
+
+	// Pin chat to b. LRA alone would pick a (lex).
+	require.NoError(t, r.Pin("chat-1", "b", time.Hour))
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "b", got.ID)
+}
+
+func TestRouterLRASingleShimFallsBackToIt(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "only"})
+
+	// With 1 shim, LRA branch is skipped (degenerate); lru[0] fallback returns it.
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "only", got.ID)
+}
+
+func TestRouterLRAOwnerStillBeatsRoundRobin(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+	r.Register(&Shim{ID: "b"})
+
+	r.RecordOutbound("a", "chat-1", 0) // a owns chat-1
+
+	// LRA alone would prefer b (a was just touched). Owner check happens first.
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "a", got.ID, "owner outranks LRA in precedence")
+}
+
+func TestRouterLRATieBreakDeterministicAtZero(t *testing.T) {
+	// Two shims, both never outbound, never assigned: max(0,0)==0 for both.
+	// Tie-break must be lex by shim_id, deterministic across runs.
+	r := NewRouter()
+	r.Register(&Shim{ID: "zzz"})
+	r.Register(&Shim{ID: "aaa"})
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "aaa", got.ID, "lex tie-break: aaa < zzz")
+}
+
+func TestRouterLRADropUpdatesLastAssigned(t *testing.T) {
+	// Drop must purge lastAssigned so re-registering the same ID later doesn't
+	// inherit a stale "recently touched" timestamp.
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+	r.Register(&Shim{ID: "b"})
+
+	_, _ = r.RouteInbound("chat-1") // assigns a
+	r.Drop("a")
+
+	r.Register(&Shim{ID: "a"}) // re-register
+
+	// Now both have zero lastAssigned again; lex picks a.
+	got, ok := r.RouteInbound("chat-2")
+	require.True(t, ok)
+	assert.Equal(t, "a", got.ID, "Drop must clear lastAssigned['a']")
 }
