@@ -2,6 +2,8 @@ package shim
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -101,6 +103,59 @@ func TestShimWireSendsWorkdirAndSession(t *testing.T) {
 	require.Equal(t, ipc.MethodHello, fc.calledMethod)
 	assert.Contains(t, string(fc.calledParams), `"workdir":"`+wd+`"`)
 	assert.Contains(t, string(fc.calledParams), `"cc_session_id":"test-sess-id"`)
+}
+
+func TestShimWireWritesSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-cc-sid")
+
+	store := access.NewStore(dir, false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abcdef012345","alias":"s4","daemon_version":"test"}`)}
+	sh := &Shim{
+		Client:      fc,
+		MCP:         mcpSrv,
+		Store:       store,
+		StateDir:    dir,
+		WireContext: context.Background,
+	}
+
+	require.NoError(t, sh.Wire())
+
+	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "test-cc-sid.json"))
+	require.NoError(t, err)
+
+	var got SessionInfo
+	require.NoError(t, json.Unmarshal(raw, &got))
+	assert.Equal(t, "s4", got.Alias)
+	assert.Equal(t, "abcdef012345", got.ShimID)
+	assert.Equal(t, "abcdef01", got.ShimIDPrefix)
+	assert.Equal(t, "test-cc-sid", got.CCSessionID)
+	assert.Equal(t, "shim", got.Mode)
+}
+
+func TestShimWireSkipsSessionFileWhenNoCCSessionID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+
+	store := access.NewStore(dir, false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
+	sh := &Shim{
+		Client:      fc,
+		MCP:         mcpSrv,
+		Store:       store,
+		StateDir:    dir,
+		WireContext: context.Background,
+	}
+
+	require.NoError(t, sh.Wire())
+	_, err = os.Stat(filepath.Join(dir, "sessions"))
+	assert.True(t, os.IsNotExist(err), "sessions dir must not be created when no cc_session_id")
 }
 
 func TestShimRunStopsOnContextCancel(t *testing.T) {
