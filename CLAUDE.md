@@ -4,7 +4,7 @@ Claude Code repo instructions for **telegram-mcp** — local Go MCP server bridg
 
 ## Stack
 
-Go **1.26** · `github.com/mark3labs/mcp-go` v0.54 (stdio MCP server) · `github.com/mymmrac/telego` v1.9 (Telegram bot, long-polling) · `log/slog` JSON to stderr · `go.uber.org/goleak` in every test pkg. No DB, no cache, no daemon — bot lives inside the MCP stdio session by default.
+Go **1.26** · `github.com/mark3labs/mcp-go` v0.54 (stdio MCP server) · `github.com/mymmrac/telego` v1.9 (Telegram bot, long-polling) · `log/slog` JSON to stderr · `go.uber.org/goleak` in every test pkg. No DB, no cache — a single daemon owns the bot token; each Claude Code session attaches via a stdio shim.
 
 ## Commands
 
@@ -43,22 +43,19 @@ scripts/                        install-skills.sh, install-hooks.sh, pre-commit
 
 ## Lifecycle
 
-Two modes:
+Three subprocesses, two long-lived:
 
-1. **MCP-server mode (default)**: Claude Code spawns the binary on session start, talks stdio MCP. PR_SET_PDEATHSIG ensures we die the moment Claude Code exits. `bot.pid` is claimed with a `/proc/<pid>/comm` guard so PID recycling never tricks us into SIGTERMing an unrelated process.
-2. **Standalone**: `contrib/systemd/telegram-mcp.service` keeps the bot alive across sessions. Cannot coexist with mode 1 — same token, same poller slot.
+1. **Shim (per Claude Code session)**: the binary launched by Claude Code with no args. Speaks stdio MCP to Claude Code; speaks IPC to the daemon. PR_SET_PDEATHSIG ties it to the parent CC session so it dies with Claude Code.
+2. **Daemon (one per host)**: owns the bot token, runs the long-poller, holds the access gate. Spawned by the first shim if not already running (or by systemd via `contrib/systemd/telegram-mcp.service`). Survives shim disconnects; idles out 30 minutes after the last shim leaves.
+3. **Self (`telegram-mcp self`)**: read-only context renderer for the SessionStart hook + statusline; does not touch the bot or daemon.
 
 Ctx-driven shutdown everywhere. `Poll` exits within ~2s of `ctx.Done()` via `StopWithContext`. `approvalLoop` is a 5s ticker that respects `ctx.Done()`.
 
-## Daemon mode (opt-in, multi-session)
+## Daemon
 
-To bridge N Claude Code sessions to one Telegram bot:
+Single daemon per host; every Claude Code session attaches to it via shim.
 
-1. Set `TELEGRAM_DAEMON=1` in `~/.claude/channels/telegram/.env`.
-2. (Optional) Install `contrib/systemd/telegram-mcp.service` for a daemon that survives reboots: `systemctl --user enable --now telegram-mcp`.
-3. Restart Claude Code. First session spawns the daemon; subsequent sessions attach.
-
-**Mode trigger:** `TELEGRAM_DAEMON=1` env var, or invoking the binary with the `daemon` / `shim` subcommand.
+**Subcommands:** `telegram-mcp daemon` (run daemon foreground), `telegram-mcp shim` (run shim explicitly), `telegram-mcp` (no args; auto-detects — defaults to shim, auto-spawns daemon on first run).
 
 **Routing:** inbound messages go to the shim that last replied to that chat. Fresh chats fall back to the most-recently-connected shim. Permission replies route by `request_id`.
 
@@ -71,7 +68,7 @@ To bridge N Claude Code sessions to one Telegram bot:
 - `~/.claude/channels/telegram/daemon.pid` — daemon's PID
 - `~/.claude/channels/telegram/daemon.log` — daemon stderr when shim-spawned (systemd captures it via journal otherwise)
 
-**Don't run both modes against the same token.** Kill the daemon (`kill $(cat ~/.claude/channels/telegram/daemon.pid)`) before reverting to embedded.
+**Systemd alternative:** install `contrib/systemd/telegram-mcp.service` to keep the daemon alive across reboots and outside any Claude Code session.
 
 ## CC self-context (SessionStart hook)
 
@@ -103,8 +100,7 @@ The agent should know its own shim alias from turn 1 so `@s2 do X` mentions work
    shape. Without `--hook`, plain text is printed (useful for `telegram-mcp self`
    at the shell).
 
-**Embedded mode** (no daemon, no alias): no session file is written; `self` gracefully prints
-"embedded mode". No fatal errors — hooks must never abort a CC session.
+**Pre-Wire race**: if `telegram-mcp self` fires before the shim has written its session file (or the file is unreadable), `self` prints a fallback message and exits 0. Hooks must never abort a CC session.
 
 **Statusline** — `telegram-mcp self --statusline` prints a compact `tg:@sN` tag (or empty
 string if there's no session file). Compose into CC's `statusLine.command` so the user

@@ -3,9 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,78 +47,6 @@ func TestLoadDotEnv_skipsMalformedLines(t *testing.T) {
 func TestLoadDotEnv_missingFile_returnsErr(t *testing.T) {
 	err := loadDotEnv("/no/such/path.env")
 	assert.Error(t, err)
-}
-
-func TestClaimPID_writesOwnPID(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bot.pid")
-	require.NoError(t, claimPID(path))
-
-	raw, err := os.ReadFile(path)
-	require.NoError(t, err)
-	got, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	require.NoError(t, err)
-	assert.Equal(t, os.Getpid(), got)
-}
-
-func TestClaimPID_skipsUnrelatedCommPID(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bot.pid")
-	// PID 1 (init/systemd) is alive but its /proc/1/comm is "systemd" or "init"
-	// — neither "telegram-mcp" nor "bun". claimPID must refuse to SIGTERM it.
-	require.NoError(t, os.WriteFile(path, []byte("1\n"), 0o600))
-
-	// If claimPID tried to kill PID 1, the test would error out on the SIGTERM
-	// (we lack the capability anyway, so the syscall would return EPERM). We
-	// only assert that it survived claiming and overwrote the file with our PID.
-	require.NoError(t, claimPID(path))
-	raw, _ := os.ReadFile(path)
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
-	assert.Equal(t, os.Getpid(), pid)
-}
-
-func TestClaimPID_handlesGarbageFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bot.pid")
-	require.NoError(t, os.WriteFile(path, []byte("not a number"), 0o600))
-	require.NoError(t, claimPID(path))
-}
-
-func TestClaimPID_handlesMissingFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bot.pid")
-	require.NoError(t, claimPID(path))
-}
-
-func TestClaimPID_skipsOwnPID(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bot.pid")
-	require.NoError(t, os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600))
-	require.NoError(t, claimPID(path))
-}
-
-func TestClaimPID_killsStaleOurPoller(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bot.pid")
-	// Spawn a child sleep — comm will be "sleep", which isOurPoller rejects.
-	// The intent here is to drive the dead-but-alive PID branch; we accept
-	// that comm-check will skip the actual kill.
-	cmd := startSleeper(t)
-	require.NoError(t, os.WriteFile(path, []byte(strconv.Itoa(cmd)), 0o600))
-
-	require.NoError(t, claimPID(path))
-
-	_ = syscall.Kill(cmd, syscall.SIGTERM)
-}
-
-func TestIsOurPoller_self(t *testing.T) {
-	// Our test binary's comm typically ends in ".test" (Go test harness),
-	// which neither matches "telegram-mcp" nor "bun" — should be false.
-	assert.False(t, isOurPoller(os.Getpid()))
-}
-
-func TestIsOurPoller_nonexistentPID(t *testing.T) {
-	assert.False(t, isOurPoller(999999999))
 }
 
 func TestResolveStateDir_envOverride(t *testing.T) {
@@ -199,27 +125,8 @@ func TestBindParentDeath_doesNotPanic(_ *testing.T) {
 	bindParentDeath()
 }
 
-func startSleeper(t *testing.T) int {
-	t.Helper()
-
-	procAttr := &os.ProcAttr{Files: []*os.File{nil, nil, nil}}
-	p, err := os.StartProcess("/bin/sleep", []string{"sleep", "30"}, procAttr)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = p.Kill()
-		_, _ = p.Wait()
-	})
-
-	return p.Pid
-}
-
-func TestSelectModeNoArgUnsetEnv(t *testing.T) {
+func TestSelectModeNoArg_defaultsToShim(t *testing.T) {
 	t.Setenv("TELEGRAM_DAEMON", "")
-	assert.Equal(t, modeEmbedded, selectMode([]string{"telegram-mcp"}))
-}
-
-func TestSelectModeNoArgWithEnv(t *testing.T) {
-	t.Setenv("TELEGRAM_DAEMON", "1")
 	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp"}))
 }
 
@@ -231,19 +138,4 @@ func TestSelectModeDaemonSubcommand(t *testing.T) {
 func TestSelectModeShimSubcommand(t *testing.T) {
 	t.Setenv("TELEGRAM_DAEMON", "")
 	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp", "shim"}))
-}
-
-// Regression: .env loading must happen BEFORE selectMode so TELEGRAM_DAEMON
-// set only in .env triggers shim mode. Without this, a Claude Code-spawned
-// binary defaults to embedded and fights the daemon for getUpdates.
-func TestEnvLoadedBeforeSelectMode_pickShim(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("TELEGRAM_DAEMON=1\n"), 0o600))
-
-	_ = os.Unsetenv("TELEGRAM_DAEMON")
-
-	t.Cleanup(func() { _ = os.Unsetenv("TELEGRAM_DAEMON") })
-
-	require.NoError(t, loadDotEnv(filepath.Join(dir, ".env")))
-	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp"}))
 }

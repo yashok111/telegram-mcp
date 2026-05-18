@@ -74,7 +74,7 @@ func runSelf(stateDir string, argv []string, out io.Writer) int {
 
 // renderStatuslineText returns a compact "tg:@sN" tag suitable for Claude Code
 // statusline composition. Returns an empty string when no session file exists
-// (embedded mode or pre-Wire race) so the caller can drop the segment silently.
+// (pre-Wire race during startup) so the caller can drop the segment silently.
 func renderStatuslineText(stateDir string, ccPIDFn func() int) string {
 	ccPID := ccPIDFn()
 	if ccPID <= 0 {
@@ -105,19 +105,19 @@ func renderStatuslineText(stateDir string, ccPIDFn func() int) string {
 func renderSelfText(stateDir string, ccPIDFn func() int) string {
 	ccPID := ccPIDFn()
 	if ccPID <= 0 {
-		return "Telegram bridge: embedded mode (no shim alias registered for this session)."
+		return "Telegram bridge: no shim alias registered for this session yet."
 	}
 
 	path := filepath.Join(stateDir, "sessions", strconv.Itoa(ccPID)+".json")
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return "Telegram bridge: embedded mode (no shim alias registered for this session)."
+		return "Telegram bridge: no shim alias registered for this session yet."
 	}
 
 	var info sessionInfo
 	if err := json.Unmarshal(raw, &info); err != nil {
-		return "Telegram bridge: session file present but unreadable; treating as embedded."
+		return "Telegram bridge: session file present but unreadable."
 	}
 
 	var b strings.Builder

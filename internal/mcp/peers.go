@@ -21,9 +21,9 @@ type Peer struct {
 	Self         bool   `json:"self"`
 }
 
-// PeerProvider yields the live snapshot of connected shims. The shim wires its
-// BotAdapter (IPC client) as the provider; embedded mode leaves it unset so the
-// tool returns an explanatory string instead of failing.
+// PeerProvider yields the live snapshot of connected shims. Each shim wires
+// its BotAdapter (IPC client) as the provider during Wire(); tests that never
+// attach a provider trip the no-op branch in handleTelegramPeers.
 type PeerProvider interface {
 	Peers(ctx context.Context) ([]Peer, error)
 }
@@ -44,8 +44,8 @@ func (s *Server) peerProvider() PeerProvider {
 func (s *Server) handleTelegramPeers(ctx context.Context, _ mcptypes.CallToolRequest) (*mcptypes.CallToolResult, error) {
 	p := s.peerProvider()
 	if p == nil {
-		slog.Info("tool telegram_peers invoked in embedded mode")
-		return mcptypes.NewToolResultText("embedded mode: this Claude Code session has its own bot poller, no peer registry exists"), nil
+		slog.Info("tool telegram_peers invoked before peer provider attached")
+		return mcptypes.NewToolResultText("no peer registry attached for this MCP session"), nil
 	}
 
 	peers, err := p.Peers(ctx)

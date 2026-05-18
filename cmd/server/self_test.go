@@ -54,7 +54,7 @@ func TestRunSelf_textMode_includesAliasAndWorkdir(t *testing.T) {
 	assert.Contains(t, body, "98765")
 }
 
-func TestRunSelf_textMode_missingFile_embedded(t *testing.T) {
+func TestRunSelf_textMode_missingFile_noAlias(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CC_PID", "11111")
 
@@ -62,10 +62,10 @@ func TestRunSelf_textMode_missingFile_embedded(t *testing.T) {
 
 	code := runSelf(dir, []string{}, &out)
 	assert.Equal(t, 0, code)
-	assert.Contains(t, out.String(), "embedded mode")
+	assert.Contains(t, out.String(), "no shim alias registered")
 }
 
-func TestRunSelf_textMode_ccPIDZero_embedded(t *testing.T) {
+func TestRunSelf_textMode_ccPIDZero_noAlias(t *testing.T) {
 	dir := t.TempDir()
 
 	var out bytes.Buffer
@@ -74,7 +74,7 @@ func TestRunSelf_textMode_ccPIDZero_embedded(t *testing.T) {
 	// (the test binary's parent may itself be "claude" when run inside CC).
 	got := renderSelfText(dir, func() int { return 0 })
 	out.WriteString(got)
-	assert.Contains(t, out.String(), "embedded mode")
+	assert.Contains(t, out.String(), "no shim alias registered")
 }
 
 func TestRunSelf_hookMode_emitsSessionStartJSON(t *testing.T) {
