@@ -44,6 +44,9 @@ type Server struct {
 	botMu sync.RWMutex
 	bot   BotAPI
 
+	peerMu sync.RWMutex
+	peers  PeerProvider
+
 	// Pending Claude Code permission requests, keyed by request_id, kept for
 	// "See more" expansion in the Telegram inline-keyboard flow.
 	permMu  sync.Mutex
@@ -257,6 +260,13 @@ func (s *Server) registerTools() {
 			mcptypes.WithString("format", mcptypes.Description("Rendering mode."), mcptypes.Enum("text", "markdownv2")),
 		),
 		s.handleEdit,
+	)
+
+	s.srv.AddTool(
+		mcptypes.NewTool("telegram_peers",
+			mcptypes.WithDescription("Return a live snapshot of every Claude Code session connected to this Telegram bot via the daemon. Useful for multi-session coordination — agents can see siblings' aliases, workdirs, and how recently they were active. Returns a JSON array: [{alias, shim_id_prefix, workdir, label, idle_for, self}]. In embedded mode (no daemon), returns an explanatory string instead of a list."),
+		),
+		s.handleTelegramPeers,
 	)
 }
 

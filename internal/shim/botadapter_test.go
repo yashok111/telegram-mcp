@@ -3,6 +3,7 @@ package shim
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -100,6 +101,36 @@ func TestBotAdapterEditMessage(t *testing.T) {
 	id, err := a.EditMessage(context.Background(), "1", 12, "new", "MarkdownV2")
 	require.NoError(t, err)
 	assert.Equal(t, 12, id)
+}
+
+func TestBotAdapterPeersForwardsToIPC(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{"peers":[
+		{"alias":"s1","shim_id_prefix":"abcdef01","workdir":"/a","label":"","idle_seconds":42,"self":true},
+		{"alias":"s2","shim_id_prefix":"deadbeef","workdir":"/b","label":"hot","idle_seconds":0,"self":false}
+	]}`)}
+	a := &BotAdapter{Client: fc}
+
+	peers, err := a.Peers(context.Background())
+	require.NoError(t, err)
+	require.Len(t, peers, 2)
+	assert.Equal(t, "daemon.peers", fc.calledMethod)
+
+	assert.Equal(t, "s1", peers[0].Alias)
+	assert.Equal(t, "abcdef01", peers[0].ShimIDPrefix)
+	assert.Equal(t, 42, peers[0].IdleSeconds)
+	assert.True(t, peers[0].Self)
+
+	assert.False(t, peers[1].Self)
+	assert.Equal(t, "hot", peers[1].Label)
+}
+
+func TestBotAdapterPeersIPCError(t *testing.T) {
+	fc := &fakeClient{returnErr: errors.New("ipc down")}
+	a := &BotAdapter{Client: fc}
+
+	_, err := a.Peers(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ipc down")
 }
 
 func TestBotAdapterSendFileAttachmentTooLarge(t *testing.T) {

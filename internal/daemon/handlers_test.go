@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -265,6 +266,70 @@ func TestHandleHelloAssignsShimIDAndAlias(t *testing.T) {
 	assert.NotEmpty(t, m["shim_id"])
 	assert.NotEmpty(t, m["daemon_version"])
 	assert.Empty(t, m["alias"], "HandleHello alone does not register; alias set by daemon Router.Register")
+}
+
+func TestHandlePeersReturnsSnapshotWithSelf(t *testing.T) {
+	h, _, r, _ := newHandlersFixture(t)
+
+	r.Register(&Shim{
+		ID:          "shim-b-1234abcd",
+		Notify:      func(string, any) error { return nil },
+		ConnectedAt: time.Now().Add(-1 * time.Hour),
+	})
+
+	res, rpcErr := h.HandlePeers(context.Background(), conn("shim-a"), nil)
+	require.Nil(t, rpcErr)
+
+	m, ok := res.(map[string]any)
+	require.True(t, ok)
+
+	peers, ok := m["peers"].([]PeerInfo)
+	require.True(t, ok)
+	require.Len(t, peers, 2)
+
+	byID := map[string]PeerInfo{}
+	for _, p := range peers {
+		byID[p.ShimIDPrefix] = p
+	}
+
+	pa, hasA := byID["shim-a"]
+	require.True(t, hasA, "shim-a (<=8 chars) uses full id as prefix")
+	assert.True(t, pa.Self, "shim-a is the caller — self must be true")
+
+	pb, hasB := byID["shim-b-1"]
+	require.True(t, hasB, "shim-b-1234abcd prefix is first 8 chars 'shim-b-1'")
+	assert.False(t, pb.Self)
+}
+
+func TestHandlePeersUnknownCallerNoSelf(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+
+	res, rpcErr := h.HandlePeers(context.Background(), conn("ghost"), nil)
+	require.Nil(t, rpcErr)
+
+	m, ok := res.(map[string]any)
+	require.True(t, ok)
+
+	peers, ok := m["peers"].([]PeerInfo)
+	require.True(t, ok)
+
+	for _, p := range peers {
+		assert.False(t, p.Self, "no peer should be self when caller is unknown")
+	}
+}
+
+func TestHandlePeersIdleSecondsFromLastOutbound(t *testing.T) {
+	h, _, r, _ := newHandlersFixture(t)
+
+	r.RecordOutbound("shim-a", "999")
+
+	res, rpcErr := h.HandlePeers(context.Background(), conn("shim-a"), nil)
+	require.Nil(t, rpcErr)
+
+	m, _ := res.(map[string]any)
+	peers, _ := m["peers"].([]PeerInfo)
+	require.Len(t, peers, 1)
+	assert.LessOrEqual(t, peers[0].IdleSeconds, 1, "just recorded outbound — idle ~0s")
 }
 
 func TestHandleHelloRecordsWorkdirAndSession(t *testing.T) {

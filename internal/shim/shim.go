@@ -63,6 +63,7 @@ func (s *Shim) Wire() error {
 		},
 	}
 	s.MCP.AttachBot(adapter)
+	s.MCP.AttachPeerProvider(adapter)
 
 	if s.StateDir != "" {
 		AttachNotifierDebug(filepath.Join(s.StateDir, "shim-debug.log"))

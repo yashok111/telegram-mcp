@@ -352,6 +352,59 @@ func TestIntegrationMentionDoesNotChangeOwnership(t *testing.T) {
 	assert.Equal(t, idA, owner.ID, "mention must not rewrite chatOwners")
 }
 
+func TestIntegrationPeersListsAllShimsWithSelf(t *testing.T) {
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	cA, idA := connectShim(t, f.sock)
+	defer cA.Close()
+
+	cB, idB := connectShim(t, f.sock)
+	defer cB.Close()
+
+	require.NotEqual(t, idA, idB)
+
+	var res struct {
+		Peers []PeerInfo `json:"peers"`
+	}
+	require.NoError(t, cA.Call(t.Context(), ipc.MethodDaemonPeers, struct{}{}, &res))
+	require.Len(t, res.Peers, 2)
+
+	byAlias := map[string]PeerInfo{}
+	for _, p := range res.Peers {
+		byAlias[p.Alias] = p
+	}
+
+	require.Contains(t, byAlias, "s1")
+	require.Contains(t, byAlias, "s2")
+
+	var selfCount int
+
+	for _, p := range res.Peers {
+		if p.Self {
+			selfCount++
+
+			assert.True(t, strings.HasPrefix(idA, p.ShimIDPrefix), "self peer's id_prefix must prefix the calling shim's id")
+		}
+	}
+
+	assert.Equal(t, 1, selfCount, "exactly one peer marked self when called from A")
+
+	require.NoError(t, cB.Call(t.Context(), ipc.MethodDaemonPeers, struct{}{}, &res))
+
+	var selfB int
+
+	for _, p := range res.Peers {
+		if p.Self {
+			selfB++
+
+			assert.True(t, strings.HasPrefix(idB, p.ShimIDPrefix), "self peer's id_prefix must prefix idB")
+		}
+	}
+
+	assert.Equal(t, 1, selfB, "exactly one peer marked self when called from B")
+}
+
 func TestIntegrationGateBlocksUnknownChat(t *testing.T) {
 	f := newIntegration(t)
 	defer f.cleanup()

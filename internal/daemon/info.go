@@ -36,3 +36,15 @@ func (s ShimInfo) IdleFor(now time.Time) time.Duration {
 
 	return now.Sub(t)
 }
+
+// PeerInfo is the wire DTO for daemon.peers responses. Stable JSON schema —
+// the shim/MCP-tool layer parses it. IdleSeconds is rounded to whole seconds
+// for stable test assertions; the tool layer humanizes it for display.
+type PeerInfo struct {
+	Alias        string `json:"alias"`
+	ShimIDPrefix string `json:"shim_id_prefix"`
+	Workdir      string `json:"workdir"`
+	Label        string `json:"label"`
+	IdleSeconds  int    `json:"idle_seconds"`
+	Self         bool   `json:"self"`
+}
