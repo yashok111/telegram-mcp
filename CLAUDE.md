@@ -120,6 +120,8 @@ Single daemon per host; every Claude Code session attaches to it via shim.
 
 **Systemd alternative:** install `contrib/systemd/telegram-mcp.service` to keep the daemon alive across reboots and outside any Claude Code session.
 
+**Background tasks (`/bg`):** DM `/bg <prompt> [--in <dir>]` spawns a one-shot `claude --print --output-format=stream-json --verbose` in the resolved workdir. Daemon edits a single progress message every `EditThrottle` (default 5s) and sends the final result chunked + cost summary on completion. `/bg list` and `/bg cancel <id>` manage in-flight tasks. Cancellation is SIGTERM → 5s wait → SIGKILL. Implemented in `internal/daemon/bg.go` (`BgRunner` satisfies `bot.BgRunner`); per-call dispatch lives in `internal/bot/bg.go:handleBgCommand`. Env vars: `TELEGRAM_BG_MAX_PARALLEL` (default 3), `TELEGRAM_BG_TIMEOUT` (default 30m), `TELEGRAM_BG_DEFAULT_WORKDIR` (else `$HOME`), `TELEGRAM_BG_RATE_PER_HOUR` (per-user, default 10), `TELEGRAM_BG_CLAUDE_BIN` (default `"claude"`). Integration test in `internal/daemon/bg_integration_test.go` (build tag `integration`).
+
 ## MCP tool surface
 
 Registered in `internal/mcp/mcp.go:registerTools` via `s.srv.AddTool`:

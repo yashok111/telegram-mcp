@@ -128,6 +128,8 @@ func runDaemon(stateDir string) error {
 		return fmt.Errorf("telegram init: %w", err)
 	}
 
+	tgBot.SetBgRunner(daemonpkg.NewBgRunnerWithDeps(loadBgConfig(), tgBot, daemonpkg.NewExecCommander()))
+
 	idleSecs, _ := strconv.Atoi(os.Getenv("TELEGRAM_DAEMON_IDLE_EXIT"))
 	if idleSecs == 0 {
 		idleSecs = 1800
@@ -343,6 +345,39 @@ func loadDotEnv(path string) error {
 	}
 
 	return nil
+}
+
+// loadBgConfig folds env vars into a BgConfig, leaving zero-valued fields so
+// daemonpkg.NewBgRunner applies its defaults (3 parallel / 30m timeout /
+// 10 starts per hour / 5s edit throttle / "claude" binary).
+func loadBgConfig() daemonpkg.BgConfig {
+	cfg := daemonpkg.BgConfig{}
+
+	if v, err := strconv.Atoi(os.Getenv("TELEGRAM_BG_MAX_PARALLEL")); err == nil && v > 0 {
+		cfg.MaxParallel = v
+	}
+
+	if v := os.Getenv("TELEGRAM_BG_TIMEOUT"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed > 0 {
+			cfg.Timeout = parsed
+		} else {
+			slog.Warn("invalid TELEGRAM_BG_TIMEOUT, using default", "value", v)
+		}
+	}
+
+	if v := os.Getenv("TELEGRAM_BG_DEFAULT_WORKDIR"); v != "" {
+		cfg.DefaultWorkdir = v
+	}
+
+	if v, err := strconv.Atoi(os.Getenv("TELEGRAM_BG_RATE_PER_HOUR")); err == nil && v > 0 {
+		cfg.RatePerHourPerUser = v
+	}
+
+	if v := os.Getenv("TELEGRAM_BG_CLAUDE_BIN"); v != "" {
+		cfg.ClaudeBin = v
+	}
+
+	return cfg
 }
 
 // routerAdapter adapts daemon.Router to bot.RouterView, converting
