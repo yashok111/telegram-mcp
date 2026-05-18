@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -191,6 +192,60 @@ func TestDeliverInboundMalformedReplyHeaderIsIgnored(t *testing.T) {
 	})
 
 	require.Len(t, aSink, 1, "garbage reply_to_message_id is silently ignored")
+}
+
+// TestDeliverInboundParallelDispatchDoesNotSerializeOnRouterLock proves that
+// the Router's mu is released before per-target Notify runs: two concurrent
+// DeliverInbound calls for distinct chats both reach the blocked Notify stage
+// before either returns. If a future refactor mistakenly holds r.mu across
+// the fan-out loop, the second call would block on the lock and this test
+// would time out.
+func TestDeliverInboundParallelDispatchDoesNotSerializeOnRouterLock(t *testing.T) {
+	r := NewRouter()
+	n := NewNotifier(r)
+
+	startedA := make(chan struct{}, 1)
+	startedB := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	blockingNotify := func(started chan<- struct{}) func(string, any) error {
+		return func(_ string, _ any) error {
+			started <- struct{}{}
+			<-release
+
+			return nil
+		}
+	}
+
+	r.Register(&Shim{ID: "a", Notify: blockingNotify(startedA)})
+	r.Register(&Shim{ID: "b", Notify: blockingNotify(startedB)})
+
+	// Two separate chats, each pinned to a different shim — RouteInboundMulti
+	// resolves each call to exactly one target.
+	r.RecordOutbound("a", "chat-a", 0)
+	r.RecordOutbound("b", "chat-b", 0)
+
+	go n.DeliverInbound("hi", map[string]string{"chat_id": "chat-a"})
+	go n.DeliverInbound("hi", map[string]string{"chat_id": "chat-b"})
+
+	awaitBoth := func() {
+		deadline := time.After(2 * time.Second)
+		got := 0
+
+		for got < 2 {
+			select {
+			case <-startedA:
+				got++
+			case <-startedB:
+				got++
+			case <-deadline:
+				t.Fatalf("only %d of 2 concurrent dispatches reached Notify — router lock held across fan-out?", got)
+			}
+		}
+	}
+
+	awaitBoth()
+	close(release)
 }
 
 func TestDeliverInboundDispatchesToMentionTargetOnly(t *testing.T) {
