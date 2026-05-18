@@ -2,10 +2,12 @@ package shim
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,4 +161,73 @@ func TestEnsureDaemonSpawnsWhenPidStale(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "spawn disabled")
+}
+
+// TestEnsureDaemonReapsExitedChild verifies the spawn goroutine calls Wait()
+// rather than Release(): a daemon binary that exits before the socket appears
+// must not leave a zombie under the shim's PID. Regression test for the
+// 2026-05-18 incident where claimPID's syscall.Kill(pid, 0) was fooled by
+// zombies and refused to evict a "live" predecessor.
+func TestEnsureDaemonReapsExitedChild(t *testing.T) {
+	if _, err := os.Stat("/bin/true"); err != nil {
+		t.Skipf("/bin/true unavailable: %v", err)
+	}
+
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "daemon.sock")
+
+	zombiesBefore := countZombieChildren(os.Getpid())
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	err := EnsureDaemon(ctx, EnsureOpts{
+		SocketPath:  sock,
+		BinaryPath:  "/bin/true",
+		WaitTimeout: 300 * time.Millisecond,
+	})
+	require.Error(t, err)
+
+	require.Eventually(t, func() bool {
+		return countZombieChildren(os.Getpid()) <= zombiesBefore
+	}, 3*time.Second, 25*time.Millisecond,
+		"spawned daemon left a zombie under shim pid — reaper goroutine did not wait4")
+}
+
+// countZombieChildren returns the number of /proc entries whose PPid matches
+// the given pid AND whose State line starts with Z (zombie). Linux-only;
+// callers must gate on /bin/true (or equivalent) being present.
+func countZombieChildren(ppid int) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		// non-Linux or /proc unmounted: caller skipped on /bin/true probe.
+		return 0
+	}
+
+	target := fmt.Sprintf("PPid:\t%d", ppid)
+
+	count := 0
+
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+
+		b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "status"))
+		if err != nil {
+			// race: process exited between readdir and readfile.
+			continue
+		}
+
+		s := string(b)
+		if !strings.Contains(s, target) {
+			continue
+		}
+
+		if strings.Contains(s, "State:\tZ") {
+			count++
+		}
+	}
+
+	return count
 }

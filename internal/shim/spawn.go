@@ -89,7 +89,13 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 
 	slog.Info("daemon spawned", "bin", bin, "pid", cmd.Process.Pid)
 
-	go func() { _ = cmd.Process.Release() }()
+	// Wait() instead of Release(): Release severs Go's handle to the child but
+	// does NOT call wait4(2). If the daemon exits while the shim is still
+	// alive, the kernel keeps the daemon as a zombie under the shim's PID.
+	// claimPID in a fresh daemon uses syscall.Kill(pid, 0), which returns
+	// success for zombies, so it thinks the old daemon is alive and bails out
+	// with 409-Conflict thrash. The goroutine exits as soon as the child does.
+	go func() { _, _ = cmd.Process.Wait() }()
 
 	return waitForSocket(ctx, opts.SocketPath, opts.WaitTimeout)
 }
