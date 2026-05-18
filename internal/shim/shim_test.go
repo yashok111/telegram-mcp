@@ -107,7 +107,7 @@ func TestShimWireSendsWorkdirAndSession(t *testing.T) {
 
 func TestShimWireWritesSessionFile(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-cc-sid")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "diag-sid")
 
 	store := access.NewStore(dir, false)
 	mcpSrv, err := mcpkg.New(store)
@@ -119,12 +119,14 @@ func TestShimWireWritesSessionFile(t *testing.T) {
 		MCP:         mcpSrv,
 		Store:       store,
 		StateDir:    dir,
+		HelloPID:    5555,
+		CCPID:       12345,
 		WireContext: context.Background,
 	}
 
 	require.NoError(t, sh.Wire())
 
-	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "test-cc-sid.json"))
+	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "12345.json"))
 	require.NoError(t, err)
 
 	var got SessionInfo
@@ -132,11 +134,13 @@ func TestShimWireWritesSessionFile(t *testing.T) {
 	assert.Equal(t, "s4", got.Alias)
 	assert.Equal(t, "abcdef012345", got.ShimID)
 	assert.Equal(t, "abcdef01", got.ShimIDPrefix)
-	assert.Equal(t, "test-cc-sid", got.CCSessionID)
+	assert.Equal(t, 12345, got.CCPID)
+	assert.Equal(t, 5555, got.ShimPID)
+	assert.Equal(t, "diag-sid", got.CCSessionID)
 	assert.Equal(t, "shim", got.Mode)
 }
 
-func TestShimWireSkipsSessionFileWhenNoCCSessionID(t *testing.T) {
+func TestShimWireWritesSessionFileEvenWithoutCCSessionIDEnv(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 
@@ -150,12 +154,63 @@ func TestShimWireSkipsSessionFileWhenNoCCSessionID(t *testing.T) {
 		MCP:         mcpSrv,
 		Store:       store,
 		StateDir:    dir,
+		CCPID:       777,
 		WireContext: context.Background,
 	}
 
 	require.NoError(t, sh.Wire())
-	_, err = os.Stat(filepath.Join(dir, "sessions"))
-	assert.True(t, os.IsNotExist(err), "sessions dir must not be created when no cc_session_id")
+
+	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "777.json"))
+	require.NoError(t, err)
+
+	var got SessionInfo
+	require.NoError(t, json.Unmarshal(raw, &got))
+	assert.Equal(t, "s1", got.Alias)
+	assert.Empty(t, got.CCSessionID, "cc_session_id omitted when env empty")
+}
+
+func TestShimWireSkipsSessionFileWhenNoStateDir(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
+	sh := &Shim{
+		Client:      fc,
+		MCP:         mcpSrv,
+		Store:       store,
+		CCPID:       4242,
+		WireContext: context.Background,
+	}
+
+	require.NoError(t, sh.Wire())
+}
+
+func TestShimRunRemovesSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	mcpSrv, err := mcpkg.New(store)
+	require.NoError(t, err)
+
+	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
+	sh := &Shim{
+		Client:      fc,
+		MCP:         mcpSrv,
+		Store:       store,
+		StateDir:    dir,
+		CCPID:       9090,
+		WireContext: context.Background,
+	}
+
+	require.NoError(t, sh.Wire())
+	path := filepath.Join(dir, "sessions", "9090.json")
+	_, err = os.Stat(path)
+	require.NoError(t, err, "session file should exist after Wire")
+
+	// Simulate the Run-exit cleanup.
+	require.NoError(t, removeSessionFile(sh.StateDir, sh.ccPID))
+	_, err = os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "session file should be gone after cleanup")
 }
 
 func TestShimRunStopsOnContextCancel(t *testing.T) {

@@ -75,18 +75,18 @@ To bridge N Claude Code sessions to one Telegram bot:
 
 ## CC self-context (SessionStart hook)
 
-The agent should know its own shim alias from turn 1 so `@s2 do X` mentions work without needing inbound message metadata. Two pieces:
+The agent should know its own shim alias from turn 1 so `@s2 do X` mentions work without needing inbound message metadata. Correlation key is **CC's pid** — `os.Getppid()` from the shim's perspective — because Claude Code does not expose its session id through MCP `initialize` or via env to plugin processes (confirmed empirically against CC 2.1.143).
 
 1. **Shim side** — on `Wire()` success, the shim writes a per-session snapshot to:
 
    ```
-   ~/.claude/channels/telegram/sessions/<cc_session_id>.json
+   ~/.claude/channels/telegram/sessions/<cc_pid>.json
    ```
 
    File is mode 0600, atomic (tmp+rename), removed when `Run()` exits. Schema:
-   `{alias, shim_id, shim_id_prefix, cc_session_id, workdir, label, started_at, mode}`.
+   `{alias, shim_id, shim_id_prefix, cc_pid, shim_pid, cc_session_id?, workdir, label?, started_at, mode}`. `cc_session_id` is preserved opportunistically from env (CC sets it for Bash and hooks, not for MCP servers); never load-bearing.
 
-2. **CC side** — `telegram-mcp self` reads that file (env `CLAUDE_CODE_SESSION_ID`) and emits the context block. Wire it as a SessionStart hook in `~/.claude/settings.json`:
+2. **CC side** — `telegram-mcp self` reads that file by walking the PPID chain (up to 8 hops) for the first ancestor whose `/proc/<pid>/comm` starts with `claude`. Override the walk by exporting `CC_PID=<pid>`. Wire it as a SessionStart hook in `~/.claude/settings.json`:
 
    ```json
    {
@@ -103,7 +103,7 @@ The agent should know its own shim alias from turn 1 so `@s2 do X` mentions work
    shape. Without `--hook`, plain text is printed (useful for `telegram-mcp self`
    at the shell).
 
-**Embedded mode** (no daemon): no session file is written; `self` gracefully prints
+**Embedded mode** (no daemon, no alias): no session file is written; `self` gracefully prints
 "embedded mode". No fatal errors — hooks must never abort a CC session.
 
 ## Testing
