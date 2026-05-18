@@ -112,3 +112,56 @@ func TestNewRulesCleanup_defaultsToMinute_whenZero(t *testing.T) {
 	rcNeg := NewRulesCleanup(store, -1)
 	assert.Equal(t, time.Minute, rcNeg.interval)
 }
+
+func TestRulesCleanup_pruneOnce_dropsExpiredPending(t *testing.T) {
+	store := newCleanupStore(t)
+
+	now := time.Now().UnixMilli()
+	st := access.State{
+		DMPolicy:  access.PolicyAllowlist,
+		AllowFrom: []string{},
+		Groups:    map[string]access.GroupPolicy{},
+		Pending: map[string]access.Pending{
+			"expired": {SenderID: "7", ChatID: "7", CreatedAt: now - 5000, ExpiresAt: now - 1000, Replies: 1},
+			"fresh":   {SenderID: "8", ChatID: "8", CreatedAt: now, ExpiresAt: now + 60_000, Replies: 1},
+		},
+	}
+	require.NoError(t, store.Save(st))
+
+	rc := NewRulesCleanup(store, time.Minute)
+	rc.pruneOnce()
+
+	reloaded := store.Load()
+	require.Len(t, reloaded.Pending, 1)
+	_, ok := reloaded.Pending["fresh"]
+	assert.True(t, ok, "fresh pending entry must survive")
+	_, ok = reloaded.Pending["expired"]
+	assert.False(t, ok, "expired pending entry must be pruned")
+}
+
+func TestRulesCleanup_pruneOnce_prunesBothRulesAndPendingInOneTick(t *testing.T) {
+	store := newCleanupStore(t)
+
+	now := time.Now().UnixMilli()
+	st := access.State{
+		DMPolicy:  access.PolicyAllowlist,
+		AllowFrom: []string{},
+		Groups:    map[string]access.GroupPolicy{},
+		Pending: map[string]access.Pending{
+			"stale": {SenderID: "7", ChatID: "7", CreatedAt: now - 5000, ExpiresAt: now - 1000, Replies: 1},
+		},
+		Rules: []access.PermissionRule{
+			{ID: "expired", Tool: "Read", Action: access.RuleApprove, ExpiresAt: now - 1000, CreatedAt: now - 5000},
+			{ID: "fresh", Tool: "Bash", Action: access.RuleApprove, ExpiresAt: now + 60_000, CreatedAt: now},
+		},
+	}
+	require.NoError(t, store.Save(st))
+
+	rc := NewRulesCleanup(store, time.Minute)
+	rc.pruneOnce()
+
+	reloaded := store.Load()
+	assert.Empty(t, reloaded.Pending, "expired pending pruned")
+	require.Len(t, reloaded.Rules, 1)
+	assert.Equal(t, "fresh", reloaded.Rules[0].ID)
+}
