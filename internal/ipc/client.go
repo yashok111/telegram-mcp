@@ -89,9 +89,7 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 		return err
 	}
 
-	req := Request{Jsonrpc: JSONRPCVersion, ID: id, Method: method, Params: raw}
-
-	body, err := json.Marshal(req)
+	body, err := encodeRequest(id, method, raw)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
@@ -142,7 +140,7 @@ func (c *Client) Notify(method string, params any) error {
 		return err
 	}
 
-	body, err := json.Marshal(Notification{Jsonrpc: JSONRPCVersion, Method: method, Params: raw})
+	body, err := encodeNotification(method, raw)
 	if err != nil {
 		return fmt.Errorf("marshal notification: %w", err)
 	}
