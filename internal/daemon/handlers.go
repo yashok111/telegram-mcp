@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
@@ -245,6 +246,28 @@ func (h *Handlers) HandleBroadcastPermission(ctx context.Context, c *ipc.Conn, p
 	return map[string]any{}, nil
 }
 
+func (h *Handlers) HandlePeers(_ context.Context, c *ipc.Conn, _ json.RawMessage) (any, *ipc.Error) {
+	callerID := h.shimID(c)
+	snap := h.router.Snapshot()
+	now := time.Now()
+
+	peers := make([]PeerInfo, len(snap))
+	for i, s := range snap {
+		peers[i] = PeerInfo{
+			Alias:        s.Alias,
+			ShimIDPrefix: s.IDPrefix(),
+			Workdir:      s.Workdir,
+			Label:        s.Label,
+			IdleSeconds:  int(s.IdleFor(now).Round(time.Second).Seconds()),
+			Self:         s.ID == callerID,
+		}
+	}
+
+	slog.Info("daemon.peers served", "caller_shim_id", callerID, "peer_count", len(peers))
+
+	return map[string]any{"peers": peers}, nil
+}
+
 func (h *Handlers) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodHello, h.HandleHello)
 	s.Handle(ipc.MethodBotSendMessage, h.HandleSendMessage)
@@ -253,6 +276,7 @@ func (h *Handlers) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodBotReact, h.HandleReact)
 	s.Handle(ipc.MethodBotDownloadFile, h.HandleDownloadFile)
 	s.Handle(ipc.MethodBotBroadcastPermissionRequest, h.HandleBroadcastPermission)
+	s.Handle(ipc.MethodDaemonPeers, h.HandlePeers)
 
 	s.HandleNotify(ipc.MethodGoodbye, func(_ context.Context, c *ipc.Conn, _ json.RawMessage) {
 		slog.Info("goodbye received", "shim_id", h.shimID(c))

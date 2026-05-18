@@ -49,6 +49,7 @@ const (
 	MethodBotReact                      = "bot.react"
 	MethodBotDownloadFile               = "bot.downloadFile"
 	MethodBotBroadcastPermissionRequest = "bot.broadcastPermissionRequest"
+	MethodDaemonPeers                   = "daemon.peers"
 	NotifyInbound                       = "notifications/inbound"
 	NotifyPermissionResolved            = "notifications/permission/resolved"
 )

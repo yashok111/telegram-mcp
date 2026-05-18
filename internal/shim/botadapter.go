@@ -9,7 +9,10 @@ import (
 
 	"github.com/yakov/telegram-mcp/internal/bot"
 	"github.com/yakov/telegram-mcp/internal/ipc"
+	mcpkg "github.com/yakov/telegram-mcp/internal/mcp"
 )
+
+var _ mcpkg.PeerProvider = (*BotAdapter)(nil)
 
 // Sentinel errors map from JSON-RPC error codes returned by the daemon, so
 // the MCP tool layer can produce consistent error messages.
@@ -103,6 +106,18 @@ func (a *BotAdapter) DownloadFile(ctx context.Context, fileID string) (string, e
 	}
 
 	return res.Path, nil
+}
+
+func (a *BotAdapter) Peers(ctx context.Context) ([]mcpkg.Peer, error) {
+	var res struct {
+		Peers []mcpkg.Peer `json:"peers"`
+	}
+
+	if err := a.Client.Call(ctx, ipc.MethodDaemonPeers, struct{}{}, &res); err != nil {
+		return nil, mapErr(err)
+	}
+
+	return res.Peers, nil
 }
 
 func (a *BotAdapter) BroadcastPermissionRequest(ctx context.Context, requestID, toolName string) {
