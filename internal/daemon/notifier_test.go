@@ -43,19 +43,19 @@ func TestNotifierDeliverInboundUsesChatOwner(t *testing.T) {
 	assert.Empty(t, bSink, "non-owner shim must not receive")
 }
 
-func TestNotifierDeliverInboundFallsBackToLRU(t *testing.T) {
+func TestNotifierDeliverInboundFallsBackToLRA(t *testing.T) {
 	r := NewRouter()
 
 	var aSink, bSink []capturedNotify
 
 	r.Register(newCapturingShim("a", &aSink))
-	r.Register(newCapturingShim("b", &bSink)) // b is most recent
+	r.Register(newCapturingShim("b", &bSink))
 
 	n := NewNotifier(r)
 	n.DeliverInbound("hi", map[string]string{"chat_id": "unknown"})
 
-	assert.Empty(t, aSink)
-	assert.Len(t, bSink, 1)
+	assert.Len(t, aSink, 1, "no pin/owner, both at zero — LRA lex tie-break picks a")
+	assert.Empty(t, bSink)
 }
 
 func TestNotifierDeliverInboundDropsWhenNoShim(_ *testing.T) {
