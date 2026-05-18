@@ -242,14 +242,23 @@ func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolNam
 	}
 }
 
-var pathFieldRE = regexp.MustCompile(`(?:^|[\s,{])"?(file_path|path|notebook_path|pattern)"?\s*[:=]\s*"?([^"\s,}]+)`)
+// pathFieldRE accepts either a quoted value (preserving inner whitespace) or
+// a bare unquoted token. Quoted form matters: real file paths contain spaces
+// and bare matching would truncate "/home/user/my docs/x.go" at the space.
+var pathFieldRE = regexp.MustCompile(`(?m)(?:^|[\s,{])"?(file_path|path|notebook_path|pattern)"?\s*[:=]\s*(?:"([^"]*)"|([^,}\s]+))`)
 
 func extractToolPath(_, inputPreview string) string {
-	if m := pathFieldRE.FindStringSubmatch(inputPreview); len(m) > 2 {
-		return strings.TrimSpace(m[2])
+	m := pathFieldRE.FindStringSubmatch(inputPreview)
+	if len(m) < 4 {
+		return ""
 	}
 
-	return ""
+	val := m[2]
+	if val == "" {
+		val = m[3]
+	}
+
+	return strings.TrimSpace(val)
 }
 
 // --- Tool registry ---

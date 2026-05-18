@@ -80,6 +80,7 @@ func TestExtractToolPath_filePathField(t *testing.T) {
 		{"json", `{"file_path":"/etc/hosts"}`, "/etc/hosts"},
 		{"json_spaced", `{ "file_path" : "/var/log/syslog" }`, "/var/log/syslog"},
 		{"kv", `file_path=/home/u/x.go`, "/home/u/x.go"},
+		{"quoted_with_spaces", `{"file_path":"/home/u/my docs/x.go"}`, "/home/u/my docs/x.go"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
