@@ -55,17 +55,14 @@ func (s *Shim) ShimAlias() (string, bool) {
 }
 
 func (s *Shim) Wire() error {
-	adapter := &BotAdapter{
-		Client: s.Client,
-		PermDetails: func(reqID string) (string, string) {
-			d, ok := s.MCP.LookupPermission(reqID)
-			if !ok {
-				return "", ""
-			}
+	adapter := NewBotAdapter(s.Client, func(reqID string) (string, string) {
+		d, ok := s.MCP.LookupPermission(reqID)
+		if !ok {
+			return "", ""
+		}
 
-			return d.Description, d.InputPreview
-		},
-	}
+		return d.Description, d.InputPreview
+	})
 	s.MCP.AttachBot(adapter)
 	s.MCP.AttachPeerProvider(adapter)
 

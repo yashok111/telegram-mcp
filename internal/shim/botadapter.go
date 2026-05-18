@@ -6,6 +6,9 @@ package shim
 import (
 	"context"
 	"errors"
+	"net"
+	"strings"
+	"sync"
 
 	"github.com/yakov/telegram-mcp/internal/bot"
 	"github.com/yakov/telegram-mcp/internal/ipc"
@@ -21,6 +24,7 @@ var (
 	ErrAttachmentTooLarge = errors.New("attachment too large")
 	ErrNotSendable        = errors.New("path not sendable")
 	ErrRequestIDCollision = errors.New("permission request_id already in use")
+	ErrDaemonUnreachable  = errors.New("daemon unreachable, retrying")
 )
 
 // IPCClient is the subset of ipc.Client the adapter needs. Lets tests inject
@@ -40,8 +44,27 @@ type PermDetailsProvider func(requestID string) (description, inputPreview strin
 
 // BotAdapter implements mcp.BotAPI by forwarding to the daemon over IPC.
 type BotAdapter struct {
-	Client      IPCClient
 	PermDetails PermDetailsProvider
+
+	mu     sync.RWMutex
+	client IPCClient
+}
+
+func NewBotAdapter(c IPCClient, perm PermDetailsProvider) *BotAdapter {
+	return &BotAdapter{client: c, PermDetails: perm}
+}
+
+func (a *BotAdapter) Client() IPCClient {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	return a.client
+}
+
+func (a *BotAdapter) SwapClient(c IPCClient) {
+	a.mu.Lock()
+	a.client = c
+	a.mu.Unlock()
 }
 
 func (a *BotAdapter) SendMessage(ctx context.Context, chatID, text string, opts bot.SendOpts) (int, error) {
@@ -49,7 +72,8 @@ func (a *BotAdapter) SendMessage(ctx context.Context, chatID, text string, opts 
 		MessageID int `json:"message_id"`
 	}
 
-	err := a.Client.Call(ctx, ipc.MethodBotSendMessage, map[string]any{
+	c := a.Client()
+	err := c.Call(ctx, ipc.MethodBotSendMessage, map[string]any{
 		"chat_id": chatID, "text": text, "reply_to": opts.ReplyTo, "parse_mode": opts.ParseMode,
 	}, &res)
 	if err != nil {
@@ -64,7 +88,8 @@ func (a *BotAdapter) SendFile(ctx context.Context, chatID, path string, opts bot
 		MessageID int `json:"message_id"`
 	}
 
-	err := a.Client.Call(ctx, ipc.MethodBotSendFile, map[string]any{
+	c := a.Client()
+	err := c.Call(ctx, ipc.MethodBotSendFile, map[string]any{
 		"chat_id": chatID, "path": path, "reply_to": opts.ReplyTo,
 	}, &res)
 	if err != nil {
@@ -79,7 +104,8 @@ func (a *BotAdapter) EditMessage(ctx context.Context, chatID string, msgID int, 
 		MessageID int `json:"message_id"`
 	}
 
-	err := a.Client.Call(ctx, ipc.MethodBotEditMessage, map[string]any{
+	c := a.Client()
+	err := c.Call(ctx, ipc.MethodBotEditMessage, map[string]any{
 		"chat_id": chatID, "message_id": msgID, "text": text, "parse_mode": parseMode,
 	}, &res)
 	if err != nil {
@@ -90,7 +116,9 @@ func (a *BotAdapter) EditMessage(ctx context.Context, chatID string, msgID int, 
 }
 
 func (a *BotAdapter) React(ctx context.Context, chatID string, msgID int, emoji string) error {
-	return mapErr(a.Client.Call(ctx, ipc.MethodBotReact, map[string]any{
+	c := a.Client()
+
+	return mapErr(c.Call(ctx, ipc.MethodBotReact, map[string]any{
 		"chat_id": chatID, "message_id": msgID, "emoji": emoji,
 	}, nil))
 }
@@ -100,7 +128,8 @@ func (a *BotAdapter) DownloadFile(ctx context.Context, fileID string) (string, e
 		Path string `json:"path"`
 	}
 
-	err := a.Client.Call(ctx, ipc.MethodBotDownloadFile, map[string]any{"file_id": fileID}, &res)
+	c := a.Client()
+	err := c.Call(ctx, ipc.MethodBotDownloadFile, map[string]any{"file_id": fileID}, &res)
 	if err != nil {
 		return "", mapErr(err)
 	}
@@ -113,7 +142,8 @@ func (a *BotAdapter) Peers(ctx context.Context) ([]mcpkg.Peer, error) {
 		Peers []mcpkg.Peer `json:"peers"`
 	}
 
-	if err := a.Client.Call(ctx, ipc.MethodDaemonPeers, struct{}{}, &res); err != nil {
+	c := a.Client()
+	if err := c.Call(ctx, ipc.MethodDaemonPeers, struct{}{}, &res); err != nil {
 		return nil, mapErr(err)
 	}
 
@@ -126,7 +156,8 @@ func (a *BotAdapter) BroadcastPermissionRequest(ctx context.Context, requestID, 
 		desc, preview = a.PermDetails(requestID)
 	}
 
-	_ = a.Client.Call(ctx, ipc.MethodBotBroadcastPermissionRequest, map[string]any{
+	c := a.Client()
+	_ = c.Call(ctx, ipc.MethodBotBroadcastPermissionRequest, map[string]any{
 		"request_id": requestID, "tool_name": toolName,
 		"description": desc, "input_preview": preview,
 	}, nil)
@@ -135,6 +166,10 @@ func (a *BotAdapter) BroadcastPermissionRequest(ctx context.Context, requestID, 
 func mapErr(err error) error {
 	if err == nil {
 		return nil
+	}
+
+	if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "connection closed") {
+		return ErrDaemonUnreachable
 	}
 
 	var rpcErr *ipc.Error
