@@ -44,10 +44,11 @@ type Shim struct {
 	// on os.Stdin. Production callers leave it nil; Run falls back to MCP.ServeStdio.
 	ServeStdio func(context.Context) error
 
-	idMu  sync.RWMutex
-	id    string
-	alias string
-	ccPID int
+	idMu      sync.RWMutex
+	id        string
+	alias     string
+	ccPID     int
+	startedAt time.Time
 
 	clientMu sync.RWMutex
 
@@ -66,6 +67,49 @@ func (s *Shim) ShimAlias() (string, bool) {
 	defer s.idMu.RUnlock()
 
 	return s.alias, s.alias != ""
+}
+
+// UpdateLabel mutates the in-memory label and rewrites the sessionfile so
+// `telegram-mcp self` and the statusline pick up the new label without a
+// CC restart. Safe to call from any goroutine; called by the daemon push
+// handler registered in AttachLabelHandler.
+func (s *Shim) UpdateLabel(label string) {
+	s.idMu.Lock()
+	s.HelloLabel = label
+	id := s.id
+	alias := s.alias
+	ccPID := s.ccPID
+	startedAt := s.startedAt
+	s.idMu.Unlock()
+
+	if id == "" || ccPID <= 0 || s.StateDir == "" {
+		slog.Warn("UpdateLabel skipped sessionfile rewrite", "shim_id", id, "cc_pid", ccPID, "state_dir", s.StateDir)
+		return
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		slog.Warn("os.Getwd in UpdateLabel", "err", err)
+	}
+
+	info := SessionInfo{
+		Alias:        alias,
+		ShimID:       id,
+		ShimIDPrefix: shimIDPrefix(id),
+		CCPID:        ccPID,
+		ShimPID:      s.HelloPID,
+		CCSessionID:  os.Getenv("CLAUDE_CODE_SESSION_ID"),
+		Workdir:      wd,
+		Label:        label,
+		StartedAt:    startedAt,
+		Mode:         "shim",
+	}
+
+	if path, err := writeSessionFile(s.StateDir, info); err != nil {
+		slog.Warn("sessionfile rewrite on label change failed", "err", err)
+	} else {
+		slog.Info("sessionfile rewritten on label change", "path", path, "label", label)
+	}
 }
 
 func (s *Shim) currentClient() IPCClient {
@@ -99,6 +143,7 @@ func (s *Shim) Wire() error {
 	}
 
 	AttachNotifier(s.Client, s.MCP)
+	AttachLabelHandler(s.Client, s)
 
 	if s.HelloPID == 0 {
 		s.HelloPID = os.Getpid()
@@ -146,6 +191,12 @@ func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
 	s.id = hello.ShimID
 	s.alias = hello.Alias
 	s.ccPID = ccPID
+
+	if s.startedAt.IsZero() {
+		s.startedAt = time.Now().UTC()
+	}
+
+	startedAt := s.startedAt
 	s.idMu.Unlock()
 
 	if ccPID > 0 && s.StateDir != "" {
@@ -158,6 +209,7 @@ func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
 			CCSessionID:  os.Getenv("CLAUDE_CODE_SESSION_ID"),
 			Workdir:      wd,
 			Label:        s.HelloLabel,
+			StartedAt:    startedAt,
 			Mode:         "shim",
 		}
 		if path, err := writeSessionFile(s.StateDir, info); err != nil {
@@ -295,6 +347,7 @@ func (s *Shim) rewire(ctx context.Context, newClient IPCClient) error {
 	}
 
 	AttachNotifier(newClient, s.MCP)
+	AttachLabelHandler(newClient, s)
 	s.adapter.SwapClient(newClient)
 	s.setClient(newClient)
 

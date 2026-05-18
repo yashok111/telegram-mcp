@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -487,4 +488,56 @@ func TestShimRunStopsOnContextCancel(t *testing.T) {
 	require.NoError(t, sh.Wire())
 
 	_ = ctx
+}
+
+func TestShimUpdateLabelRewritesSessionfile(t *testing.T) {
+	stateDir := t.TempDir()
+	ccPID := 4242
+
+	originalStart := time.Now().UTC().Add(-time.Hour)
+	s := &Shim{
+		StateDir:   stateDir,
+		HelloPID:   1234,
+		HelloLabel: "old",
+	}
+	s.id = "abcdef012345"
+	s.alias = "s1"
+	s.ccPID = ccPID
+	s.startedAt = originalStart
+
+	s.UpdateLabel("old")
+	s.UpdateLabel("new-label")
+
+	path := filepath.Join(stateDir, "sessions", strconv.Itoa(ccPID)+".json")
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"label":"new-label"`)
+
+	var got SessionInfo
+	require.NoError(t, json.Unmarshal(b, &got))
+	assert.True(t, got.StartedAt.Equal(originalStart),
+		"StartedAt must be preserved on label change: want %s got %s", originalStart, got.StartedAt)
+}
+
+func TestShimUpdateLabelEmptyClears(t *testing.T) {
+	stateDir := t.TempDir()
+	s := &Shim{StateDir: stateDir, HelloPID: 1234, HelloLabel: "old"}
+	s.id = "abcdef012345"
+	s.alias = "s1"
+	s.ccPID = 1234
+
+	s.UpdateLabel("")
+
+	path := filepath.Join(stateDir, "sessions", "1234.json")
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), `"label"`)
+}
+
+func TestShimUpdateLabelNoStateDirNoop(_ *testing.T) {
+	s := &Shim{HelloPID: 1234}
+	s.id = "abcdef012345"
+	s.ccPID = 1234
+
+	s.UpdateLabel("x")
 }

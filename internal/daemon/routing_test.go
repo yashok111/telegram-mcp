@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+
+	"github.com/yakov/telegram-mcp/internal/ipc"
 )
 
 func TestMain(m *testing.M) {
@@ -732,4 +734,59 @@ func TestRouterLRADropUpdatesLastAssigned(t *testing.T) {
 	got, ok := r.RouteInbound("chat-2")
 	require.True(t, ok)
 	assert.Equal(t, "a", got.ID, "Drop must clear lastAssigned['a']")
+}
+
+func TestRouterSetLabelUpdatesShimAndSnapshot(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+
+	info, err := r.SetLabel("s1", "main-bot")
+	require.NoError(t, err)
+	assert.Equal(t, "main-bot", info.Label)
+
+	snap := r.Snapshot()
+	require.Len(t, snap, 1)
+	assert.Equal(t, "main-bot", snap[0].Label)
+}
+
+func TestRouterSetLabelEmptyClears(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1", Label: "old"})
+
+	info, err := r.SetLabel("s1", "")
+	require.NoError(t, err)
+	assert.Empty(t, info.Label)
+}
+
+func TestRouterSetLabelUnknownShim(t *testing.T) {
+	r := NewRouter()
+
+	_, err := r.SetLabel("ghost", "x")
+	require.ErrorIs(t, err, ErrShimNotFound)
+}
+
+func TestRouterSetLabelPushesNotify(t *testing.T) {
+	r := NewRouter()
+
+	var (
+		gotMethod string
+		gotParams any
+	)
+
+	notify := func(method string, params any) error {
+		gotMethod = method
+		gotParams = params
+
+		return nil
+	}
+
+	r.Register(&Shim{ID: "s1", Notify: notify, ConnectedAt: time.Now()})
+
+	_, err := r.SetLabel("s1", "x")
+	require.NoError(t, err)
+	assert.Equal(t, ipc.NotifyLabelChanged, gotMethod)
+
+	m, ok := gotParams.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "x", m["label"])
 }

@@ -21,11 +21,18 @@ type fakeRouterView struct {
 	evicted   ShimInfo
 	lastPin   pinCall
 	lastEvict string
+	lastLabel labelCall
+	labelInfo ShimInfo
+	labelErr  error
 }
 
 type pinCall struct {
 	chatID, prefix string
 	ttl            time.Duration
+}
+
+type labelCall struct {
+	prefix, label string
 }
 
 func (f *fakeRouterView) Snapshot() []ShimInfo { return f.snap }
@@ -38,6 +45,11 @@ func (f *fakeRouterView) Pin(chat, pref string, ttl time.Duration) (ShimInfo, er
 func (f *fakeRouterView) Evict(pref string) (ShimInfo, error) {
 	f.lastEvict = pref
 	return f.evicted, f.evictErr
+}
+
+func (f *fakeRouterView) SetLabel(prefix, label string) (ShimInfo, error) {
+	f.lastLabel = labelCall{prefix: prefix, label: label}
+	return f.labelInfo, f.labelErr
 }
 
 func TestBotNoRouterView(t *testing.T) {
@@ -460,4 +472,174 @@ func TestHandleCallback_sessPinError_acksMessage(t *testing.T) {
 	acks := api.recordedCalls("answerCallbackQuery")
 	require.Len(t, acks, 1)
 	assert.Contains(t, payloadString(acks[0].params), "Pin failed")
+}
+
+// ===== /label command =====
+
+func TestLabelCommandSingleSession(t *testing.T) {
+	fv := &fakeRouterView{
+		snap:      []ShimInfo{{ID: "abcdef012345", IDPrefix: "abcdef01", Alias: "s1"}},
+		labelInfo: ShimInfo{ID: "abcdef012345", IDPrefix: "abcdef01", Alias: "s1", Label: "main"},
+	}
+	b, api, _ := newTestBot(t, allowlistState("99"))
+	b.router = fv
+
+	b.handleLabelCommand(t.Context(), telego.Message{
+		Chat: telego.Chat{ID: 1, Type: "private"},
+		From: &telego.User{ID: 99},
+		Text: "/label main",
+	})
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, payloadString(calls[0].params), "✅ abcdef01 [s1] → main")
+	assert.Equal(t, "abcdef01", fv.lastLabel.prefix)
+	assert.Equal(t, "main", fv.lastLabel.label)
+}
+
+func TestLabelCommandEmptyClears(t *testing.T) {
+	fv := &fakeRouterView{
+		snap:      []ShimInfo{{ID: "abcdef012345", IDPrefix: "abcdef01", Alias: "s1"}},
+		labelInfo: ShimInfo{ID: "abcdef012345", IDPrefix: "abcdef01", Alias: "s1"},
+	}
+	b, api, _ := newTestBot(t, allowlistState("99"))
+	b.router = fv
+
+	b.handleLabelCommand(t.Context(), telego.Message{
+		Chat: telego.Chat{ID: 1, Type: "private"},
+		From: &telego.User{ID: 99},
+		Text: "/label",
+	})
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, payloadString(calls[0].params), "(no label)")
+	assert.Empty(t, fv.lastLabel.label)
+}
+
+func TestLabelCommandPickerWhenMultiple(t *testing.T) {
+	fv := &fakeRouterView{
+		snap: []ShimInfo{
+			{ID: "aa00000000", IDPrefix: "aa000000", Alias: "s1"},
+			{ID: "bb00000000", IDPrefix: "bb000000", Alias: "s2"},
+		},
+	}
+	b, api, _ := newTestBot(t, allowlistState("99"))
+	b.router = fv
+
+	b.handleLabelCommand(t.Context(), telego.Message{
+		Chat: telego.Chat{ID: 7, Type: "private"},
+		From: &telego.User{ID: 99},
+		Text: "/label foo",
+	})
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	payload := payloadString(calls[0].params)
+	assert.Contains(t, payload, `Which session should get label \"foo\"`)
+	assert.Contains(t, payload, "sess:label:aa000000")
+	assert.Contains(t, payload, "sess:label:bb000000")
+
+	stashed, ok := b.takePendingLabel("7")
+	require.True(t, ok)
+	assert.Equal(t, "foo", stashed)
+}
+
+func TestLabelCommandPinTakesPrecedence(t *testing.T) {
+	fv := &fakeRouterView{
+		snap: []ShimInfo{
+			{ID: "aa00000000", IDPrefix: "aa000000", Alias: "s1"},
+			{ID: "bb00000000", IDPrefix: "bb000000", Alias: "s2", PinnedChats: []string{"7"}},
+		},
+		labelInfo: ShimInfo{IDPrefix: "bb000000", Alias: "s2", Label: "x"},
+	}
+	b, _, _ := newTestBot(t, allowlistState("99"))
+	b.router = fv
+
+	b.handleLabelCommand(t.Context(), telego.Message{
+		Chat: telego.Chat{ID: 7, Type: "private"},
+		From: &telego.User{ID: 99},
+		Text: "/label x",
+	})
+
+	assert.Equal(t, "bb000000", fv.lastLabel.prefix)
+	assert.Equal(t, "x", fv.lastLabel.label)
+}
+
+func TestLabelCallbackResolvesPending(t *testing.T) {
+	fv := &fakeRouterView{labelInfo: ShimInfo{IDPrefix: "aa000000", Alias: "s1", Label: "foo"}}
+	b, api, _ := newTestBot(t, allowlistState("99"))
+	b.router = fv
+	b.stashPendingLabel("7", "foo")
+
+	err := b.handleLabelCallback(t.Context(), telego.CallbackQuery{
+		ID:   "cb1",
+		From: telego.User{ID: 99},
+		Message: &telego.Message{
+			Chat:      telego.Chat{ID: 7, Type: "private"},
+			MessageID: 100,
+			Text:      `Which session should get label "foo"?`,
+		},
+		Data: "sess:label:aa000000",
+	}, "aa000000")
+	require.NoError(t, err)
+	assert.Equal(t, "aa000000", fv.lastLabel.prefix)
+	assert.Equal(t, "foo", fv.lastLabel.label)
+
+	// Pending entry must be consumed.
+	_, ok := b.takePendingLabel("7")
+	assert.False(t, ok)
+
+	edits := api.recordedCalls("editMessageText")
+	require.NotEmpty(t, edits)
+	assert.Contains(t, payloadString(edits[0].params), "✅ aa000000 [s1] → foo")
+}
+
+func TestLabelCallbackExpired(t *testing.T) {
+	fv := &fakeRouterView{}
+	b, api, _ := newTestBot(t, allowlistState("99"))
+	b.router = fv
+
+	// Pre-seed an already-expired pending entry: stash then rewrite expiresAt
+	// into the past. This exercises takePendingLabel's expiry branch — without
+	// this the test only covers the "no pending entry" path.
+	b.stashPendingLabel("7", "foo")
+	b.pendingLabelMu.Lock()
+	pl := b.pendingLabel["7"]
+	pl.expiresAt = time.Now().Add(-time.Second)
+	b.pendingLabel["7"] = pl
+	b.pendingLabelMu.Unlock()
+
+	err := b.handleLabelCallback(t.Context(), telego.CallbackQuery{
+		ID:      "cb1",
+		From:    telego.User{ID: 99},
+		Message: &telego.Message{Chat: telego.Chat{ID: 7, Type: "private"}, MessageID: 100, Text: "..."},
+		Data:    "sess:label:aa000000",
+	}, "aa000000")
+	require.NoError(t, err)
+	assert.Equal(t, labelCall{}, fv.lastLabel)
+
+	acks := api.recordedCalls("answerCallbackQuery")
+	require.Len(t, acks, 1)
+	assert.Contains(t, payloadString(acks[0].params), "Label expired")
+
+	// Expired entry must also have been removed from the map.
+	_, ok := b.takePendingLabel("7")
+	assert.False(t, ok, "expired pending entry should not survive a callback miss")
+}
+
+func TestLabelCommandNoSessions(t *testing.T) {
+	fv := &fakeRouterView{}
+	b, api, _ := newTestBot(t, allowlistState("99"))
+	b.router = fv
+
+	b.handleLabelCommand(t.Context(), telego.Message{
+		Chat: telego.Chat{ID: 7, Type: "private"},
+		From: &telego.User{ID: 99},
+		Text: "/label x",
+	})
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "No active CC sessions")
 }

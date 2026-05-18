@@ -52,6 +52,7 @@ const (
 	MethodDaemonPeers                   = "daemon.peers"
 	NotifyInbound                       = "notifications/inbound"
 	NotifyPermissionResolved            = "notifications/permission/resolved"
+	NotifyLabelChanged                  = "notifications/label/changed"
 )
 
 // Custom error codes (JSON-RPC reserves -32000..-32099 for application errors).

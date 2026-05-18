@@ -386,6 +386,20 @@ func (a *routerAdapter) Evict(prefix string) (bot.ShimInfo, error) {
 	return info, nil
 }
 
+func (a *routerAdapter) SetLabel(prefix, label string) (bot.ShimInfo, error) {
+	sh, err := a.r.ResolveShimByPrefix(prefix)
+	if err != nil {
+		return bot.ShimInfo{}, fmt.Errorf("resolve shim prefix: %w", err)
+	}
+
+	info, err := a.r.SetLabel(sh.ID, label)
+	if err != nil {
+		return bot.ShimInfo{}, fmt.Errorf("set label: %w", err)
+	}
+
+	return adaptShimInfo(info), nil
+}
+
 func lookupShimInfo(r *daemonpkg.Router, id string) bot.ShimInfo {
 	for _, s := range r.Snapshot() {
 		if s.ID == id {
