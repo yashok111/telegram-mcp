@@ -606,3 +606,41 @@ func TestBroadcastPermissionRequest_keyboardIncludesNewRows(t *testing.T) {
 	// Three rows of inline keyboard expected.
 	assert.GreaterOrEqual(t, strings.Count(body, "callback_data"), 6)
 }
+
+// ===== compiledMentionPattern cache =====
+
+func TestCompiledMentionPattern_compilesOnce(t *testing.T) {
+	b := &Bot{}
+	re1 := b.compiledMentionPattern("foo.*")
+	re2 := b.compiledMentionPattern("foo.*")
+	require.NotNil(t, re1)
+	require.NotNil(t, re2)
+	assert.Same(t, re1, re2)
+}
+
+func TestCompiledMentionPattern_invalidPattern_returnsNilAndCachesIt(t *testing.T) {
+	b := &Bot{}
+	re1 := b.compiledMentionPattern("(unclosed")
+	assert.Nil(t, re1)
+
+	re2 := b.compiledMentionPattern("(unclosed")
+	assert.Nil(t, re2)
+
+	// Negative cache entry must exist so we don't recompile on every call.
+	entry, ok := b.mentionCache["(unclosed"]
+	assert.True(t, ok)
+	assert.Nil(t, entry)
+}
+
+func TestIsMentioned_usesCacheAcrossCalls(t *testing.T) {
+	b := &Bot{username: "my_bot"}
+	msg := &telego.Message{Text: "hello world"}
+
+	assert.True(t, b.isMentioned(msg, []string{"hello"}))
+	assert.True(t, b.isMentioned(msg, []string{"hello"}))
+
+	assert.Len(t, b.mentionCache, 1)
+	entry, ok := b.mentionCache["hello"]
+	assert.True(t, ok)
+	assert.NotNil(t, entry)
+}
