@@ -21,14 +21,18 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message) {
 	}
 
 	chatID := tu.ID(msg.Chat.ID)
-	st := b.store.Load()
 
 	switch sub {
 	case "", "list":
+		st := b.store.Load()
 		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, renderRules(st.Rules)))
 	case "clear":
-		n := access.ClearRules(&st)
-		if err := b.store.Save(st); err != nil {
+		var n int
+		err := b.store.Mutate(func(st *access.State) bool {
+			n = access.ClearRules(st)
+			return n > 0
+		})
+		if err != nil {
 			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Failed to save: "+err.Error()))
 			return
 		}
@@ -41,12 +45,18 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message) {
 		}
 
 		id := parts[2]
-		if !access.RevokeRule(&st, id) {
+
+		var found bool
+		err := b.store.Mutate(func(st *access.State) bool {
+			found = access.RevokeRule(st, id)
+			return found
+		})
+		if !found {
 			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "No rule with id "+id))
 			return
 		}
 
-		if err := b.store.Save(st); err != nil {
+		if err != nil {
 			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Failed to save: "+err.Error()))
 			return
 		}

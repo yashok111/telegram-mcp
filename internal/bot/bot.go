@@ -686,14 +686,15 @@ func (b *Bot) addRuleAndResolve(ctx context.Context, q *telego.CallbackQuery, re
 		toolName = details.ToolName
 	}
 
-	st := b.store.Load()
 	rule := access.PermissionRule{Tool: toolName, Action: action}
 	if ttl > 0 {
 		rule.ExpiresAt = time.Now().Add(ttl).UnixMilli()
 	}
 
-	access.AddRule(&st, rule)
-	if err := b.store.Save(st); err != nil {
+	if err := b.store.Mutate(func(st *access.State) bool {
+		access.AddRule(st, rule)
+		return true
+	}); err != nil {
 		slog.Error("addRule save failed", "request_id", requestID, "tool", toolName, "err", err)
 	}
 

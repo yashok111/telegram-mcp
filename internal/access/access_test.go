@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,4 +196,62 @@ func TestStore_load_partialJSON_fillsDefaults(t *testing.T) {
 	assert.NotNil(t, got.AllowFrom)
 	assert.NotNil(t, got.Groups)
 	assert.NotNil(t, got.Pending)
+}
+
+func TestStore_mutate_persistsWhenFnReturnsTrue(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	require.NoError(t, s.Mutate(func(st *State) bool {
+		st.AllowFrom = []string{"42"}
+		return true
+	}))
+
+	assert.Equal(t, []string{"42"}, s.Load().AllowFrom)
+}
+
+func TestStore_mutate_skipsSaveWhenFnReturnsFalse(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+	require.NoError(t, s.Save(State{AllowFrom: []string{"original"}}))
+
+	require.NoError(t, s.Mutate(func(st *State) bool {
+		st.AllowFrom = []string{"discarded"}
+		return false
+	}))
+
+	assert.Equal(t, []string{"original"}, s.Load().AllowFrom, "fn=false must not persist")
+}
+
+func TestStore_mutate_concurrentCallsSerializeWithoutLostUpdates(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	const writers = 20
+
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+
+		go func(idx int) {
+			defer wg.Done()
+
+			_ = s.Mutate(func(st *State) bool {
+				st.AllowFrom = append(st.AllowFrom, strconv.Itoa(idx))
+				return true
+			})
+		}(i)
+	}
+
+	wg.Wait()
+
+	got := s.Load().AllowFrom
+	assert.Len(t, got, writers, "every Mutate should have appended exactly once")
+
+	seen := map[string]bool{}
+	for _, v := range got {
+		seen[v] = true
+	}
+
+	assert.Len(t, seen, writers, "no duplicates / no losses")
 }

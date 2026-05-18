@@ -162,6 +162,33 @@ func (s *Store) Save(st State) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.saveLocked(st)
+}
+
+// Mutate runs fn under the store's write lock against a freshly-loaded state.
+// fn returns true to persist its mutation, false to skip the write. Callers
+// that do read-modify-write on Rules must use this instead of Load + Save —
+// a separate Save races with the daemon's RulesCleanup ticker.
+func (s *Store) Mutate(fn func(*State) bool) error {
+	if s.static {
+		st := *s.boot
+		_ = fn(&st)
+
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	st := s.readFile()
+	if !fn(&st) {
+		return nil
+	}
+
+	return s.saveLocked(st)
+}
+
+func (s *Store) saveLocked(st State) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
