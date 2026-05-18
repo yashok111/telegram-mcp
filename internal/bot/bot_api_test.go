@@ -43,6 +43,10 @@ type mockAPI struct {
 	// onCall fires after a method is recorded — handy for tests that want
 	// to assert payload contents inline.
 	onCall func(apiCall)
+
+	// blockGetUpdates, if non-nil, causes /getUpdates handlers to park until
+	// the channel is closed. Simulates a wedged long-poll for shutdown tests.
+	blockGetUpdates chan struct{}
 }
 
 func newMockAPI(t *testing.T) *mockAPI {
@@ -91,7 +95,13 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 	m.calls = append(m.calls, apiCall{method, params})
 	cb := m.onCall
 	errMsg, hasErr := m.errFor[method]
+	block := m.blockGetUpdates
 	m.mu.Unlock()
+
+	if method == "getUpdates" && block != nil {
+		<-block
+		return
+	}
 
 	if cb != nil {
 		cb(apiCall{method, params})
@@ -102,6 +112,10 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	m.respond(w, method, params)
+}
+
+func (m *mockAPI) respond(w http.ResponseWriter, method string, params map[string]any) {
 	switch method {
 	case "getMe":
 		writeJSON(w, ok(map[string]any{"id": 1, "is_bot": true, "username": "test_bot", "first_name": "Test"}))
@@ -116,29 +130,8 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 			"chat":       map[string]any{"id": 1, "type": "private"},
 		}))
 	case "editMessageText":
-		mid := 0
-
-		switch v := params["message_id"].(type) {
-		case float64:
-			mid = int(v)
-		case string:
-			n := 0
-
-			for i := range len(v) {
-				c := v[i]
-				if c < '0' || c > '9' {
-					n = 0
-					break
-				}
-
-				n = n*10 + int(c-'0')
-			}
-
-			mid = n
-		}
-
 		writeJSON(w, ok(map[string]any{
-			"message_id": mid,
+			"message_id": editMessageID(params),
 			"date":       time.Now().Unix(),
 			"chat":       map[string]any{"id": 1, "type": "private"},
 		}))
@@ -154,6 +147,28 @@ func (m *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unknown method: "+method, http.StatusNotFound)
 	}
+}
+
+func editMessageID(params map[string]any) int {
+	switch v := params["message_id"].(type) {
+	case float64:
+		return int(v)
+	case string:
+		n := 0
+
+		for i := range len(v) {
+			c := v[i]
+			if c < '0' || c > '9' {
+				return 0
+			}
+
+			n = n*10 + int(c-'0')
+		}
+
+		return n
+	}
+
+	return 0
 }
 
 func ok(result any) map[string]any { return map[string]any{"ok": true, "result": result} }
@@ -792,5 +807,43 @@ func TestPoll_exitsOnCtxCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Poll did not exit after ctx cancel")
+	}
+}
+
+// Regression: if telego's long-poller is wedged mid-request (slow upstream,
+// connection drop without RST), Poll must still return within the 2s shutCtx
+// deadline rather than blocking on <-done forever.
+func TestPoll_returnsWhenBHStartHangs(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+
+	release := make(chan struct{})
+
+	t.Cleanup(func() { close(release) })
+
+	api.mu.Lock()
+	api.blockGetUpdates = release
+	api.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() { done <- b.Poll(ctx) }()
+
+	time.Sleep(150 * time.Millisecond)
+
+	start := time.Now()
+
+	cancel()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Fatalf("Poll exit took %v; expected <3s (shutCtx is 2s)", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Poll did not exit within 3s of ctx cancel despite hung getUpdates")
 	}
 }

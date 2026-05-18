@@ -120,24 +120,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return nil
 }
 
-// claimPID writes daemon.pid; if a previous daemon owns it, signal SIGTERM
-// (with /proc/<pid>/comm guard) and replace.
-func (d *Daemon) claimPID() error {
-	if raw, err := os.ReadFile(d.PidPath); err == nil {
-		if old, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && old > 1 && old != os.Getpid() {
-			alive := syscall.Kill(old, 0) == nil
-			ours := isOurDaemon(old)
+// Test seams: swappable so tests can mock the comm guard and shorten waits.
+var (
+	isOurDaemonFn   = isOurDaemon
+	termWaitTimeout = 5 * time.Second
+	killWaitTimeout = 2 * time.Second
+)
 
-			switch {
-			case alive && ours:
-				slog.Info("replacing stale daemon", "pid", old)
-				_ = syscall.Kill(old, syscall.SIGTERM)
-			case alive && !ours:
-				slog.Warn("daemon.pid points at foreign process — leaving it alone", "pid", old)
-			default:
-				slog.Info("daemon.pid stale, overwriting", "pid", old)
-			}
-		}
+// claimPID writes daemon.pid; if a previous daemon owns it, signal SIGTERM
+// (with /proc/<pid>/comm guard), wait for exit, escalate to SIGKILL if needed,
+// then replace. Defensive wait avoids split-brain when systemd restarts the
+// daemon faster than the old one shuts down.
+func (d *Daemon) claimPID() error {
+	if err := d.evictOldDaemon(); err != nil {
+		return err
 	}
 
 	if err := os.WriteFile(d.PidPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
@@ -147,6 +143,63 @@ func (d *Daemon) claimPID() error {
 	slog.Info("daemon.pid claimed", "pid", os.Getpid(), "path", d.PidPath)
 
 	return nil
+}
+
+func (d *Daemon) evictOldDaemon() error {
+	raw, err := os.ReadFile(d.PidPath)
+	if err != nil {
+		return nil //nolint:nilerr // missing daemon.pid means no prior daemon to evict.
+	}
+
+	old, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || old <= 1 || old == os.Getpid() {
+		return nil //nolint:nilerr // garbage / self / pid<=1 means no prior daemon to evict.
+	}
+
+	alive := syscall.Kill(old, 0) == nil
+	ours := isOurDaemonFn(old)
+
+	switch {
+	case alive && ours:
+		return terminateOldDaemon(old)
+	case alive && !ours:
+		slog.Warn("daemon.pid points at foreign process — leaving it alone", "pid", old)
+	default:
+		slog.Info("daemon.pid stale, overwriting", "pid", old)
+	}
+
+	return nil
+}
+
+func terminateOldDaemon(pid int) error {
+	slog.Info("replacing stale daemon", "pid", pid)
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+
+	if err := waitForExit(pid, termWaitTimeout); err == nil {
+		return nil
+	}
+
+	slog.Warn("old daemon did not exit on SIGTERM — escalating to SIGKILL", "pid", pid)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+
+	if err := waitForExit(pid, killWaitTimeout); err != nil {
+		return fmt.Errorf("old daemon pid=%d still alive after SIGKILL: %w", pid, err)
+	}
+
+	return nil
+}
+
+func waitForExit(pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil {
+			return nil //nolint:nilerr // Kill(pid,0) returning error means ESRCH — process gone, that's success.
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return fmt.Errorf("process %d still alive after %s", pid, timeout)
 }
 
 func isOurDaemon(pid int) bool {

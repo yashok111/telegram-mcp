@@ -250,8 +250,24 @@ func runDaemon(stateDir string) error {
 		}
 	}()
 
-	wg.Wait()
-	tgBot.Stop()
+	shutDone := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		tgBot.Stop()
+		close(shutDone)
+	}()
+
+	<-ctx.Done()
+
+	select {
+	case <-shutDone:
+		return nil
+	case <-time.After(7 * time.Second):
+		slog.Error("daemon shutdown exceeded 7s deadline, forcing exit")
+		signal.Stop(sigs)
+		os.Exit(1) //nolint:gocritic // signal.Stop is called explicitly above; defer cleanup is the normal path.
+	}
 
 	return nil
 }

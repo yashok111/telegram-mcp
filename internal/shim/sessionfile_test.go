@@ -32,6 +32,7 @@ func TestWriteSessionFile_createsAtomicallyWith0600(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o600), st.Mode().Perm())
 
 	var got SessionInfo
+
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &got))
@@ -57,6 +58,7 @@ func TestWriteSessionFile_optionalCCSessionIDRoundtrips(t *testing.T) {
 	require.NoError(t, err)
 
 	var got SessionInfo
+
 	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "1234.json"))
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &got))
@@ -82,6 +84,7 @@ func TestRemoveSessionFile_idempotent(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, removeSessionFile(dir, 4242))
+
 	_, err = os.Stat(path)
 	assert.True(t, os.IsNotExist(err))
 
@@ -103,6 +106,7 @@ func TestWriteSessionFile_replacesPrevious(t *testing.T) {
 
 	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "7777.json"))
 	require.NoError(t, err)
+
 	var got SessionInfo
 	require.NoError(t, json.Unmarshal(raw, &got))
 	assert.Equal(t, "s2", got.Alias)

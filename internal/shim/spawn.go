@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -21,9 +23,19 @@ type EnsureOpts struct {
 	NoSpawn     bool // for tests
 }
 
-// EnsureDaemon checks for a daemon by dialing the socket. If absent, spawns
-// the daemon subprocess (detached via setsid + Setpgid) and polls until the
-// socket appears or ctx is done.
+var readComm = func(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(b))
+}
+
+// EnsureDaemon checks for a daemon by dialing the socket. If absent but a live
+// daemon process is already recorded in daemon.pid, waits longer for its socket
+// to appear instead of spawning a duplicate. Otherwise spawns a fresh daemon
+// subprocess (detached via setsid) and polls until the socket appears or ctx done.
 func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 	if opts.WaitTimeout == 0 {
 		opts.WaitTimeout = 5 * time.Second
@@ -32,6 +44,11 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 	if canDial(opts.SocketPath) {
 		slog.Info("daemon already listening", "socket", opts.SocketPath)
 		return nil
+	}
+
+	if pid, err := readDaemonPID(opts.StateDir); err == nil && pid > 1 && processAlive(pid) && isOurDaemon(pid) {
+		slog.Info("daemon process alive but socket not yet reachable — waiting", "pid", pid, "socket", opts.SocketPath)
+		return waitForSocket(ctx, opts.SocketPath, opts.WaitTimeout*2)
 	}
 
 	if opts.NoSpawn {
@@ -74,7 +91,11 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 
 	go func() { _ = cmd.Process.Release() }()
 
-	deadline := time.Now().Add(opts.WaitTimeout)
+	return waitForSocket(ctx, opts.SocketPath, opts.WaitTimeout)
+}
+
+func waitForSocket(ctx context.Context, path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -82,15 +103,41 @@ func EnsureDaemon(ctx context.Context, opts EnsureOpts) error {
 		default:
 		}
 
-		if canDial(opts.SocketPath) {
-			slog.Info("daemon socket reachable", "socket", opts.SocketPath, "wait_ms", time.Since(deadline.Add(-opts.WaitTimeout)).Milliseconds())
+		if canDial(path) {
+			slog.Info("daemon socket reachable", "socket", path, "wait_ms", time.Since(deadline.Add(-timeout)).Milliseconds())
 			return nil
 		}
 
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	return fmt.Errorf("daemon failed to bind %s within %s", filepath.Base(opts.SocketPath), opts.WaitTimeout)
+	return fmt.Errorf("daemon failed to bind %s within %s", filepath.Base(path), timeout)
+}
+
+func readDaemonPID(stateDir string) (int, error) {
+	if stateDir == "" {
+		return 0, errors.New("empty state dir")
+	}
+
+	b, err := os.ReadFile(filepath.Join(stateDir, "daemon.pid")) //nolint:gosec // stateDir is internal CC channel state.
+	if err != nil {
+		return 0, fmt.Errorf("read daemon pid: %w", err)
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, fmt.Errorf("parse daemon pid: %w", err)
+	}
+
+	return pid, nil
+}
+
+func processAlive(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
+}
+
+func isOurDaemon(pid int) bool {
+	return readComm(pid) == "telegram-mcp"
 }
 
 func canDial(path string) bool {
