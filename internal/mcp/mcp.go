@@ -74,6 +74,19 @@ type Server struct {
 	// Init state observed via MCP hooks for diagnostics.
 	sessionsRegistered atomic.Int32
 	sessionsInited     atomic.Int32
+
+	inboxOnce sync.Once
+	inboxErr  error
+}
+
+// ensureInboxDir creates the inbox directory exactly once per process.
+// handleDownload was calling os.MkdirAll on every tool invocation — cheap but
+// pointless after the first call.
+func (s *Server) ensureInboxDir() error {
+	s.inboxOnce.Do(func() {
+		s.inboxErr = os.MkdirAll(s.store.InboxDir(), 0o700)
+	})
+	return s.inboxErr
 }
 
 func New(store *access.Store) (*Server, error) {
@@ -494,7 +507,7 @@ func (s *Server) handleDownload(ctx context.Context, req mcptypes.CallToolReques
 		return mcptypes.NewToolResultError("bot not attached"), nil
 	}
 
-	if err := os.MkdirAll(s.store.InboxDir(), 0o700); err != nil {
+	if err := s.ensureInboxDir(); err != nil {
 		slog.Error("tool download_attachment mkdir failed", "err", err)
 		return mcptypes.NewToolResultError(fmt.Sprintf("mkdir inbox: %v", err)), nil
 	}
