@@ -32,8 +32,9 @@ var defaultRotationEmojis = []string{"👀", "🤔", "✍"}
 // defaultDoneEmoji is what Done() swaps onto the inbound message after the
 // shim's first outbound lands — a visible "agent finished" marker. Must be
 // inside Telegram's bot-reaction allowlist for the same reason as
-// defaultRotationEmojis above; ✅ is in the allowlist.
-const defaultDoneEmoji = "✅"
+// defaultRotationEmojis above; ✅ is NOT in the allowlist (verified live as
+// `Bad Request: REACTION_INVALID`), so use 👌 instead.
+const defaultDoneEmoji = "👌"
 
 // typingBot is the slice of *bot.Bot the tracker needs. Defined here so
 // the typing package surface is testable with a tiny fake.
