@@ -31,7 +31,7 @@ type botSurface interface {
 	EditMessage(ctx context.Context, chatID string, msgID int, text, parseMode string) (int, error)
 	React(ctx context.Context, chatID string, msgID int, emoji string) error
 	DownloadFile(ctx context.Context, fileID string) (string, error)
-	BroadcastPermissionRequest(ctx context.Context, requestID, toolName string)
+	BroadcastPermissionRequest(ctx context.Context, prefix, requestID, toolName string)
 }
 
 type Handlers struct {
@@ -53,6 +53,29 @@ func (h *Handlers) shimID(c *ipc.Conn) string {
 	s, _ := v.(string)
 
 	return s
+}
+
+// textPrefixFor resolves the `@sN: ` source-alias prefix for the shim that
+// owns conn c. Returns "" when prefix injection is disabled via env or the
+// shim isn't registered (anonymous / pre-hello). Used to mark every outbound
+// text/edit so a Telegram user can see which session is replying without
+// running /sessions.
+func (h *Handlers) textPrefixFor(c *ipc.Conn) string {
+	if !prefixEnabled() {
+		return ""
+	}
+
+	return formatTextPrefix(h.router.AliasForShim(h.shimID(c)))
+}
+
+// captionFor is the file-upload counterpart of textPrefixFor: returns the
+// shorter `@sN` marker for use as a Telegram photo/document caption.
+func (h *Handlers) captionFor(c *ipc.Conn) string {
+	if !prefixEnabled() {
+		return ""
+	}
+
+	return formatCaption(h.router.AliasForShim(h.shimID(c)))
 }
 
 func (h *Handlers) gate(chatID string) *ipc.Error {
@@ -114,13 +137,15 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params js
 		return nil, rpcErr
 	}
 
-	id, err := h.bot.SendMessage(ctx, p.ChatID, p.Text, bot.SendOpts{ReplyTo: p.ReplyTo, ParseMode: p.ParseMode})
+	text := h.textPrefixFor(c) + p.Text
+
+	id, err := h.bot.SendMessage(ctx, p.ChatID, text, bot.SendOpts{ReplyTo: p.ReplyTo, ParseMode: p.ParseMode})
 	if err != nil {
-		slog.Error("bot.SendMessage failed", "shim_id", h.shimID(c), "chat_id", p.ChatID, "text_len", len(p.Text), "err", err)
+		slog.Error("bot.SendMessage failed", "shim_id", h.shimID(c), "chat_id", p.ChatID, "text_len", len(text), "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
 	}
 
-	slog.Info("bot.SendMessage ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "text_len", len(p.Text), "reply_to", p.ReplyTo, "parse_mode", p.ParseMode)
+	slog.Info("bot.SendMessage ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "text_len", len(text), "reply_to", p.ReplyTo, "parse_mode", p.ParseMode)
 
 	h.router.RecordOutbound(h.shimID(c), p.ChatID, id)
 
@@ -141,7 +166,7 @@ func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.
 		return nil, rpcErr
 	}
 
-	id, err := h.bot.SendFile(ctx, p.ChatID, p.Path, bot.SendOpts{ReplyTo: p.ReplyTo})
+	id, err := h.bot.SendFile(ctx, p.ChatID, p.Path, bot.SendOpts{ReplyTo: p.ReplyTo, Caption: h.captionFor(c)})
 	if err != nil {
 		slog.Error("bot.SendFile failed", "shim_id", h.shimID(c), "chat_id", p.ChatID, "path", p.Path, "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
@@ -154,7 +179,7 @@ func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.
 	return map[string]any{"message_id": id}, nil
 }
 
-func (h *Handlers) HandleEditMessage(ctx context.Context, _ *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
+func (h *Handlers) HandleEditMessage(ctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
 	var p struct {
 		ChatID    string `json:"chat_id"`
 		MessageID int    `json:"message_id"`
@@ -169,13 +194,15 @@ func (h *Handlers) HandleEditMessage(ctx context.Context, _ *ipc.Conn, params js
 		return nil, rpcErr
 	}
 
-	id, err := h.bot.EditMessage(ctx, p.ChatID, p.MessageID, p.Text, p.ParseMode)
+	text := h.textPrefixFor(c) + p.Text
+
+	id, err := h.bot.EditMessage(ctx, p.ChatID, p.MessageID, text, p.ParseMode)
 	if err != nil {
 		slog.Error("bot.EditMessage failed", "chat_id", p.ChatID, "message_id", p.MessageID, "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
 	}
 
-	slog.Info("bot.EditMessage ok", "chat_id", p.ChatID, "message_id", id, "text_len", len(p.Text), "parse_mode", p.ParseMode)
+	slog.Info("bot.EditMessage ok", "chat_id", p.ChatID, "message_id", id, "text_len", len(text), "parse_mode", p.ParseMode)
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -246,7 +273,7 @@ func (h *Handlers) HandleBroadcastPermission(ctx context.Context, c *ipc.Conn, p
 
 	slog.Info("permission registered", "request_id", p.RequestID, "shim_id", shimID, "tool", p.ToolName, "desc_len", len(p.Description), "preview_len", len(p.InputPreview))
 
-	h.bot.BroadcastPermissionRequest(ctx, p.RequestID, p.ToolName)
+	h.bot.BroadcastPermissionRequest(ctx, h.textPrefixFor(c), p.RequestID, p.ToolName)
 
 	return map[string]any{}, nil
 }

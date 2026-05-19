@@ -459,7 +459,7 @@ func TestBroadcastPermissionRequest(t *testing.T) {
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42", "99"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	b.BroadcastPermissionRequest(t.Context(), "abcde", "Bash")
+	b.BroadcastPermissionRequest(t.Context(), "", "abcde", "Bash")
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 2)
@@ -470,13 +470,51 @@ func TestBroadcastPermissionRequest(t *testing.T) {
 	}
 }
 
+func TestBroadcastPermissionRequest_withPrefix(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	b.BroadcastPermissionRequest(t.Context(), "@s1: ", "abcde", "Bash")
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "@s1: 🔐 Permission: Bash", calls[0].params["text"])
+}
+
 func TestBroadcastPermissionRequest_skipsBadChatID(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42", "not-a-number"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	b.BroadcastPermissionRequest(t.Context(), "abcde", "Bash")
+	b.BroadcastPermissionRequest(t.Context(), "", "abcde", "Bash")
 	assert.Len(t, api.recordedCalls("sendMessage"), 1)
+}
+
+func TestSendFile_caption(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	p := filepath.Join(dir, "pic.png")
+	require.NoError(t, os.WriteFile(p, []byte("img"), 0o644))
+
+	_, err := b.SendFile(t.Context(), "42", p, SendOpts{Caption: "@s1"})
+	require.NoError(t, err)
+
+	calls := api.recordedCalls("sendPhoto")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "@s1", calls[0].params["caption"])
+}
+
+func TestSendFile_documentCaption(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	p := filepath.Join(dir, "data.bin")
+	require.NoError(t, os.WriteFile(p, []byte("bin"), 0o644))
+
+	_, err := b.SendFile(t.Context(), "42", p, SendOpts{Caption: "@s2"})
+	require.NoError(t, err)
+
+	calls := api.recordedCalls("sendDocument")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "@s2", calls[0].params["caption"])
 }
 
 // ===== handleCommand =====

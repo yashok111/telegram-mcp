@@ -50,6 +50,9 @@ type PermissionDetails struct {
 type SendOpts struct {
 	ReplyTo   int
 	ParseMode string
+	// Caption is rendered under photo/document uploads when non-empty.
+	// Ignored by SendMessage and EditMessage.
+	Caption string
 }
 
 // Permission-reply spec from the TS plugin: 5 lowercase letters a-z minus 'l'.
@@ -1031,6 +1034,10 @@ func (b *Bot) SendFile(ctx context.Context, chatID, path string, opts SendOpts) 
 			p = p.WithReplyParameters(&telego.ReplyParameters{MessageID: opts.ReplyTo})
 		}
 
+		if opts.Caption != "" {
+			p = p.WithCaption(opts.Caption)
+		}
+
 		m, err := b.api.SendPhoto(ctx, p)
 		if err != nil {
 			slog.Error("Telegram sendPhoto failed", "chat_id", id, "path", path, "err", err)
@@ -1045,6 +1052,10 @@ func (b *Bot) SendFile(ctx context.Context, chatID, path string, opts SendOpts) 
 	p := tu.Document(tu.ID(id), tu.File(f))
 	if opts.ReplyTo > 0 {
 		p = p.WithReplyParameters(&telego.ReplyParameters{MessageID: opts.ReplyTo})
+	}
+
+	if opts.Caption != "" {
+		p = p.WithCaption(opts.Caption)
 	}
 
 	m, err := b.api.SendDocument(ctx, p)
@@ -1109,10 +1120,12 @@ func (b *Bot) DownloadFile(ctx context.Context, fileID string) (string, error) {
 }
 
 // BroadcastPermissionRequest fans an inline-keyboard prompt to every
-// allowlisted DM. Called by mcp.Server.SendPermissionRequest.
-func (b *Bot) BroadcastPermissionRequest(ctx context.Context, requestID, toolName string) {
+// allowlisted DM. Called by mcp.Server.SendPermissionRequest. The prefix is
+// prepended verbatim (e.g. "@s1: ") so DM recipients can tell which session
+// asked; pass "" to disable.
+func (b *Bot) BroadcastPermissionRequest(ctx context.Context, prefix, requestID, toolName string) {
 	st := b.store.Load()
-	text := "🔐 Permission: " + toolName
+	text := prefix + "🔐 Permission: " + toolName
 	keyboard := tu.InlineKeyboard(
 		tu.InlineKeyboardRow(
 			tu.InlineKeyboardButton("✅ Allow").WithCallbackData("perm:allow:"+requestID),

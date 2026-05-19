@@ -27,3 +27,12 @@ func (r *Router) ResolveAlias(alias string) (*Shim, bool) {
 
 	return s, ok
 }
+
+// AliasForShim returns the alias bound to shimID, or "" when the shim is not
+// registered. Read-lock only; safe to call from handler paths.
+func (r *Router) AliasForShim(shimID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.shimAlias[shimID]
+}
