@@ -260,6 +260,7 @@ when present and silently dropped otherwise.
 - **IPC reconnect drops in-flight calls** — `botadapter` waits briefly for the reconnect to land, but a long disconnection surfaces `daemon unavailable` to the MCP tool caller. The daemon-side response was lost; the user will see the tool error and can retry.
 - **Session file race** — `telegram-mcp self --hook` can fire before `shim.Wire()` writes `sessions/<cc_pid>.json`. It must print a fallback and exit 0; never abort the CC session. The session file is removed on shim exit, so its absence after that is correct, not an error.
 - **PR_SET_PDEATHSIG only on shim** — `cmd/server/main.go:bindParentDeath` skips it in daemon mode (#3 / commit 50c8773). The daemon's parent is systemd or the original shim's grandparent shell, and dying with either is wrong.
+- **Headless `systemd --user` needs `loginctl enable-linger`** — when telegram-mcp runs as a user unit on a server you only reach over ssh, systemd-logind tears down the user manager (and every `--user` service, including `telegram-mcp.service`) seconds after the last login session closes. Daemon shutdown runs `defer spawnRunner.Stop()` which cancels every live `/spawn` — symptom in `daemon.log` is `"ipc server stopping"` followed by `"shim disconnected"` for the spawn's shim, with no preceding `"idle timer started"` or user `/spawn cancel`. Cross-check `journalctl -S ... | grep "session closed"` and `loginctl show-user $USER | grep Linger`. Fix: `loginctl enable-linger <user>` (instructions in `contrib/systemd/README.md`).
 
 ## Skills
 
