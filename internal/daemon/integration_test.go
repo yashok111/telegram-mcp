@@ -21,9 +21,11 @@ import (
 )
 
 type tgFake struct {
-	mu        sync.Mutex
-	sends     []map[string]any
-	nextMsgID int
+	mu          sync.Mutex
+	sends       []map[string]any
+	chatActions []map[string]any
+	reactions   []map[string]any
+	nextMsgID   int
 }
 
 func (t *tgFake) handler() http.Handler {
@@ -52,6 +54,18 @@ func (t *tgFake) handler() http.Handler {
 			t.nextMsgID++
 
 			_, _ = fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%d,"date":1,"chat":{"id":1,"type":"private"}}}`, id)
+		case "sendChatAction":
+			body := map[string]any{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			t.chatActions = append(t.chatActions, body)
+
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		case "setMessageReaction":
+			body := map[string]any{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			t.reactions = append(t.reactions, body)
+
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 		case "getUpdates":
 			time.Sleep(50 * time.Millisecond)
 
@@ -60,6 +74,20 @@ func (t *tgFake) handler() http.Handler {
 			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 		}
 	})
+}
+
+func (t *tgFake) chatActionCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return len(t.chatActions)
+}
+
+func (t *tgFake) reactionCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return len(t.reactions)
 }
 
 type integrationFixture struct {
@@ -87,7 +115,7 @@ func newIntegration(t *testing.T) *integrationFixture {
 	ts := httptest.NewServer(tg.handler())
 
 	router := NewRouter()
-	notifier := NewNotifier(router)
+	notifier := NewNotifier(router, store, nil)
 
 	tgBot, err := bot.NewFromAPIWithRouter("1234567890:AAH00000000000000000000000000000000", store, notifier, ts.URL, nil)
 	require.NoError(t, err)
@@ -307,7 +335,7 @@ func TestIntegrationMentionDispatchHitsTarget(t *testing.T) {
 	target, ok := f.router.ResolveAlias("s2")
 	require.True(t, ok)
 
-	n := NewNotifier(f.router)
+	n := NewNotifier(f.router, nil, nil)
 	n.DeliverInbound("@s2 hello", map[string]string{"chat_id": "123", "user": "tester"})
 
 	require.Eventually(t, func() bool {
@@ -351,7 +379,7 @@ func TestIntegrationAtAllBroadcasts(t *testing.T) {
 		mu.Unlock()
 	})
 
-	n := NewNotifier(f.router)
+	n := NewNotifier(f.router, nil, nil)
 	n.DeliverInbound("@all status", map[string]string{"chat_id": "123", "user": "tester"})
 
 	require.Eventually(t, func() bool {
@@ -384,7 +412,7 @@ func TestIntegrationMentionDoesNotChangeOwnership(t *testing.T) {
 		return ok && owner.ID == idA
 	}, time.Second, 20*time.Millisecond, "shim A must own chat 123 after its first outbound")
 
-	n := NewNotifier(f.router)
+	n := NewNotifier(f.router, nil, nil)
 	n.DeliverInbound("@s2 ping", map[string]string{"chat_id": "123", "user": "tester"})
 
 	owner, ok := f.router.RouteInbound("123")
@@ -506,7 +534,7 @@ func TestIntegrationReplyRoutesToOriginalSender(t *testing.T) {
 		return ok && owner.ID == idB
 	}, time.Second, 20*time.Millisecond, "B owns chat 123 after its second outbound (last-writer-wins)")
 
-	n := NewNotifier(f.router)
+	n := NewNotifier(f.router, nil, nil)
 	n.DeliverInbound("reply to A", map[string]string{
 		"chat_id":             "123",
 		"user":                "tester",
@@ -561,7 +589,7 @@ func TestIntegrationReplyToUnknownMessageFallsThroughToOwner(t *testing.T) {
 		return ok && owner.ID == idB
 	}, time.Second, 20*time.Millisecond, "B owns chat 123")
 
-	n := NewNotifier(f.router)
+	n := NewNotifier(f.router, nil, nil)
 	n.DeliverInbound("reply text", map[string]string{
 		"chat_id":             "123",
 		"reply_to_message_id": "9999",
@@ -613,7 +641,7 @@ func TestIntegrationReplyAfterSenderDroppedFallsThrough(t *testing.T) {
 		return f.router.ConnectedCount() == 1
 	}, time.Second, 20*time.Millisecond, "A drop must propagate to router")
 
-	n := NewNotifier(f.router)
+	n := NewNotifier(f.router, nil, nil)
 	n.DeliverInbound("reply to dropped A", map[string]string{
 		"chat_id":             "123",
 		"reply_to_message_id": "42",

@@ -381,6 +381,21 @@ func TestReact_invalidChatID(t *testing.T) {
 	assert.Error(t, b.React(t.Context(), "bad", 1, "👍"))
 }
 
+func TestSendChatAction(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	require.NoError(t, b.SendChatAction(t.Context(), "42", "typing"))
+
+	calls := api.recordedCalls("sendChatAction")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "typing", calls[0].params["action"])
+	assert.Contains(t, payloadString(calls[0].params), `"chat_id":42`)
+}
+
+func TestSendChatAction_invalidChatID(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{})
+	assert.Error(t, b.SendChatAction(t.Context(), "bad", "typing"))
+}
+
 func TestDownloadFile_writesToInbox(t *testing.T) {
 	b, api, dir := newTestBot(t, access.State{})
 

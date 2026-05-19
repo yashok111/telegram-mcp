@@ -212,7 +212,7 @@ when present and silently dropped otherwise.
 - `internal/daemon/integration_test.go` runs the full triangle: real `ipc.Server`, two real `Shim`s, a fake `botSurface`, and the real `Router`. Exercises reply/mention/affinity routing end-to-end.
 - Tests use `t.TempDir()` + `t.Setenv()` exclusively — no `os.Setenv` survives across tests.
 
-**Coverage (414 tests, ~84% project LOC):** chunk 100% · access 91% · bot 89% · daemon 87% · mcp 85% · ipc 81% · shim 72% · cmd/server 45%. The cmd/server gap is `main.run()` wiring (subprocess execution to cover) and `Bot.Poll()` (live Telegram). Not worth the scaffolding. Re-check with `go test -count=1 -cover ./...` before claiming a coverage change.
+**Coverage (788 tests, ~84% project LOC):** chunk 100% · access 91% · bot 89% · daemon 87% · mcp 85% · ipc 81% · shim 72% · cmd/server 45%. The cmd/server gap is `main.run()` wiring (subprocess execution to cover) and `Bot.Poll()` (live Telegram). Not worth the scaffolding. Re-check with `go test -count=1 -cover ./...` before claiming a coverage change.
 
 ## Rules
 

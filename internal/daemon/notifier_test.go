@@ -35,7 +35,7 @@ func TestNotifierDeliverInboundUsesChatOwner(t *testing.T) {
 	r.Register(newCapturingShim("b", &bSink))
 	r.RecordOutbound("a", "chat-1", 0)
 
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 	n.DeliverInbound("hi", map[string]string{"chat_id": "chat-1", "user": "alice"})
 
 	require.Len(t, aSink, 1)
@@ -51,7 +51,7 @@ func TestNotifierDeliverInboundFallsBackToLRA(t *testing.T) {
 	r.Register(newCapturingShim("a", &aSink))
 	r.Register(newCapturingShim("b", &bSink))
 
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 	n.DeliverInbound("hi", map[string]string{"chat_id": "unknown"})
 
 	assert.Len(t, aSink, 1, "no pin/owner, both at zero — LRA lex tie-break picks a")
@@ -60,7 +60,7 @@ func TestNotifierDeliverInboundFallsBackToLRA(t *testing.T) {
 
 func TestNotifierDeliverInboundDropsWhenNoShim(_ *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 
 	// Must not panic.
 	n.DeliverInbound("hi", map[string]string{"chat_id": "x"})
@@ -73,7 +73,7 @@ func TestNotifierLookupPermission(t *testing.T) {
 		ToolName: "Bash", Description: "run", InputPreview: "ls -la",
 	}))
 
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 	d, ok := n.LookupPermission("xyzab")
 	require.True(t, ok)
 	assert.Equal(t, bot.PermissionDetails{ToolName: "Bash", Description: "run", InputPreview: "ls -la"}, d)
@@ -87,7 +87,7 @@ func TestNotifierResolvePermissionRoutesAndRemoves(t *testing.T) {
 	r.Register(newCapturingShim("a", &sink))
 	require.NoError(t, r.RegisterPermission("xyzab", "a", PermDetails{}))
 
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 	n.ResolvePermission("xyzab", "allow")
 
 	require.Len(t, sink, 1)
@@ -99,13 +99,13 @@ func TestNotifierResolvePermissionRoutesAndRemoves(t *testing.T) {
 
 func TestNotifierResolveUnknownIsNoop(_ *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 	n.ResolvePermission("nope", "deny") // must not panic
 }
 
 func TestDeliverInboundDispatchesToEveryTargetOnBroadcast(t *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 
 	var (
 		mu        sync.Mutex
@@ -138,7 +138,7 @@ func TestDeliverInboundDispatchesToEveryTargetOnBroadcast(t *testing.T) {
 
 func TestDeliverInboundRoutesByReplyOverOwner(t *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 
 	var aSink, bSink []capturedNotify
 
@@ -159,7 +159,7 @@ func TestDeliverInboundRoutesByReplyOverOwner(t *testing.T) {
 
 func TestDeliverInboundReplyMissFallsThroughToOwner(t *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 
 	var aSink, bSink []capturedNotify
 
@@ -179,7 +179,7 @@ func TestDeliverInboundReplyMissFallsThroughToOwner(t *testing.T) {
 
 func TestDeliverInboundMalformedReplyHeaderIsIgnored(t *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 
 	var aSink []capturedNotify
 
@@ -202,7 +202,7 @@ func TestDeliverInboundMalformedReplyHeaderIsIgnored(t *testing.T) {
 // would time out.
 func TestDeliverInboundParallelDispatchDoesNotSerializeOnRouterLock(t *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 
 	startedA := make(chan struct{}, 1)
 	startedB := make(chan struct{}, 1)
@@ -250,7 +250,7 @@ func TestDeliverInboundParallelDispatchDoesNotSerializeOnRouterLock(t *testing.T
 
 func TestDeliverInboundDispatchesToMentionTargetOnly(t *testing.T) {
 	r := NewRouter()
-	n := NewNotifier(r)
+	n := NewNotifier(r, nil, nil)
 
 	var (
 		mu        sync.Mutex

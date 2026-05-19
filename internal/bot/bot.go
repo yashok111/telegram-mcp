@@ -385,10 +385,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 	}
 
 	// Typing indicator — best-effort, expires after ~5s on Telegram's side.
-	_ = b.api.SendChatAction(ctx, &telego.SendChatActionParams{
-		ChatID: tu.ID(msg.Chat.ID),
-		Action: "typing",
-	})
+	// The daemon's TypingTracker refreshes this while the agent is still working.
+	_ = b.SendChatAction(ctx, chatID, "typing")
 
 	if st.AckReaction != "" {
 		_ = b.setReaction(ctx, chatID, msgID, st.AckReaction)
@@ -1098,6 +1096,21 @@ func (b *Bot) EditMessage(ctx context.Context, chatID string, messageID int, tex
 
 func (b *Bot) React(ctx context.Context, chatID string, messageID int, emoji string) error {
 	return b.setReaction(ctx, chatID, messageID, emoji)
+}
+
+// SendChatAction posts a transient activity indicator (e.g. "typing") to the
+// chat. Telegram displays it for roughly 5s, so the daemon's TypingTracker
+// refreshes it on a 4s cadence while a shim is still composing a response.
+func (b *Bot) SendChatAction(ctx context.Context, chatID, action string) error {
+	id, err := parseChatID(chatID)
+	if err != nil {
+		return fmt.Errorf("parse chat id: %w", err)
+	}
+
+	return b.api.SendChatAction(ctx, &telego.SendChatActionParams{
+		ChatID: tu.ID(id),
+		Action: action,
+	})
 }
 
 func (b *Bot) setReaction(ctx context.Context, chatID string, messageID int, emoji string) error {
