@@ -177,6 +177,35 @@ func TestDeliverInboundReplyMissFallsThroughToOwner(t *testing.T) {
 	assert.Empty(t, bSink)
 }
 
+func TestDeliverInboundForwardsReplyQuoteMetaUntouched(t *testing.T) {
+	r := NewRouter()
+	n := NewNotifier(r, nil, nil)
+
+	var aSink []capturedNotify
+
+	r.Register(newCapturingShim("a", &aSink))
+	r.RecordOutbound("a", "chat-1", 0)
+
+	in := map[string]string{
+		"chat_id":             "chat-1",
+		"reply_to_message_id": "42",
+		"reply_to_text":       "original message body",
+		"reply_to_from":       "@alice",
+		"reply_to_quote":      "highlighted slice",
+	}
+	n.DeliverInbound("hi", in)
+
+	require.Len(t, aSink, 1)
+	p, ok := aSink[0].params.(map[string]any)
+	require.True(t, ok, "params is map[string]any")
+	meta, ok := p["meta"].(map[string]string)
+	require.True(t, ok, "meta survives as map[string]string")
+	assert.Equal(t, "42", meta["reply_to_message_id"])
+	assert.Equal(t, "original message body", meta["reply_to_text"])
+	assert.Equal(t, "@alice", meta["reply_to_from"])
+	assert.Equal(t, "highlighted slice", meta["reply_to_quote"])
+}
+
 func TestDeliverInboundMalformedReplyHeaderIsIgnored(t *testing.T) {
 	r := NewRouter()
 	n := NewNotifier(r, nil, nil)

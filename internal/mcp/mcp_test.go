@@ -493,6 +493,58 @@ func TestJoinInts(t *testing.T) {
 	assert.Equal(t, "1, 2, 3", joinInts([]int{1, 2, 3}))
 }
 
+// ===== wrapChannel =====
+
+func TestWrapChannel_attrs(t *testing.T) {
+	t.Run("plain inbound", func(t *testing.T) {
+		got := wrapChannel("hi", map[string]string{
+			"chat_id":    "123",
+			"message_id": "7",
+			"user":       "@alice",
+			"ts":         "2026-05-19T20:00:00Z",
+		})
+		assert.Contains(t, got, `chat_id="123"`)
+		assert.Contains(t, got, `message_id="7"`)
+		assert.Contains(t, got, `user="@alice"`)
+		assert.Contains(t, got, `ts="2026-05-19T20:00:00Z"`)
+		assert.NotContains(t, got, "reply_to_")
+	})
+
+	t.Run("quote-reply forwards cited body", func(t *testing.T) {
+		got := wrapChannel("ok", map[string]string{
+			"chat_id":             "123",
+			"message_id":          "8",
+			"user":                "@bob",
+			"reply_to_message_id": "7",
+			"reply_to_text":       "earlier message",
+			"reply_to_from":       "@alice",
+			"reply_to_quote":      "highlighted",
+		})
+		assert.Contains(t, got, `reply_to_message_id="7"`)
+		assert.Contains(t, got, `reply_to_text="earlier message"`)
+		assert.Contains(t, got, `reply_to_from="@alice"`)
+		assert.Contains(t, got, `reply_to_quote="highlighted"`)
+	})
+
+	t.Run("empty values are omitted", func(t *testing.T) {
+		got := wrapChannel("ok", map[string]string{
+			"chat_id":             "1",
+			"reply_to_message_id": "5",
+			"reply_to_text":       "",
+		})
+		assert.Contains(t, got, `reply_to_message_id="5"`)
+		assert.NotContains(t, got, "reply_to_text=")
+	})
+
+	t.Run("special chars in body are escaped", func(t *testing.T) {
+		got := wrapChannel("ok", map[string]string{
+			"chat_id":       "1",
+			"reply_to_text": `she said "hi"` + "\nnewline",
+		})
+		assert.Contains(t, got, `reply_to_text="she said \"hi\"\nnewline"`)
+	})
+}
+
 // ===== DeliverInbound =====
 
 func TestDeliverInbound_doesNotPanicWithoutClients(t *testing.T) {

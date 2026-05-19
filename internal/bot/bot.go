@@ -404,9 +404,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 		"ts":         time.Unix(msg.Date, 0).UTC().Format(time.RFC3339),
 	}
 
-	if msg.ReplyToMessage != nil && msg.ReplyToMessage.MessageID != 0 {
-		meta["reply_to_message_id"] = strconv.Itoa(msg.ReplyToMessage.MessageID)
-	}
+	maps.Copy(meta, replyToMeta(&msg))
 
 	switch {
 	case msg.Photo != nil:
@@ -459,6 +457,38 @@ func classifyMessageKind(msg *telego.Message) string {
 	default:
 		return "other"
 	}
+}
+
+// replyToMeta extracts cited-message context when the inbound is a quote-reply.
+// Returns an empty (never nil) map when there is no reply, so callers can
+// unconditionally maps.Copy. Quote is only honored alongside a real
+// ReplyToMessage — Telegram never sets Quote without one, but the guard keeps
+// the rendered <channel> tag coherent if that ever changes.
+func replyToMeta(msg *telego.Message) map[string]string {
+	out := map[string]string{}
+	if msg.ReplyToMessage == nil || msg.ReplyToMessage.MessageID == 0 {
+		return out
+	}
+
+	r := msg.ReplyToMessage
+	out["reply_to_message_id"] = strconv.Itoa(r.MessageID)
+
+	switch {
+	case r.Text != "":
+		out["reply_to_text"] = r.Text
+	case r.Caption != "":
+		out["reply_to_text"] = r.Caption
+	}
+
+	if from := senderLabel(r.From, r.SenderChat); from != "" {
+		out["reply_to_from"] = from
+	}
+
+	if msg.Quote != nil && msg.Quote.Text != "" {
+		out["reply_to_quote"] = msg.Quote.Text
+	}
+
+	return out
 }
 
 func attachmentMeta(msg *telego.Message) map[string]string {
@@ -1168,6 +1198,39 @@ func (b *Bot) BroadcastPermissionRequest(ctx context.Context, prefix, requestID,
 			slog.Error("permission_request send failed", "chat_id", dm, "err", err)
 		}
 	}
+}
+
+// groupAnonymousBotID is Telegram's well-known stand-in user that authors all
+// anonymous-admin group messages. For those messages SenderChat carries the
+// real identity (the group), so senderLabel routes through to it instead of
+// surfacing the literal "@GroupAnonymousBot" tag.
+const groupAnonymousBotID int64 = 1087968824
+
+// senderLabel resolves a message's display source. Falls back to SenderChat
+// when From is nil, empty, or is the GroupAnonymousBot stand-in — covers
+// channel posts (no From, SenderChat names the channel) and anonymous group
+// admins (From is GroupAnonymousBot, SenderChat is the group). Without this
+// fallback reply_to_from would silently disappear or be uselessly tagged.
+func senderLabel(u *telego.User, c *telego.Chat) string {
+	if u != nil && u.ID != groupAnonymousBotID {
+		if label := userLabel(u); label != "" {
+			return label
+		}
+	}
+
+	if c == nil {
+		return ""
+	}
+
+	if c.Username != "" {
+		return "@" + c.Username
+	}
+
+	if c.Title != "" {
+		return c.Title
+	}
+
+	return strconv.FormatInt(c.ID, 10)
 }
 
 func userLabel(u *telego.User) string {
