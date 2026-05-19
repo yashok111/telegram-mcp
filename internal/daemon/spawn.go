@@ -36,6 +36,12 @@ type SpawnConfig struct {
 	DefaultWorkdir     string
 	RatePerHourPerUser int
 
+	// IdleTimeout cancels a spawn whose paired shim has gone idle for longer
+	// than this, freeing the parallel slot. =0 disables the sweep.
+	// Spawns whose shim never connects within IdleTimeout of StartedAt are
+	// treated as orphans and cancelled by the same sweep.
+	IdleTimeout time.Duration
+
 	// ClaudeBin is the executable spawned for each /spawn invocation; defaults
 	// to "claude" but operators can point it at a wrapper script.
 	ClaudeBin string
@@ -50,6 +56,7 @@ func DefaultSpawnConfig() SpawnConfig {
 	return SpawnConfig{
 		MaxParallel:        3,
 		HardTimeout:        24 * time.Hour,
+		IdleTimeout:        4 * time.Hour,
 		RatePerHourPerUser: 5,
 		ClaudeBin:          "claude",
 		ClaudeArgs:         []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"},
@@ -98,6 +105,27 @@ func (execSpawnCommander) Start(ctx context.Context, workdir, bin string, args, 
 	// loop exits on Close (master fd closed) via io.EOF.
 	go func() { _, _ = io.Copy(io.Discard, p) }()
 
+	// Press Enter into the pty a handful of times to dismiss claude's
+	// `--dangerously-load-development-channels` consent prompt (default option
+	// "1. I am using this for local development" is preselected). Without
+	// this the spawned CC sits at the consent screen forever, the telegram
+	// plugin never loads, and no shim ever connects back to the daemon.
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for range 6 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := p.Write([]byte("\r")); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	return &execSpawnProcess{cmd: cmd, pty: p}, nil
 }
 
@@ -144,14 +172,20 @@ type spawnTask struct {
 // the daemon then routes via @sN mentions / reply-rings / chat affinity like
 // any user-launched session. SpawnRunner ONLY owns the subprocess lifecycle
 // (PID tracking, MaxParallel, Cancel via SIGTERM, hard timeout).
+// IdleLookup reports the idle duration for the shim currently paired with
+// spawnID. ok=false means no shim is registered with that spawn_id, in which
+// case the sweeper falls back to time-since-StartedAt to detect orphans.
+type IdleLookup func(spawnID string) (idle time.Duration, ok bool)
+
 type SpawnRunner struct {
 	cfg SpawnConfig
 	bot botSurface
 	cmd SpawnCommander
 
-	mu      sync.Mutex
-	tasks   map[string]*spawnTask
-	perUser map[string][]time.Time
+	mu         sync.Mutex
+	tasks      map[string]*spawnTask
+	perUser    map[string][]time.Time
+	idleLookup IdleLookup
 }
 
 var (
@@ -209,6 +243,91 @@ func (r *SpawnRunner) List() []bot.SpawnTaskInfo {
 	}
 
 	return out
+}
+
+// SetIdleLookup wires the per-spawn idle-time lookup used by Run's sweep.
+// Pass nil to disable the lookup (orphan detection via StartedAt still applies).
+func (r *SpawnRunner) SetIdleLookup(fn IdleLookup) {
+	r.mu.Lock()
+	r.idleLookup = fn
+	r.mu.Unlock()
+}
+
+// Run is the idle-timeout sweeper. Every minute it cancels any spawn whose
+// paired shim has been idle past IdleTimeout, or whose shim never connected
+// within IdleTimeout of StartedAt (orphan). Returns immediately when
+// IdleTimeout <= 0. Caller is responsible for ctx.Done() — typically run as
+// `go r.Run(ctx)` from the daemon's lifecycle wiring.
+func (r *SpawnRunner) Run(ctx context.Context) {
+	if r.cfg.IdleTimeout <= 0 {
+		return
+	}
+
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.sweepIdle(time.Now())
+		}
+	}
+}
+
+// sweepIdle inspects every live task and cancels those whose paired shim is
+// idle past IdleTimeout, or whose StartedAt is older than IdleTimeout with no
+// shim ever registered. Lock is held only while collecting victims; the
+// cancel calls fan out after the unlock to avoid holding mu across runSpawn
+// cleanup which itself takes mu via releaseSlot.
+func (r *SpawnRunner) sweepIdle(now time.Time) {
+	threshold := r.cfg.IdleTimeout
+	if threshold <= 0 {
+		return
+	}
+
+	type victim struct {
+		id     string
+		cancel func()
+		idle   time.Duration
+		orphan bool
+	}
+
+	r.mu.Lock()
+	lookup := r.idleLookup
+
+	victims := make([]victim, 0, len(r.tasks))
+	for id, t := range r.tasks {
+		var (
+			idle   time.Duration
+			paired bool
+		)
+
+		if lookup != nil {
+			idle, paired = lookup(id)
+		}
+
+		if !paired {
+			// No shim registered for this spawn — measure from StartedAt so
+			// claudes that crashed pre-hello (or never managed to load the
+			// plugin) eventually free their parallel slot.
+			idle = now.Sub(t.info.StartedAt)
+		}
+
+		if idle > threshold {
+			victims = append(victims, victim{
+				id: id, cancel: t.cancel, idle: idle, orphan: !paired,
+			})
+		}
+	}
+	r.mu.Unlock()
+
+	for _, v := range victims {
+		slog.Info("spawn idle-timeout exceeded; cancelling",
+			"spawn_id", v.id, "idle", v.idle.Round(time.Second), "orphan", v.orphan)
+		v.cancel()
+	}
 }
 
 // Stop cancels every live spawn. Daemon shutdown path uses this so spawned
