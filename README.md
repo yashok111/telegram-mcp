@@ -224,18 +224,28 @@ Knobs (env vars, all optional):
 | `TELEGRAM_BG_TIMEOUT`             | `30m`                  | Hard cap per `/bg` task.                 |
 | `TELEGRAM_BG_DEFAULT_WORKDIR`     | `$HOME`                | Fallback for `/bg --in`.                 |
 | `TELEGRAM_BG_RATE_PER_HOUR`       | `10`                   | Per-user `/bg` rate.                     |
-| `TELEGRAM_BG_CLAUDE_BIN`          | `claude`               | `/bg` driver binary.                     |
+| `TELEGRAM_BG_CLAUDE_BIN`          | auto (see below)       | `/bg` driver binary.                     |
 | `TELEGRAM_SPAWN_MAX_PARALLEL`     | `3`                    | Concurrent `/spawn` sessions.            |
 | `TELEGRAM_SPAWN_HARD_TIMEOUT`     | `24h`                  | Absolute cap per spawn.                  |
 | `TELEGRAM_SPAWN_IDLE_TIMEOUT`     | `4h`                   | Idle cap. `0` disables.                  |
 | `TELEGRAM_SPAWN_DEFAULT_WORKDIR`  | `$HOME`                | Fallback for `/spawn --in`.              |
 | `TELEGRAM_SPAWN_RATE_PER_HOUR`    | `5`                    | Per-user `/spawn` rate.                  |
-| `TELEGRAM_SPAWN_CLAUDE_BIN`       | `claude`               | `/spawn` driver binary.                  |
-| `TELEGRAM_SPAWN_CLAUDE_ARGS`      | `--dangerously-load-development-channels plugin:telegram@local-yakov` | Override for non-marketplace plugin names. |
+| `TELEGRAM_SPAWN_CLAUDE_BIN`       | auto (see below)       | `/spawn` driver binary.                  |
+| `TELEGRAM_SPAWN_CLAUDE_ARGS`      | auto (see below)       | Args appended after `…_CLAUDE_BIN`.      |
 
-> `/spawn` defaults assume the telegram plugin is available in your Claude
-> Code marketplace as `plugin:telegram@local-yakov`. If you publish it under a
-> different channel/name, set `TELEGRAM_SPAWN_CLAUDE_ARGS`.
+> **Auto-resolve.** When `TELEGRAM_{SPAWN,BG}_CLAUDE_BIN` is unset the daemon
+> tries `exec.LookPath("claude")` first, then falls back to
+> `~/.nvm/versions/node/*/bin/claude` (newest by mtime) — so the daemon keeps
+> working across Node version bumps and inside systemd-launched processes
+> whose `PATH` lacks the nvm dir. When `TELEGRAM_SPAWN_CLAUDE_ARGS` is unset
+> the daemon scans `~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json`
+> for marketplaces that publish a `telegram` plugin **and** have a corresponding
+> installed-plugin dir at `~/.claude/plugins/data/telegram-<channel>`. The
+> most recently used install wins (by `data/` mtime — `marketplace.json` mtime
+> is unreliable because Claude Code background-refreshes manifests). The
+> resolved value is logged at daemon startup as `"spawn claude args resolved"`.
+> Set the env var explicitly if you need to pin a specific channel or pass
+> different flags.
 
 ---
 
