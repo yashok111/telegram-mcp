@@ -73,7 +73,7 @@ A single Telegram message can be routed by:
 ### 1. Build
 
 ```bash
-git clone https://github.com/yakov/telegram-mcp.git
+git clone https://github.com/yashok111/telegram-mcp.git
 cd telegram-mcp
 make build         # → bin/telegram-mcp
 ```

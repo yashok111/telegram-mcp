@@ -1,6 +1,6 @@
 [Unit]
 Description=telegram-mcp — Telegram channel for Claude Code (Go)
-Documentation=https://github.com/yakov/telegram-mcp
+Documentation=https://github.com/yashok111/telegram-mcp
 After=network-online.target
 Wants=network-online.target
 
