@@ -420,6 +420,126 @@ func TestSpawnRunner_ListReflectsActiveSpawns(t *testing.T) {
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
 }
 
+func TestSpawnRunner_SweepIdle_CancelsWhenPairedShimIdleExceeds(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{
+		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
+	})
+
+	id, err := r.reserveSlot("u")
+	require.NoError(t, err)
+
+	cancelled := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
+	r.mu.Unlock()
+
+	r.SetIdleLookup(func(string) (time.Duration, bool) { return 2 * time.Hour, true })
+
+	r.sweepIdle(time.Now())
+
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("idle-exceeded spawn must be cancelled")
+	}
+}
+
+func TestSpawnRunner_SweepIdle_PairedShimUnderThresholdSurvives(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{
+		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
+	})
+
+	id, err := r.reserveSlot("u")
+	require.NoError(t, err)
+
+	cancelled := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
+	r.mu.Unlock()
+
+	r.SetIdleLookup(func(string) (time.Duration, bool) { return 10 * time.Minute, true })
+
+	r.sweepIdle(time.Now())
+
+	select {
+	case <-cancelled:
+		t.Fatal("non-idle paired spawn must not be cancelled")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSpawnRunner_SweepIdle_OrphanCancelledAfterGrace(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{
+		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
+	})
+
+	id, err := r.reserveSlot("u")
+	require.NoError(t, err)
+
+	cancelled := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.tasks[id].info.StartedAt = time.Now().Add(-2 * time.Hour)
+	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
+	r.mu.Unlock()
+
+	r.SetIdleLookup(func(string) (time.Duration, bool) { return 0, false })
+
+	r.sweepIdle(time.Now())
+
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("orphan spawn past IdleTimeout must be cancelled")
+	}
+}
+
+func TestSpawnRunner_SweepIdle_OrphanInsideGraceSurvives(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{
+		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
+	})
+
+	id, err := r.reserveSlot("u")
+	require.NoError(t, err)
+
+	cancelled := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.tasks[id].info.StartedAt = time.Now()
+	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
+	r.mu.Unlock()
+
+	r.SetIdleLookup(func(string) (time.Duration, bool) { return 0, false })
+
+	r.sweepIdle(time.Now())
+
+	select {
+	case <-cancelled:
+		t.Fatal("freshly-started spawn without shim yet must survive")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSpawnRunner_Run_ZeroIdleTimeoutReturnsImmediately(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{
+		MaxParallel: 1, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: 0,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run must return immediately when IdleTimeout <= 0")
+	}
+}
+
 func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
 
 func indexOf(s, sub string) int {

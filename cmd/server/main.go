@@ -136,6 +136,21 @@ func runDaemon(stateDir string) error {
 	spawnRunner := daemonpkg.NewSpawnRunnerWithDeps(loadSpawnConfig(), tgBot, daemonpkg.NewExecSpawnCommander())
 	tgBot.SetSpawnRunner(spawnRunner)
 
+	// IdleLookup walks the live Router snapshot to find the shim paired with a
+	// given spawn_id. Used by SpawnRunner.Run to enforce TELEGRAM_SPAWN_IDLE_TIMEOUT.
+	spawnRunner.SetIdleLookup(func(spawnID string) (time.Duration, bool) {
+		now := time.Now()
+		for _, s := range router.Snapshot() {
+			if s.SpawnID == spawnID {
+				return s.IdleFor(now), true
+			}
+		}
+
+		return 0, false
+	})
+
+	go spawnRunner.Run(ctx)
+
 	defer spawnRunner.Stop()
 
 	idleSecs, _ := strconv.Atoi(os.Getenv("TELEGRAM_DAEMON_IDLE_EXIT"))
@@ -390,9 +405,11 @@ func loadBgConfig() daemonpkg.BgConfig {
 
 // loadSpawnConfig folds env vars into a SpawnConfig. Zero fields keep
 // daemonpkg.NewSpawnRunner's defaults (3 parallel · 24h hard · 5 starts per
-// hour · "claude" binary · telegram plugin args).
+// hour · "claude" binary · telegram plugin args). IdleTimeout defaults to 4h
+// here (not in NewSpawnRunner) so `TELEGRAM_SPAWN_IDLE_TIMEOUT=0` truly
+// disables the sweep instead of silently re-defaulting.
 func loadSpawnConfig() daemonpkg.SpawnConfig {
-	cfg := daemonpkg.SpawnConfig{}
+	cfg := daemonpkg.SpawnConfig{IdleTimeout: 4 * time.Hour}
 
 	if v, err := strconv.Atoi(os.Getenv("TELEGRAM_SPAWN_MAX_PARALLEL")); err == nil && v > 0 {
 		cfg.MaxParallel = v
@@ -403,6 +420,14 @@ func loadSpawnConfig() daemonpkg.SpawnConfig {
 			cfg.HardTimeout = parsed
 		} else {
 			slog.Warn("invalid TELEGRAM_SPAWN_HARD_TIMEOUT, using default", "value", v)
+		}
+	}
+
+	if v := os.Getenv("TELEGRAM_SPAWN_IDLE_TIMEOUT"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed >= 0 {
+			cfg.IdleTimeout = parsed
+		} else {
+			slog.Warn("invalid TELEGRAM_SPAWN_IDLE_TIMEOUT, using default", "value", v)
 		}
 	}
 
