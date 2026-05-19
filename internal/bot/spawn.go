@@ -137,12 +137,12 @@ func (b *Bot) handleSpawnCommand(ctx context.Context, msg telego.Message, runner
 	case SpawnSubHelp:
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), formatSpawnHelpReply()))
 	case SpawnSubList:
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), b.renderSpawnList(runner.List())))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), b.renderSpawnList(runner.List())).WithParseMode("MarkdownV2"))
 	case SpawnSubCancel:
 		if cerr := runner.Cancel(args.TaskID); cerr != nil {
 			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Cancel failed: "+cerr.Error()))
 		} else {
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "🛑 Cancelling spawn "+args.TaskID))
+			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "🛑 Cancelling spawn "+MdCode(args.TaskID)).WithParseMode("MarkdownV2"))
 		}
 	case SpawnSubStart:
 		var userID string
@@ -181,7 +181,7 @@ func formatSpawnHelpReply() string {
 // without hello-handshaking.
 func (b *Bot) renderSpawnList(tasks []SpawnTaskInfo) string {
 	if len(tasks) == 0 {
-		return "No /spawn sessions running."
+		return "No /spawn sessions running\\."
 	}
 
 	aliasByID := map[string]string{}
@@ -200,12 +200,17 @@ func (b *Bot) renderSpawnList(tasks []SpawnTaskInfo) string {
 
 	for _, t := range tasks {
 		alias := aliasByID[t.ID]
+
+		var aliasCell string
 		if alias == "" {
-			alias = "(no shim)"
+			aliasCell = "\\(no shim\\)"
+		} else {
+			aliasCell = MdCode(alias)
 		}
 
-		fmt.Fprintf(&sb, "%s · %s · %s · pid=%d · %s ago · %s\n",
-			t.ID, t.Status, alias, t.Pid, now.Sub(t.StartedAt).Round(time.Second), t.Workdir)
+		fmt.Fprintf(&sb, "%s · %s · %s · pid\\=%s · %s ago · %s\n",
+			MdCode(t.ID), t.Status, aliasCell, MdCode(strconv.Itoa(t.Pid)),
+			now.Sub(t.StartedAt).Round(time.Second), EscapeMarkdownV2(t.Workdir))
 	}
 
 	return strings.TrimRight(sb.String(), "\n")

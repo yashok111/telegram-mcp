@@ -585,7 +585,8 @@ func TestHandleCommand_statusPending(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"], "pair zzzaaa")
+	assert.Contains(t, calls[0].params["text"], "pair `zzzaaa`")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleCommand_statusNotPaired(t *testing.T) {

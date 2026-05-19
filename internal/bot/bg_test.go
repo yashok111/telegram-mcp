@@ -177,9 +177,10 @@ func TestHandleBgCommand_ListEmpty(t *testing.T) {
 
 	b.handleBgCommand(t.Context(), bgMsg("/bg list"), runner)
 
-	texts := sentMessageTexts(api)
-	require.Len(t, texts, 1)
-	assert.Equal(t, "No /bg tasks running.", texts[0])
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "No /bg tasks running\\.", calls[0].params["text"])
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleBgCommand_ListRendersTasks(t *testing.T) {
@@ -191,12 +192,14 @@ func TestHandleBgCommand_ListRendersTasks(t *testing.T) {
 
 	b.handleBgCommand(t.Context(), bgMsg("/bg list"), runner)
 
-	texts := sentMessageTexts(api)
-	require.Len(t, texts, 1)
-	assert.Contains(t, texts[0], "a1 · running")
-	assert.Contains(t, texts[0], "b2 · running")
-	assert.Contains(t, texts[0], "first")
-	assert.Contains(t, texts[0], "second")
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	text, _ := calls[0].params["text"].(string)
+	assert.Contains(t, text, "`a1` · running")
+	assert.Contains(t, text, "`b2` · running")
+	assert.Contains(t, text, "first")
+	assert.Contains(t, text, "second")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleBgCommand_CancelOK(t *testing.T) {
@@ -207,9 +210,11 @@ func TestHandleBgCommand_CancelOK(t *testing.T) {
 
 	assert.Equal(t, []string{"a1"}, runner.cancelCalls)
 
-	texts := sentMessageTexts(api)
-	require.Len(t, texts, 1)
-	assert.Contains(t, texts[0], "🛑 Cancelling task a1")
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	text, _ := calls[0].params["text"].(string)
+	assert.Contains(t, text, "🛑 Cancelling task `a1`")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleBgCommand_CancelUnknown(t *testing.T) {
@@ -237,10 +242,12 @@ func TestHandleBgCommand_StartOK(t *testing.T) {
 	assert.Equal(t, "1", runner.spawnCalls[0].ChatID)
 	assert.Equal(t, "99", runner.spawnCalls[0].UserID)
 
-	texts := sentMessageTexts(api)
-	require.Len(t, texts, 1)
-	assert.Contains(t, texts[0], "📋 Started task abc123")
-	assert.Contains(t, texts[0], "/bg cancel abc123")
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	text, _ := calls[0].params["text"].(string)
+	assert.Contains(t, text, "📋 Started task `abc123`")
+	assert.Contains(t, text, "`/bg cancel abc123`")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleBgCommand_StartRateLimited(t *testing.T) {

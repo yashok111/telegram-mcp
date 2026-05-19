@@ -48,3 +48,13 @@ func EscapeMarkdownV2Code(s string) string {
 
 	return b.String()
 }
+
+// MdCode wraps s in a MarkdownV2 inline-code span — backticks plus the spec's
+// in-code escape (only '\\' and '`'). Telegram renders these as tap-to-copy on
+// iOS/Android, which is the whole point of using it for ids that the user
+// will paste into a follow-up command. Callers MUST send with ParseMode
+// "MarkdownV2" and escape MarkdownV2 specials in the surrounding text — a
+// stray '.' or '-' will trip the Bot API parser regardless of this fragment.
+func MdCode(s string) string {
+	return "`" + EscapeMarkdownV2Code(s) + "`"
+}

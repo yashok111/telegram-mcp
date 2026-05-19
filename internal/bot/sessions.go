@@ -62,27 +62,27 @@ const PinTTL = 30 * time.Minute
 
 func (b *Bot) renderShims(now time.Time) string {
 	if b.router == nil {
-		return "Session switcher is unavailable: no router wired."
+		return "Session switcher is unavailable: no router wired\\."
 	}
 
 	shims := b.router.Snapshot()
 	if len(shims) == 0 {
-		return "No active CC sessions connected to this daemon."
+		return "No active CC sessions connected to this daemon\\."
 	}
 
 	var sb strings.Builder
 
-	fmt.Fprintf(&sb, "🔌 %d active session(s):\n\n", len(shims))
+	fmt.Fprintf(&sb, "🔌 %d active session\\(s\\):\n\n", len(shims))
 
 	for _, s := range shims {
-		label := s.Label
-		if label == "" {
-			label = "(no label)"
+		label := "\\(no label\\)"
+		if s.Label != "" {
+			label = EscapeMarkdownV2(s.Label)
 		}
 
-		wd := s.Workdir
-		if wd == "" {
-			wd = "?"
+		wd := "?"
+		if s.Workdir != "" {
+			wd = EscapeMarkdownV2(s.Workdir)
 		}
 
 		idle := s.IdleFor(now).Truncate(time.Second)
@@ -97,8 +97,8 @@ func (b *Bot) renderShims(now time.Time) string {
 			pinNote = " 📌"
 		}
 
-		fmt.Fprintf(&sb, "• %s [%s] %s%s\n  %s\n  %s ago • %s\n",
-			s.IDPrefix, s.Alias, label, pinNote, wd, idle, state)
+		fmt.Fprintf(&sb, "• %s \\[%s\\] %s%s\n  %s\n  %s ago • %s\n",
+			MdCode(s.IDPrefix), MdCode(s.Alias), label, pinNote, wd, idle, state)
 	}
 
 	return sb.String()
@@ -118,7 +118,7 @@ func (s ShimInfo) IdleFor(now time.Time) time.Duration {
 // any handled outcome so the caller can forward reply verbatim via SendMessage.
 func (b *Bot) handleUseCommand(chatID, text string) (string, bool) {
 	if b.router == nil {
-		return "Session switcher is unavailable: no router wired.", true
+		return "Session switcher is unavailable: no router wired\\.", true
 	}
 
 	rest := strings.TrimSpace(text)
@@ -131,35 +131,36 @@ func (b *Bot) handleUseCommand(chatID, text string) (string, bool) {
 
 	parts := strings.Fields(rest)
 	if len(parts) == 0 {
-		return "Usage: /use <shim_id_prefix>\nFind prefixes via /status or /sessions.", true
+		return "Usage: /use \\<shim\\_id\\_prefix\\>\nFind prefixes via /status or /sessions\\.", true
 	}
 
 	prefix := parts[0]
 
 	info, err := b.router.Pin(chatID, prefix, PinTTL)
 	if err != nil {
-		return fmt.Sprintf("Pin failed: %s.", err.Error()), true
+		return "Pin failed: " + EscapeMarkdownV2(err.Error()) + "\\.", true
 	}
 
-	label := info.Label
-	if label == "" {
-		label = "(no label)"
+	label := "\\(no label\\)"
+	if info.Label != "" {
+		label = EscapeMarkdownV2(info.Label)
 	}
 
-	return fmt.Sprintf("📌 Pinned %s [%s] %s for %s. Your messages route here until pin expires or another session takes over.",
-		info.IDPrefix, info.Alias, label, PinTTL), true
+	// Returned string is MarkdownV2 — caller in bot.go sends with ParseMode "MarkdownV2".
+	return "📌 Pinned " + MdCode(info.IDPrefix) + " \\[" + MdCode(info.Alias) + "\\] " + label +
+		" for " + EscapeMarkdownV2(PinTTL.String()) + "\\. Your messages route here until pin expires or another session takes over\\.", true
 }
 
 // sendSessions renders the inline-keyboard picker for /sessions.
 func (b *Bot) sendSessions(ctx context.Context, msg telego.Message) {
 	if b.router == nil {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Session switcher is unavailable: no router wired."))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Session switcher is unavailable: no router wired\\.").WithParseMode("MarkdownV2"))
 		return
 	}
 
 	shims := b.router.Snapshot()
 	if len(shims) == 0 {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "No active CC sessions connected."))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "No active CC sessions connected\\.").WithParseMode("MarkdownV2"))
 		return
 	}
 
@@ -205,35 +206,35 @@ func (b *Bot) pickIdle(now time.Time) (ShimInfo, bool) {
 func (b *Bot) sendIdle(ctx context.Context, msg telego.Message) {
 	pick, ok := b.pickIdle(time.Now())
 	if !ok {
-		text := "No active CC sessions connected."
+		text := "No active CC sessions connected\\."
 		if b.router == nil {
-			text = "Session switcher is unavailable: no router wired."
+			text = "Session switcher is unavailable: no router wired\\."
 		}
 
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text).WithParseMode("MarkdownV2"))
 
 		return
 	}
 
 	idle := pick.IdleFor(time.Now()).Truncate(time.Second)
 
-	label := pick.Label
-	if label == "" {
-		label = "(no label)"
+	label := "\\(no label\\)"
+	if pick.Label != "" {
+		label = EscapeMarkdownV2(pick.Label)
 	}
 
-	wd := pick.Workdir
-	if wd == "" {
-		wd = "?"
+	wd := "?"
+	if pick.Workdir != "" {
+		wd = EscapeMarkdownV2(pick.Workdir)
 	}
 
-	text := fmt.Sprintf("Most idle: %s [%s] %s\n%s\nIdle for %s.",
-		pick.IDPrefix, pick.Alias, label, wd, idle)
+	text := "Most idle: " + MdCode(pick.IDPrefix) + " \\[" + MdCode(pick.Alias) + "\\] " + label +
+		"\n" + wd + "\nIdle for " + idle.String() + "\\."
 	keyboard := tu.InlineKeyboard(tu.InlineKeyboardRow(
 		tu.InlineKeyboardButton("📌 Use this").WithCallbackData("sess:use:"+pick.IDPrefix),
 		tu.InlineKeyboardButton("❌ Evict").WithCallbackData("sess:kill:"+pick.IDPrefix),
 	))
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text).WithReplyMarkup(keyboard))
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text).WithReplyMarkup(keyboard).WithParseMode("MarkdownV2"))
 }
 
 // handleSessCallback executes the use/kill action carried by a sess: callback.
@@ -277,7 +278,8 @@ func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, ac
 
 		if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
 			_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
-				msg.Text+"\n\n📌 Pinned "+info.IDPrefix+" ["+info.Alias+"] "+label))
+				EscapeMarkdownV2(msg.Text)+"\n\n📌 Pinned "+MdCode(info.IDPrefix)+" \\["+MdCode(info.Alias)+"\\] "+EscapeMarkdownV2(label)).
+				WithParseMode("MarkdownV2"))
 		}
 	case "kill":
 		info, err := b.router.Evict(prefix)
@@ -297,7 +299,8 @@ func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, ac
 
 		if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
 			_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
-				msg.Text+"\n\n❌ Evicted "+info.IDPrefix+" ["+info.Alias+"]"))
+				EscapeMarkdownV2(msg.Text)+"\n\n❌ Evicted "+MdCode(info.IDPrefix)+" \\["+MdCode(info.Alias)+"\\]").
+				WithParseMode("MarkdownV2"))
 		}
 	}
 
@@ -309,7 +312,7 @@ func (b *Bot) handleSessCallback(ctx context.Context, q telego.CallbackQuery, ac
 // picker when ambiguous. Empty text clears the label.
 func (b *Bot) handleLabelCommand(ctx context.Context, msg telego.Message) {
 	if b.router == nil {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Session switcher is unavailable: no router wired."))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Session switcher is unavailable: no router wired\\.").WithParseMode("MarkdownV2"))
 		return
 	}
 
@@ -324,7 +327,7 @@ func (b *Bot) handleLabelCommand(ctx context.Context, msg telego.Message) {
 
 	shims := b.router.Snapshot()
 	if len(shims) == 0 {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "No active CC sessions connected."))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "No active CC sessions connected\\.").WithParseMode("MarkdownV2"))
 		return
 	}
 
@@ -361,13 +364,13 @@ func (b *Bot) applyLabel(ctx context.Context, msg telego.Message, prefix, label 
 		return
 	}
 
-	display := label
-	if display == "" {
-		display = "(no label)"
+	display := "\\(no label\\)"
+	if label != "" {
+		display = EscapeMarkdownV2(label)
 	}
 
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
-		fmt.Sprintf("✅ %s [%s] → %s", info.IDPrefix, info.Alias, display)))
+		"✅ "+MdCode(info.IDPrefix)+" \\["+MdCode(info.Alias)+"\\] → "+display).WithParseMode("MarkdownV2"))
 }
 
 func (b *Bot) stashPendingLabel(chatID, label string) {
@@ -407,9 +410,9 @@ func (b *Bot) takePendingLabel(chatID string) (string, bool) {
 }
 
 func (b *Bot) sendLabelPicker(ctx context.Context, msg telego.Message, label string, shims []ShimInfo) {
-	display := label
-	if display == "" {
-		display = "(no label)"
+	escapedDisplay := "\\(no label\\)"
+	if label != "" {
+		escapedDisplay = EscapeMarkdownV2(label)
 	}
 
 	rows := make([][]telego.InlineKeyboardButton, 0, len(shims))
@@ -427,8 +430,8 @@ func (b *Bot) sendLabelPicker(ctx context.Context, msg telego.Message, label str
 
 	keyboard := tu.InlineKeyboard(rows...)
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
-		fmt.Sprintf("Which session should get label %q? (expires in %s)", display, pendingLabelTTL)).
-		WithReplyMarkup(keyboard))
+		"Which session should get label \\\""+escapedDisplay+"\\\"? \\(expires in "+EscapeMarkdownV2(pendingLabelTTL.String())+"\\)").
+		WithReplyMarkup(keyboard).WithParseMode("MarkdownV2"))
 }
 
 // handleLabelCallback resolves a "sess:label:<prefix>" callback by looking up
@@ -477,7 +480,8 @@ func (b *Bot) handleLabelCallback(ctx context.Context, q telego.CallbackQuery, p
 
 	if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
 		_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
-			msg.Text+"\n\n✅ "+info.IDPrefix+" ["+info.Alias+"] → "+display))
+			EscapeMarkdownV2(msg.Text)+"\n\n✅ "+MdCode(info.IDPrefix)+" \\["+MdCode(info.Alias)+"\\] → "+EscapeMarkdownV2(display)).
+			WithParseMode("MarkdownV2"))
 	}
 
 	return nil

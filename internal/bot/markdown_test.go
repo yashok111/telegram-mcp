@@ -45,3 +45,20 @@ func TestEscapeMarkdownV2Code(t *testing.T) {
 		})
 	}
 }
+
+func TestMdCode(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"empty", "", "``"},
+		{"hex id passthrough", "ff00aa", "`ff00aa`"},
+		{"underscore not escaped inside", "shim_id", "`shim_id`"},
+		{"backtick escaped inside", "a`b", "`a\\`b`"},
+		{"backslash escaped inside", `a\b`, "`a\\\\b`"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, MdCode(tt.in))
+		})
+	}
+}
