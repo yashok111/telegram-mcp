@@ -5,6 +5,7 @@
 .agents/skills/
 .worktrees/
 .claude/
-/docs/
+/docs/*
+!/docs/images/
 *.pid
 *.sock
