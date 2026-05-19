@@ -20,10 +20,14 @@ const (
 )
 
 // rotationEmojis is the cycle daemon walks through for "still thinking"
-// reactions on the user's original inbound message. The first emoji is
-// already placed by bot.handleMessage when access.State.AckReaction is set;
-// the daemon rotates onwards from index 1.
-var defaultRotationEmojis = []string{"👀", "⏳", "💭"}
+// reactions on the user's original inbound message. Only emojis from
+// Telegram's curated bot-reaction allowlist work — calls with any other
+// emoji surface as `Bad Request: REACTION_INVALID` and the indicator gets
+// stuck on the previous frame. Keep this list inside that allowlist.
+//
+// The first emoji is already placed by bot.handleMessage when
+// access.State.AckReaction is set; the daemon rotates onwards from index 1.
+var defaultRotationEmojis = []string{"👀", "🤔", "✍"}
 
 // typingBot is the slice of *bot.Bot the tracker needs. Defined here so
 // the typing package surface is testable with a tiny fake.
