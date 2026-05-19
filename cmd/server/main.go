@@ -8,12 +8,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -409,6 +413,9 @@ func loadBgConfig() daemonpkg.BgConfig {
 
 	if v := os.Getenv("TELEGRAM_BG_CLAUDE_BIN"); v != "" {
 		cfg.ClaudeBin = v
+	} else {
+		cfg.ClaudeBin = resolveClaudeBin()
+		slog.Info("bg claude binary resolved", "bin", cfg.ClaudeBin)
 	}
 
 	return cfg
@@ -452,13 +459,134 @@ func loadSpawnConfig() daemonpkg.SpawnConfig {
 
 	if v := os.Getenv("TELEGRAM_SPAWN_CLAUDE_BIN"); v != "" {
 		cfg.ClaudeBin = v
+	} else {
+		cfg.ClaudeBin = resolveClaudeBin()
+		slog.Info("spawn claude binary resolved", "bin", cfg.ClaudeBin)
 	}
 
 	if v := os.Getenv("TELEGRAM_SPAWN_CLAUDE_ARGS"); v != "" {
 		cfg.ClaudeArgs = strings.Fields(v)
+	} else if spec := resolveSpawnPluginSpec(); spec != "" {
+		cfg.ClaudeArgs = []string{"--dangerously-load-development-channels", spec}
+		slog.Info("spawn claude args resolved", "args", cfg.ClaudeArgs)
 	}
 
 	return cfg
+}
+
+// resolveSpawnPluginSpec scans `~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json`
+// for a marketplace that publishes the `telegram` plugin AND has a corresponding
+// installed-plugin dir at `~/.claude/plugins/data/telegram-<channel>`. Returns
+// `plugin:telegram@<channel>`. Empty result means no installed marketplace
+// matched — caller falls back to the daemon-side default.
+//
+// Multiple installed marketplaces (e.g. a local dev marketplace alongside the
+// official one) are resolved by `data/telegram-<channel>` mtime, which tracks
+// actual plugin usage — marketplace.json mtime is unreliable because CC
+// refreshes marketplace metadata in the background. Ties broken by channel
+// name for determinism. Operators can pin via TELEGRAM_SPAWN_CLAUDE_ARGS.
+func resolveSpawnPluginSpec() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(home, ".claude", "plugins", "marketplaces", "*", ".claude-plugin", "marketplace.json"))
+
+	type candidate struct {
+		channel string
+		usedAt  time.Time
+	}
+
+	var cands []candidate
+
+	for _, p := range matches {
+		b, err := os.ReadFile(p) //nolint:gosec // plugin dir is internal CC state.
+		if err != nil {
+			continue
+		}
+
+		var m struct {
+			Name    string `json:"name"`
+			Plugins []struct {
+				Name string `json:"name"`
+			} `json:"plugins"`
+		}
+
+		if err := json.Unmarshal(b, &m); err != nil || m.Name == "" {
+			continue
+		}
+
+		if !slices.ContainsFunc(m.Plugins, func(pl struct {
+			Name string `json:"name"`
+		}) bool {
+			return pl.Name == "telegram"
+		}) {
+			continue
+		}
+
+		dataDir := filepath.Join(home, ".claude", "plugins", "data", "telegram-"+m.Name)
+
+		info, err := os.Stat(dataDir)
+		if err != nil {
+			continue
+		}
+
+		cands = append(cands, candidate{channel: m.Name, usedAt: info.ModTime()})
+	}
+
+	if len(cands) == 0 {
+		return ""
+	}
+
+	sort.Slice(cands, func(i, j int) bool {
+		if !cands[i].usedAt.Equal(cands[j].usedAt) {
+			return cands[i].usedAt.After(cands[j].usedAt)
+		}
+
+		return cands[i].channel < cands[j].channel
+	})
+
+	return "plugin:telegram@" + cands[0].channel
+}
+
+// resolveClaudeBin finds the `claude` executable when neither
+// TELEGRAM_SPAWN_CLAUDE_BIN nor TELEGRAM_BG_CLAUDE_BIN pins an absolute path.
+// PATH lookup catches the common case (shell-launched daemon with nvm/brew
+// sourced); the nvm-glob fallback catches systemd-launched daemons whose PATH
+// is sanitized and never contains ~/.nvm/versions/node/<v>/bin.
+//
+// Returns "claude" as a last resort so the eventual exec error is the same
+// "executable file not found in $PATH" the operator sees today, just from
+// the spawn site rather than from a bad env var.
+func resolveClaudeBin() string {
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "claude"
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin", "claude"))
+	if len(matches) == 0 {
+		return "claude"
+	}
+
+	// Newest install wins. Lexicographic on "v9.x" vs "v10.x" would invert.
+	sort.Slice(matches, func(i, j int) bool {
+		si, errI := os.Stat(matches[i])
+		sj, errJ := os.Stat(matches[j])
+
+		if errI != nil || errJ != nil {
+			return matches[i] > matches[j]
+		}
+
+		return si.ModTime().After(sj.ModTime())
+	})
+
+	return matches[0]
 }
 
 // routerAdapter adapts daemon.Router to bot.RouterView, converting
