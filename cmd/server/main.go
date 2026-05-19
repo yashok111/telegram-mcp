@@ -128,7 +128,7 @@ func runDaemon(stateDir string) error {
 
 	var typing *daemonpkg.TypingTracker
 	if daemonpkg.TypingEnabled() {
-		typing = daemonpkg.NewTypingTracker(nil, daemonpkg.TypingConfig{TTL: daemonpkg.TypingTTLFromEnv()})
+		typing = daemonpkg.NewTypingTracker(nil, loadTypingConfig())
 	}
 
 	notifier := daemonpkg.NewNotifier(router, store, typing)
@@ -383,6 +383,26 @@ func loadDotEnv(path string) error {
 	}
 
 	return nil
+}
+
+// loadTypingConfig folds the typing-tracker env vars into a TypingConfig.
+// Zero-valued fields keep NewTypingTracker's defaults (refresh / TTL /
+// rotation cadence / built-in emojis). Empty (non-nil) RotationEmojis or
+// DoneEmojiDisabled=true express "explicitly off" so operators can turn the
+// feature off without rebuilding.
+func loadTypingConfig() daemonpkg.TypingConfig {
+	cfg := daemonpkg.TypingConfig{TTL: daemonpkg.TypingTTLFromEnv()}
+
+	if emojis := daemonpkg.TypingRotationEmojisFromEnv(); emojis != nil {
+		cfg.RotationEmojis = emojis
+	}
+
+	if emoji, configured := daemonpkg.TypingDoneEmojiFromEnv(); configured {
+		cfg.DoneEmoji = emoji
+		cfg.DoneEmojiDisabled = emoji == ""
+	}
+
+	return cfg
 }
 
 // loadBgConfig folds env vars into a BgConfig, leaving zero-valued fields so
