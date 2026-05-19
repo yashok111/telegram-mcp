@@ -73,6 +73,7 @@ type Bot struct {
 	store    *access.Store
 	notifier Notifier
 	router   RouterView
+	bgRunner BgRunner
 
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
@@ -89,6 +90,10 @@ type Bot struct {
 	pendingLabelMu sync.Mutex
 	pendingLabel   map[string]pendingLabel
 }
+
+// SetBgRunner wires the background-task spawner. Must be called before Poll;
+// nil-safe so tests and embeddings that don't use /bg can skip the call.
+func (b *Bot) SetBgRunner(r BgRunner) { b.bgRunner = r }
 
 // NewWithRouter is the production constructor: rv carries the active Router
 // owned by the daemon process. Tests that pass nil for rv must avoid the
@@ -162,6 +167,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "idle", Description: "Show the most idle session"},
 				{Command: "rules", Description: "Manage auto-approve permission rules"},
 				{Command: "label", Description: "/label <text> — set session label (empty clears)"},
+				{Command: "bg", Description: "/bg <prompt> [--in <dir>] — fire-and-forget Claude run"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		}); err != nil {
@@ -254,7 +260,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/use <prefix> — pin a specific session\n"+
 				"/idle — show the most idle session\n"+
 				"/rules — list/clear/revoke auto-approve permission rules\n"+
-				"/label <text> — set session label (empty clears)"))
+				"/label <text> — set session label (empty clears)\n"+
+				"/bg <prompt> [--in <dir>] — fire-and-forget Claude run; /bg list, /bg cancel <id>"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
@@ -268,6 +275,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.handleRulesCommand(ctx, msg, st)
 	case "label":
 		b.handleLabelCommand(ctx, msg)
+	case "bg":
+		b.handleBgCommand(ctx, msg, b.bgRunner)
 	}
 
 	return nil
