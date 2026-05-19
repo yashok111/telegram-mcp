@@ -18,6 +18,7 @@ const (
 	metaLabel       = "label"
 	metaWorkdir     = "workdir"
 	metaCCSessionID = "cc_session_id"
+	metaSpawnID     = "spawn_id"
 )
 
 // DaemonVersion is wired in via -ldflags at build time; default suffices for dev.
@@ -73,6 +74,7 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 		Label       string `json:"label"`
 		Workdir     string `json:"workdir"`
 		CCSessionID string `json:"cc_session_id"`
+		SpawnID     string `json:"spawn_id"`
 	}
 
 	_ = json.Unmarshal(params, &p)
@@ -85,11 +87,12 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 	c.Meta.Store(metaLabel, p.Label)
 	c.Meta.Store(metaWorkdir, p.Workdir)
 	c.Meta.Store(metaCCSessionID, p.CCSessionID)
+	c.Meta.Store(metaSpawnID, p.SpawnID)
 
 	slog.Info("hello received",
 		"shim_id", id, "shim_pid", p.ShimPID, "label", p.Label,
 		"workdir", p.Workdir, "cc_session_id", p.CCSessionID,
-		"daemon_version", DaemonVersion)
+		"spawn_id", p.SpawnID, "daemon_version", DaemonVersion)
 
 	return map[string]any{"shim_id": id, "daemon_version": DaemonVersion}, nil
 }

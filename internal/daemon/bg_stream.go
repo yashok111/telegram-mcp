@@ -27,6 +27,11 @@ type StreamEvent struct {
 
 	Tool string
 
+	// SessionID is set on StreamEventInit; carries the CC session_id from the
+	// system/init line so spawned interactive sessions can be referenced for
+	// resume or status display.
+	SessionID string
+
 	OK         bool
 	ResultText string
 	NumTurns   int
@@ -90,6 +95,8 @@ type streamLine struct {
 	Subtype string          `json:"subtype"`
 	Message json.RawMessage `json:"message"`
 
+	SessionID string `json:"session_id"`
+
 	IsError      bool    `json:"is_error"`
 	DurationMs   int     `json:"duration_ms"`
 	NumTurns     int     `json:"num_turns"`
@@ -121,7 +128,7 @@ func parseStreamLine(line string) []StreamEvent {
 	switch head.Type {
 	case "system":
 		if head.Subtype == "init" {
-			return []StreamEvent{{Kind: StreamEventInit}}
+			return []StreamEvent{{Kind: StreamEventInit, SessionID: head.SessionID}}
 		}
 
 		return other

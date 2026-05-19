@@ -70,10 +70,11 @@ type Bot struct {
 	api      *telego.Bot
 	token    string
 	username string
-	store    *access.Store
-	notifier Notifier
-	router   RouterView
-	bgRunner BgRunner
+	store        *access.Store
+	notifier     Notifier
+	router       RouterView
+	bgRunner     BgRunner
+	spawnRunner  SpawnRunner
 
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
@@ -168,6 +169,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "rules", Description: "Manage auto-approve permission rules"},
 				{Command: "label", Description: "/label <text> — set session label (empty clears)"},
 				{Command: "bg", Description: "/bg <prompt> [--in <dir>] — fire-and-forget Claude run"},
+				{Command: "spawn", Description: "/spawn [--in <dir>] — fork a Claude Code session owned by this daemon"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		}); err != nil {
@@ -261,7 +263,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/idle — show the most idle session\n"+
 				"/rules — list/clear/revoke auto-approve permission rules\n"+
 				"/label <text> — set session label (empty clears)\n"+
-				"/bg <prompt> [--in <dir>] — fire-and-forget Claude run; /bg list, /bg cancel <id>"))
+				"/bg <prompt> [--in <dir>] — fire-and-forget Claude run; /bg list, /bg cancel <id>\n"+
+				"/spawn [--in <dir>] — fork a daemon-owned Claude Code client; /spawn list, /spawn cancel <id>"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
@@ -277,6 +280,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.handleLabelCommand(ctx, msg)
 	case "bg":
 		b.handleBgCommand(ctx, msg, b.bgRunner)
+	case "spawn":
+		b.handleSpawnCommand(ctx, msg, b.spawnRunner)
 	}
 
 	return nil

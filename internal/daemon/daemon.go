@@ -77,19 +77,22 @@ func (d *Daemon) Run(ctx context.Context) error {
 		wdStr, _ := wd.(string)
 		cc, _ := c.Meta.Load(metaCCSessionID)
 		ccStr, _ := cc.(string)
+		spawn, _ := c.Meta.Load(metaSpawnID)
+		spawnStr, _ := spawn.(string)
 
 		shim := &Shim{
 			ID:          id,
 			Label:       labelStr,
 			Workdir:     wdStr,
 			CCSessionID: ccStr,
+			SpawnID:     spawnStr,
 			Notify:      c.Notify,
 		}
 		d.Router.Register(shim)
 		m["alias"] = shim.Alias
 
 		slog.Info("shim connected", "shim_id", id, "alias", shim.Alias,
-			"label", labelStr, "workdir", wdStr, "cc_session_id", ccStr)
+			"label", labelStr, "workdir", wdStr, "cc_session_id", ccStr, "spawn_id", spawnStr)
 
 		return m, nil
 	})

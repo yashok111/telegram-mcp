@@ -16,9 +16,20 @@ func TestStreamReader_Init(t *testing.T) {
 	ev, err := r.Next()
 	require.NoError(t, err)
 	assert.Equal(t, StreamEventInit, ev.Kind)
+	assert.Equal(t, "s", ev.SessionID)
 
 	_, err = r.Next()
 	assert.ErrorIs(t, err, io.EOF)
+}
+
+func TestStreamReader_InitWithoutSessionID(t *testing.T) {
+	line := `{"type":"system","subtype":"init","cwd":"/x"}` + "\n"
+	r := NewStreamReader(strings.NewReader(line))
+
+	ev, err := r.Next()
+	require.NoError(t, err)
+	assert.Equal(t, StreamEventInit, ev.Kind)
+	assert.Empty(t, ev.SessionID)
 }
 
 func TestStreamReader_AssistantText(t *testing.T) {
