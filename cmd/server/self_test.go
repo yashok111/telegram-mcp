@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,220 @@ func writeFixtureSession(t *testing.T, dir string, ccPID int) {
 	raw, err := json.Marshal(payload)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, strconv.Itoa(ccPID)+".json"), raw, 0o600))
+}
+
+// writePeerSession writes a session file with caller-provided alias / shim_pid /
+// workdir, so peer-discovery tests can independently control liveness
+// (shim_pid → /proc/<pid> existence) and identity per file.
+func writePeerSession(t *testing.T, dir string, ccPID, shimPID int, alias, workdir string) {
+	t.Helper()
+
+	sessDir := filepath.Join(dir, "sessions")
+	require.NoError(t, os.MkdirAll(sessDir, 0o700))
+
+	payload := map[string]any{
+		"alias":          alias,
+		"shim_id":        alias + "-shimid-fullhex",
+		"shim_id_prefix": alias + "pref",
+		"cc_pid":         ccPID,
+		"shim_pid":       shimPID,
+		"workdir":        workdir,
+		"started_at":     time.Now().UTC().Format(time.RFC3339),
+		"mode":           "shim",
+	}
+
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, strconv.Itoa(ccPID)+".json"), raw, 0o600))
+}
+
+// nonexistentPID returns a PID that is guaranteed to be absent from /proc on
+// Linux: 99_999_999 sits above the default pid_max of 4_194_304, so the kernel
+// never allocates it and /proc/99999999 never exists. Used by tests to fake a
+// crashed-shim session file.
+const nonexistentPID = 99_999_999
+
+// stubAliveSet swaps peerProcAlive to report any pid in the live set as a
+// running telegram-mcp process. The original hook is restored on t.Cleanup,
+// so tests stay isolated.
+func stubAliveSet(t *testing.T, live ...int) {
+	t.Helper()
+
+	livePids := make(map[int]struct{}, len(live))
+	for _, p := range live {
+		livePids[p] = struct{}{}
+	}
+
+	orig := peerProcAlive
+	peerProcAlive = func(pid int) bool {
+		_, ok := livePids[pid]
+
+		return ok
+	}
+
+	t.Cleanup(func() { peerProcAlive = orig })
+}
+
+func TestListLivePeers_skipsOwnPidAndIncludesLivePeer(t *testing.T) {
+	dir := t.TempDir()
+	ownPID := 11111
+	peerShimPID := 22223
+	stubAliveSet(t, peerShimPID)
+
+	writePeerSession(t, dir, ownPID, ownPID+1, "s1", "/home/u/own")
+	writePeerSession(t, dir, 22222, peerShimPID, "s2", "/home/u/peer")
+
+	peers := listLivePeers(dir, ownPID)
+	require.Len(t, peers, 1)
+	assert.Equal(t, "s2", peers[0].Alias)
+	assert.Equal(t, "/home/u/peer", peers[0].Workdir)
+}
+
+func TestListLivePeers_skipsStaleShimPID(t *testing.T) {
+	dir := t.TempDir()
+	aliveShim := 30100
+	stubAliveSet(t, aliveShim)
+
+	writePeerSession(t, dir, 30001, nonexistentPID, "ghost", "/home/u/stale")
+	writePeerSession(t, dir, 30002, aliveShim, "alive", "/home/u/alive")
+
+	peers := listLivePeers(dir, 99999)
+	require.Len(t, peers, 1)
+	assert.Equal(t, "alive", peers[0].Alias)
+}
+
+func TestListLivePeers_skipsRecycledPidNotOurs(t *testing.T) {
+	// Recycled-PID defense: a session file's shim_pid may now be owned by an
+	// unrelated process. peerProcAlive must reject it.
+	dir := t.TempDir()
+	stubAliveSet(t /* no live PIDs at all */)
+
+	writePeerSession(t, dir, 31001, 31002, "recycled", "/home/u/recycled")
+
+	peers := listLivePeers(dir, 99999)
+	assert.Empty(t, peers, "shim_pid not confirmed as telegram-mcp must be excluded")
+}
+
+func TestListLivePeers_skipsCorruptJSON(t *testing.T) {
+	dir := t.TempDir()
+	goodShim := 40100
+	stubAliveSet(t, goodShim)
+
+	sessDir := filepath.Join(dir, "sessions")
+	require.NoError(t, os.MkdirAll(sessDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "bad.json"), []byte("{not json"), 0o600))
+	writePeerSession(t, dir, 40001, goodShim, "good", "/home/u/good")
+
+	peers := listLivePeers(dir, 99999)
+	require.Len(t, peers, 1)
+	assert.Equal(t, "good", peers[0].Alias)
+}
+
+func TestListLivePeers_skipsEmptyAlias(t *testing.T) {
+	dir := t.TempDir()
+	stubAliveSet(t, 50100)
+	writePeerSession(t, dir, 50001, 50100, "", "/home/u/no-alias")
+
+	peers := listLivePeers(dir, 99999)
+	assert.Empty(t, peers)
+}
+
+func TestListLivePeers_skipsInvalidShimPID(t *testing.T) {
+	dir := t.TempDir()
+	stubAliveSet(t /* none */)
+	writePeerSession(t, dir, 51001, 0, "zero-pid", "/home/u/zero")
+	writePeerSession(t, dir, 51002, -1, "neg-pid", "/home/u/neg")
+
+	assert.Empty(t, listLivePeers(dir, 99999))
+}
+
+func TestListLivePeers_missingSessionsDir(t *testing.T) {
+	dir := t.TempDir()
+	assert.Empty(t, listLivePeers(dir, 12345))
+}
+
+func TestListLivePeers_emptySessionsDir(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sessions"), 0o700))
+	assert.Empty(t, listLivePeers(dir, 12345))
+}
+
+func TestListLivePeers_ignoresNonJSONFiles(t *testing.T) {
+	dir := t.TempDir()
+	sessDir := filepath.Join(dir, "sessions")
+	require.NoError(t, os.MkdirAll(sessDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "README"), []byte("scratch"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(sessDir, "subdir.json"), 0o700))
+
+	assert.Empty(t, listLivePeers(dir, 1))
+}
+
+func TestRenderSelfText_appendsPeersLine(t *testing.T) {
+	dir := t.TempDir()
+	ownPID := 70001
+	peerShim := 70100
+	stubAliveSet(t, peerShim)
+
+	writeFixtureSession(t, dir, ownPID)
+	writePeerSession(t, dir, 70002, peerShim, "s2", "/home/u/peer-a")
+
+	got := renderSelfText(dir, func() int { return ownPID })
+	assert.Contains(t, got, "Peers online:")
+	assert.Contains(t, got, "@s2 (/home/u/peer-a)")
+}
+
+func TestRenderSelfText_omitsPeersLineWhenZeroLivePeers(t *testing.T) {
+	dir := t.TempDir()
+	ownPID := 80001
+
+	stubAliveSet(t /* none alive */)
+
+	writeFixtureSession(t, dir, ownPID)
+	writePeerSession(t, dir, 80002, nonexistentPID, "ghost", "/home/u/dead")
+
+	got := renderSelfText(dir, func() int { return ownPID })
+	assert.NotContains(t, got, "Peers online")
+}
+
+func TestRenderSelfText_peersLineListsMultipleSortedByAlias(t *testing.T) {
+	dir := t.TempDir()
+	ownPID := 90001
+	pidA, pidB, pidC := 90100, 90200, 90300
+	stubAliveSet(t, pidA, pidB, pidC)
+
+	writeFixtureSession(t, dir, ownPID)
+	writePeerSession(t, dir, 90010, pidA, "s9", "/home/u/nine")
+	writePeerSession(t, dir, 90020, pidB, "s2", "/home/u/two")
+	writePeerSession(t, dir, 90030, pidC, "s5", "/home/u/five")
+
+	got := renderSelfText(dir, func() int { return ownPID })
+	idx2 := strings.Index(got, "@s2")
+	idx5 := strings.Index(got, "@s5")
+	idx9 := strings.Index(got, "@s9")
+
+	require.NotEqual(t, -1, idx2)
+	require.NotEqual(t, -1, idx5)
+	require.NotEqual(t, -1, idx9)
+	assert.Less(t, idx2, idx5, "@s2 must come before @s5")
+	assert.Less(t, idx5, idx9, "@s5 must come before @s9")
+}
+
+func TestRenderSelfText_noPeersSectionOnFallback(t *testing.T) {
+	dir := t.TempDir()
+	// Own session file missing → fallback message; peer presence must not leak in.
+	stubAliveSet(t, 91100)
+	writePeerSession(t, dir, 91001, 91100, "s2", "/home/u/peer")
+	got := renderSelfText(dir, func() int { return 99000 })
+
+	assert.Contains(t, got, "no shim alias registered")
+	assert.NotContains(t, got, "Peers online")
+}
+
+func TestPeerProcAlive_realLookupOnSelfRejectsTestBinary(t *testing.T) {
+	// Sanity-check the production lookup: it must NOT classify the running
+	// test binary (server.test) as a telegram-mcp process. Catches regressions
+	// where the comm-string match is removed or weakened.
+	assert.False(t, peerProcAlive(os.Getpid()))
 }
 
 func TestRunSelf_textMode_includesAliasAndWorkdir(t *testing.T) {

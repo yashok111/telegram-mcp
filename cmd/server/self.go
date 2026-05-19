@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -136,7 +137,75 @@ func renderSelfText(stateDir string, ccPIDFn func() int) string {
 
 	fmt.Fprintf(&b, "When the user writes \"@%s ...\" in Telegram, that addresses YOU specifically.", info.Alias)
 
+	if peers := listLivePeers(stateDir, ccPID); len(peers) > 0 {
+		slices.SortFunc(peers, func(a, b sessionInfo) int { return strings.Compare(a.Alias, b.Alias) })
+
+		parts := make([]string, 0, len(peers))
+		for _, p := range peers {
+			parts = append(parts, fmt.Sprintf("@%s (%s)", p.Alias, p.Workdir))
+		}
+
+		fmt.Fprintf(&b, "\nPeers online: %s.", strings.Join(parts, ", "))
+	}
+
 	return b.String()
+}
+
+// listLivePeers returns sibling shim sessions registered in <stateDir>/sessions/
+// excluding the caller's own session (matched by ccPID). A peer is considered
+// live when /proc/<shim_pid>/comm reads as "telegram-mcp" — matching the
+// daemon's PID-recycling defense (see internal/daemon/daemon.go:isOurDaemon).
+// Stale files left by a crashed shim, unreadable/corrupt JSON, and recycled
+// PIDs now owned by other processes are all skipped silently. Callers should
+// inspect len() to gate output. Returns nil when the sessions dir is missing.
+func listLivePeers(stateDir string, ownCCPID int) []sessionInfo {
+	entries, err := os.ReadDir(filepath.Join(stateDir, "sessions"))
+	if err != nil {
+		return nil
+	}
+
+	peers := make([]sessionInfo, 0, len(entries))
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+
+		raw, err := os.ReadFile(filepath.Join(stateDir, "sessions", e.Name()))
+		if err != nil {
+			continue
+		}
+
+		var info sessionInfo
+		if err := json.Unmarshal(raw, &info); err != nil {
+			continue
+		}
+
+		if info.CCPID == ownCCPID || info.Alias == "" || info.ShimPID <= 0 {
+			continue
+		}
+
+		if !peerProcAlive(info.ShimPID) {
+			continue
+		}
+
+		peers = append(peers, info)
+	}
+
+	return peers
+}
+
+// peerProcAlive is swappable so tests can stand in for the /proc lookup
+// without forking real telegram-mcp processes. Production reads
+// /proc/<pid>/comm and matches "telegram-mcp" — same recycling defense the
+// daemon uses for its PID file (see internal/daemon/daemon.go:isOurDaemon).
+var peerProcAlive = func(pid int) bool {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return false
+	}
+
+	return strings.TrimSpace(string(raw)) == "telegram-mcp"
 }
 
 // findCCPID walks the parent chain looking for the first ancestor whose
