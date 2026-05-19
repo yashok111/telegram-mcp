@@ -66,12 +66,19 @@ type State struct {
 	Rules           []PermissionRule       `json:"rules,omitempty"`
 }
 
+// DefaultAckReaction is the emoji set on inbound messages when a fresh
+// access.json is created. The daemon's TypingTracker rotates onwards from
+// here while the agent composes a response. Users can clear it via
+// "/reaction off" or override it via "/reaction <emoji>".
+const DefaultAckReaction = "👀"
+
 func defaultState() State {
 	return State{
-		DMPolicy:  PolicyPairing,
-		AllowFrom: []string{},
-		Groups:    map[string]GroupPolicy{},
-		Pending:   map[string]Pending{},
+		DMPolicy:    PolicyPairing,
+		AllowFrom:   []string{},
+		Groups:      map[string]GroupPolicy{},
+		Pending:     map[string]Pending{},
+		AckReaction: DefaultAckReaction,
 	}
 }
 
