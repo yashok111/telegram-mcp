@@ -15,6 +15,10 @@ import (
 // NotifyHandler runs on the read loop's goroutine; long work should be dispatched.
 type NotifyHandler func(ctx context.Context, params json.RawMessage)
 
+// ErrConnClosed is returned by Call when the connection is torn down before
+// the response arrives. Exposed as a sentinel so callers can errors.Is it.
+var ErrConnClosed = errors.New("connection closed")
+
 // Client speaks JSON-RPC 2.0 to an ipc.Server over a unix socket.
 // Call multiplexes outbound requests by id and routes responses to pending channels.
 // Notifications from the server are dispatched to handlers registered via OnNotify.
@@ -114,10 +118,10 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.closed:
-		return errors.New("connection closed")
+		return ErrConnClosed
 	case resp, ok := <-ch:
 		if !ok {
-			return errors.New("connection closed")
+			return ErrConnClosed
 		}
 
 		if resp.Error != nil {

@@ -237,7 +237,7 @@ when present and silently dropped otherwise.
 
 ### What NOT to do
 
-- Don't import `mcp` from `bot`, or `daemon`/`shim` from each other. The dependency arrows are: `cmd/server` → {`daemon`, `shim`, `mcp`, `bot`, `access`, `ipc`}; `daemon` → {`bot`, `access`, `ipc`}; `shim` → {`mcp`, `bot` (for types), `ipc`}; `mcp` → {`bot` (for types only)}; `bot` → {`access`, `chunk`}. Don't introduce a new edge.
+- Don't import `mcp` from `bot`, or `daemon`/`shim` from each other. Direct internal imports are: `cmd/server` → {`daemon`, `shim`, `mcp`, `bot`, `access`, `ipc`}; `daemon` → {`bot`, `access`, `chunk`, `ipc`}; `shim` → {`mcp`, `bot` (for types), `access`, `ipc`}; `mcp` → {`bot` (for types), `access`, `chunk`}; `bot` → {`access`}. `access` and `chunk` are leaf utilities — they import no other internal package, and any layer above may import them. The role packages (`daemon`, `shim`, `mcp`, `bot`) must not gain new edges between each other; the existing edges above are the full set.
 - Don't add an 8th internal package. The current seven are the bottom of the carving — if something doesn't fit, it usually belongs in `daemon` or `bot`.
 - Don't reintroduce embedded mode (bot poller inside the shim/CC process). Removed in #16; routing assumes a separate daemon and adding it back means undoing the IPC layer.
 - Don't reintroduce `fmt.Fprintf(os.Stderr, ...)`. slog only.

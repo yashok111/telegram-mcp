@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"strings"
 	"sync"
 
 	"github.com/yakov/telegram-mcp/internal/bot"
@@ -172,7 +171,7 @@ func mapErr(err error) error {
 		return nil
 	}
 
-	if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "connection closed") {
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, ipc.ErrConnClosed) {
 		return ErrDaemonUnreachable
 	}
 

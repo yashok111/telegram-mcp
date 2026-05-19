@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,31 @@ func TestFindPendingFor_skipsExpired(t *testing.T) {
 	}
 	_, _, ok := findPendingFor(pending, "111")
 	assert.False(t, ok, "expired entry must not be returned even before next prune tick")
+}
+
+func TestClassifyMessageKind(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *telego.Message
+		want string
+	}{
+		{"photo", &telego.Message{Photo: []telego.PhotoSize{{FileID: "p"}}}, "photo"},
+		{"voice", &telego.Message{Voice: &telego.Voice{FileID: "v"}}, "voice"},
+		{"video_note", &telego.Message{VideoNote: &telego.VideoNote{FileID: "vn"}}, "video_note"},
+		{"video", &telego.Message{Video: &telego.Video{FileID: "vid"}}, "video"},
+		{"audio", &telego.Message{Audio: &telego.Audio{FileID: "a"}}, "audio"},
+		{"document", &telego.Message{Document: &telego.Document{FileID: "d"}}, "document"},
+		{"sticker", &telego.Message{Sticker: &telego.Sticker{FileID: "s"}}, "sticker"},
+		{"animation", &telego.Message{Animation: &telego.Animation{FileID: "anim"}}, "animation"},
+		{"text", &telego.Message{Text: "hi"}, "text"},
+		{"other (empty)", &telego.Message{}, "other"},
+		{"photo wins over text", &telego.Message{Photo: []telego.PhotoSize{{FileID: "p"}}, Text: "caption"}, "photo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, classifyMessageKind(tt.msg))
+		})
+	}
 }
 
 // ===== attachmentMeta =====
@@ -681,6 +707,29 @@ func TestBot_ensureInboxDir_propagatesError(t *testing.T) {
 
 	err2 := b.ensureInboxDir()
 	assert.Equal(t, err1, err2, "cached MkdirAll error must persist")
+}
+
+func TestCompiledMentionPattern_capEvictsOldest(t *testing.T) {
+	b := &Bot{}
+
+	// Fill to cap with predictably-ordered patterns.
+	for i := range mentionCacheCap {
+		_ = b.compiledMentionPattern(fmt.Sprintf("p%04d", i))
+	}
+
+	assert.Len(t, b.mentionCache, mentionCacheCap)
+
+	// One more pattern — oldest (p0000) must be evicted, and the new one
+	// must be present.
+	_ = b.compiledMentionPattern("p9999")
+
+	assert.Len(t, b.mentionCache, mentionCacheCap, "cache must stay at cap after FIFO eviction")
+
+	_, oldStill := b.mentionCache["p0000"]
+	assert.False(t, oldStill, "oldest insertion must be evicted at cap+1")
+
+	_, newPresent := b.mentionCache["p9999"]
+	assert.True(t, newPresent)
 }
 
 func TestIsMentioned_usesCacheAcrossCalls(t *testing.T) {

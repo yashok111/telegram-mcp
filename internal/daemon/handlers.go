@@ -77,7 +77,9 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 		SpawnID     string `json:"spawn_id"`
 	}
 
-	_ = json.Unmarshal(params, &p)
+	if err := json.Unmarshal(params, &p); err != nil {
+		slog.Warn("hello params unmarshal failed", "err", err)
+	}
 
 	buf := make([]byte, 6)
 	_, _ = rand.Read(buf)

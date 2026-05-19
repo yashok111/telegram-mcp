@@ -56,6 +56,12 @@ type SendOpts struct {
 // Case-insensitive for phone autocorrect. Strict — no bare yes/no, no chatter.
 var permissionReplyRE = regexp.MustCompile(`(?i)^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$`)
 
+const pairingCodeTTLMs = int64(time.Hour / time.Millisecond)
+
+// mentionCacheCap bounds compiledMentionPattern's regex cache; typical usage
+// is well under 10 patterns, the cap exists to defeat pathological growth.
+const mentionCacheCap = 256
+
 // Photo extensions go as sendPhoto (inline preview + compression); anything
 // else goes as sendDocument (raw bytes).
 var photoExts = map[string]struct{}{
@@ -85,8 +91,11 @@ type Bot struct {
 	mentionMu sync.Mutex
 	// Lives for daemon lifetime; patterns rarely change and access.json edits
 	// typically follow a process restart. nil entries negative-cache invalid
-	// regexes so a broken user pattern stops trying to compile.
+	// regexes so a broken user pattern stops trying to compile. Bounded by
+	// mentionCacheCap with FIFO eviction so a misbehaving caller rotating
+	// patterns can't leak memory.
 	mentionCache map[string]*regexp.Regexp
+	mentionOrder []string
 
 	pendingLabelMu sync.Mutex
 	pendingLabel   map[string]pendingLabel
@@ -138,12 +147,12 @@ func (b *Bot) Poll(ctx context.Context) error {
 
 	updates, err := b.api.UpdatesViaLongPolling(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("updates via long-polling: %w", err)
 	}
 
 	bh, err := th.NewBotHandler(b.api, updates)
 	if err != nil {
-		return err
+		return fmt.Errorf("new bot handler: %w", err)
 	}
 
 	b.pollHandler = bh
@@ -196,7 +205,11 @@ func (b *Bot) Poll(ctx context.Context) error {
 
 		return nil
 	case err := <-done:
-		return err
+		if err != nil {
+			return fmt.Errorf("bot handler exited: %w", err)
+		}
+
+		return nil
 	}
 }
 
@@ -615,17 +628,27 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 	return b.handleCallback(ctx, q)
 }
 
+// authorizeCallback enforces the allowlist on a callback query. Logs+answers
+// "Not authorized." and returns false on denial so the caller can early-return.
+func (b *Bot) authorizeCallback(ctx context.Context, q *telego.CallbackQuery, st access.State) bool {
+	senderID := strconv.FormatInt(q.From.ID, 10)
+	if slices.Contains(st.AllowFrom, senderID) {
+		return true
+	}
+
+	slog.Warn("callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
+	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: q.ID, Text: "Not authorized.",
+	})
+
+	return false
+}
+
 func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
 	st := b.store.Load()
-	senderID := strconv.FormatInt(q.From.ID, 10)
 
 	if lm := labelCallbackRE.FindStringSubmatch(q.Data); lm != nil {
-		if !slices.Contains(st.AllowFrom, senderID) {
-			slog.Warn("label callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
-			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-				CallbackQueryID: q.ID, Text: "Not authorized.",
-			})
-
+		if !b.authorizeCallback(ctx, &q, st) {
 			return nil
 		}
 
@@ -633,12 +656,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 	}
 
 	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
-		if !slices.Contains(st.AllowFrom, senderID) {
-			slog.Warn("sess callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
-			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-				CallbackQueryID: q.ID, Text: "Not authorized.",
-			})
-
+		if !b.authorizeCallback(ctx, &q, st) {
 			return nil
 		}
 
@@ -653,13 +671,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		return nil
 	}
 
-	if !slices.Contains(st.AllowFrom, senderID) {
-		slog.Warn("callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
-		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-			CallbackQueryID: q.ID,
-			Text:            "Not authorized.",
-		})
-
+	if !b.authorizeCallback(ctx, &q, st) {
 		return nil
 	}
 
@@ -824,7 +836,7 @@ func (b *Bot) gate(msg *telego.Message) gateResult {
 			SenderID:  senderID,
 			ChatID:    strconv.FormatInt(msg.Chat.ID, 10),
 			CreatedAt: now,
-			ExpiresAt: now + 60*60*1000,
+			ExpiresAt: now + pairingCodeTTLMs,
 			Replies:   1,
 		}
 		_ = b.store.Save(st)
@@ -913,11 +925,18 @@ func (b *Bot) compiledMentionPattern(pat string) *regexp.Regexp {
 
 	re, err := regexp.Compile("(?i)" + pat)
 	if err != nil {
-		b.mentionCache[pat] = nil
-		return nil
+		re = nil
+	}
+
+	if len(b.mentionCache) >= mentionCacheCap && len(b.mentionOrder) > 0 {
+		evict := b.mentionOrder[0]
+		b.mentionOrder = b.mentionOrder[1:]
+
+		delete(b.mentionCache, evict)
 	}
 
 	b.mentionCache[pat] = re
+	b.mentionOrder = append(b.mentionOrder, pat)
 
 	return re
 }
@@ -1073,7 +1092,7 @@ func (b *Bot) React(ctx context.Context, chatID string, messageID int, emoji str
 func (b *Bot) setReaction(ctx context.Context, chatID string, messageID int, emoji string) error {
 	id, err := parseChatID(chatID)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse chat id: %w", err)
 	}
 
 	return b.api.SetMessageReaction(ctx, &telego.SetMessageReactionParams{
