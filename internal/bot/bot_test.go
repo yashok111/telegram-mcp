@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -706,6 +707,29 @@ func TestBot_ensureInboxDir_propagatesError(t *testing.T) {
 
 	err2 := b.ensureInboxDir()
 	assert.Equal(t, err1, err2, "cached MkdirAll error must persist")
+}
+
+func TestCompiledMentionPattern_capEvictsOldest(t *testing.T) {
+	b := &Bot{}
+
+	// Fill to cap with predictably-ordered patterns.
+	for i := range mentionCacheCap {
+		_ = b.compiledMentionPattern(fmt.Sprintf("p%04d", i))
+	}
+
+	assert.Len(t, b.mentionCache, mentionCacheCap)
+
+	// One more pattern — oldest (p0000) must be evicted, and the new one
+	// must be present.
+	_ = b.compiledMentionPattern("p9999")
+
+	assert.Len(t, b.mentionCache, mentionCacheCap, "cache must stay at cap after FIFO eviction")
+
+	_, oldStill := b.mentionCache["p0000"]
+	assert.False(t, oldStill, "oldest insertion must be evicted at cap+1")
+
+	_, newPresent := b.mentionCache["p9999"]
+	assert.True(t, newPresent)
 }
 
 func TestIsMentioned_usesCacheAcrossCalls(t *testing.T) {
