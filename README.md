@@ -107,7 +107,26 @@ claude plugin disable telegram
 
 Restart the Claude Code session.
 
-### 4. Pair your account
+### 4. Launch Claude Code with dev channels enabled
+
+Telegram inbound is delivered as `notifications/claude/channel/*` — an
+experimental MCP capability that Claude Code only honors when launched with
+`--dangerously-load-development-channels`. Without the flag the daemon and
+shim both log successful delivery, but the LLM never sees the message.
+
+Add a shell alias and use it whenever you want a Telegram-aware session:
+
+```bash
+# ~/.zshrc or ~/.bashrc
+alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@local-yakov'
+```
+
+Then launch with `claude-tg` instead of `claude`. The `plugin:telegram@local-yakov`
+arg is harmless for the MCP-server install path (it loads nothing extra) and
+is required for `/spawn`-launched sessions where the bot forks a fresh CC
+that needs the plugin name to match.
+
+### 5. Pair your account
 
 On first run the daemon prints a pairing code. DM the bot from your real
 Telegram account with that code; the daemon adds you to the allowlist in
