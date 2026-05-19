@@ -56,6 +56,10 @@ type Router struct {
 	aliases   map[string]string // alias → shim_id
 	shimAlias map[string]string // shim_id → alias  (for O(1) release at Drop)
 
+	// labelIndex maps lowercase Shim.Label → shim_ids that currently carry it.
+	// Lets matchByLabelLocked run in O(1) instead of scanning every shim.
+	labelIndex map[string][]string
+
 	lastOutbound map[string]time.Time  // shim_id → time
 	lastAssigned map[string]time.Time  // shim_id → most recent inbound-route resolution
 	pins         map[string]pin        // chat_id → pin
@@ -138,6 +142,7 @@ func NewRouter() *Router {
 		permDetails:  map[string]PermDetails{},
 		aliases:      map[string]string{},
 		shimAlias:    map[string]string{},
+		labelIndex:   map[string][]string{},
 		lastOutbound: map[string]time.Time{},
 		lastAssigned: map[string]time.Time{},
 		pins:         map[string]pin{},
@@ -160,6 +165,7 @@ func (r *Router) Register(s *Shim) {
 
 	r.shims[s.ID] = s
 	r.lru = prepend(r.lru, s.ID)
+	r.indexLabelLocked(s.ID, s.Label)
 }
 
 func (r *Router) Drop(id string) {
@@ -169,6 +175,10 @@ func (r *Router) Drop(id string) {
 	if alias, ok := r.shimAlias[id]; ok {
 		delete(r.aliases, alias)
 		delete(r.shimAlias, id)
+	}
+
+	if s, ok := r.shims[id]; ok {
+		r.unindexLabelLocked(id, s.Label)
 	}
 
 	delete(r.shims, id)
@@ -355,7 +365,9 @@ func (r *Router) SetLabel(shimID, label string) (ShimInfo, error) {
 		return ShimInfo{}, ErrShimNotFound
 	}
 
+	r.unindexLabelLocked(shimID, s.Label)
 	s.Label = label
+	r.indexLabelLocked(shimID, label)
 	notify := s.Notify
 
 	r.mu.Unlock()
@@ -475,30 +487,27 @@ func (r *Router) lraPickLocked() (*Shim, bool) {
 		return nil, false
 	}
 
-	ids := make([]string, 0, len(r.shims))
-	for id := range r.shims {
-		ids = append(ids, id)
-	}
-
-	sort.Strings(ids)
-
 	var (
 		best  *Shim
 		bestT time.Time
 	)
 
-	for _, id := range ids {
-		s := r.shims[id]
-
+	for id, s := range r.shims {
 		t := r.lastOutbound[id]
 		if a := r.lastAssigned[id]; a.After(t) {
 			t = a
 		}
 
-		if best == nil || t.Before(bestT) {
-			best = s
-			bestT = t
+		switch {
+		case best == nil:
+		case t.Before(bestT):
+		case t.Equal(bestT) && id < best.ID:
+		default:
+			continue
 		}
+
+		best = s
+		bestT = t
 	}
 
 	return best, true
@@ -602,28 +611,77 @@ func addUnseenShim(seen map[string]struct{}, out []*Shim, s *Shim) []*Shim {
 }
 
 // matchByLabelLocked returns every shim whose non-empty Label equals token
-// (case-insensitive). Iterates r.lru for deterministic order. Caller holds r.mu.
+// (case-insensitive). Uses labelIndex for O(1) lookup; preserves r.lru order
+// for determinism on fan-out. Caller holds r.mu.
 func (r *Router) matchByLabelLocked(token string) []*Shim {
-	var out []*Shim
+	if token == "" {
+		return nil
+	}
+
+	ids := r.labelIndex[strings.ToLower(token)]
+	if len(ids) == 0 {
+		return nil
+	}
+
+	if len(ids) == 1 {
+		if s, ok := r.shims[ids[0]]; ok {
+			return []*Shim{s}
+		}
+
+		return nil
+	}
+
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+
+	out := make([]*Shim, 0, len(ids))
 
 	for _, id := range r.lru {
-		s, ok := r.shims[id]
-		if !ok {
+		if _, ok := want[id]; !ok {
 			continue
 		}
 
-		if s.Label == "" {
-			continue
+		if s, ok := r.shims[id]; ok {
+			out = append(out, s)
 		}
-
-		if !strings.EqualFold(s.Label, token) {
-			continue
-		}
-
-		out = append(out, s)
 	}
 
 	return out
+}
+
+// indexLabelLocked records a shim under its label (case-insensitive). No-op for
+// empty labels. Caller holds r.mu.
+func (r *Router) indexLabelLocked(shimID, label string) {
+	if label == "" {
+		return
+	}
+
+	key := strings.ToLower(label)
+	r.labelIndex[key] = append(r.labelIndex[key], shimID)
+}
+
+// unindexLabelLocked removes shimID from the label's bucket and drops empty
+// buckets. Caller holds r.mu.
+func (r *Router) unindexLabelLocked(shimID, label string) {
+	if label == "" {
+		return
+	}
+
+	key := strings.ToLower(label)
+
+	ids := r.labelIndex[key]
+	for i, id := range ids {
+		if id == shimID {
+			r.labelIndex[key] = append(ids[:i], ids[i+1:]...)
+			break
+		}
+	}
+
+	if len(r.labelIndex[key]) == 0 {
+		delete(r.labelIndex, key)
+	}
 }
 
 func (r *Router) RegisterPermission(reqID, shimID string, d PermDetails) error {

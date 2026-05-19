@@ -58,6 +58,10 @@ var permissionReplyRE = regexp.MustCompile(`(?i)^\s*(y|yes|n|no)\s+([a-km-z]{5})
 
 const pairingCodeTTLMs = int64(time.Hour / time.Millisecond)
 
+// mentionCacheCap bounds compiledMentionPattern's regex cache; typical usage
+// is well under 10 patterns, the cap exists to defeat pathological growth.
+const mentionCacheCap = 256
+
 // Photo extensions go as sendPhoto (inline preview + compression); anything
 // else goes as sendDocument (raw bytes).
 var photoExts = map[string]struct{}{
@@ -87,8 +91,11 @@ type Bot struct {
 	mentionMu sync.Mutex
 	// Lives for daemon lifetime; patterns rarely change and access.json edits
 	// typically follow a process restart. nil entries negative-cache invalid
-	// regexes so a broken user pattern stops trying to compile.
+	// regexes so a broken user pattern stops trying to compile. Bounded by
+	// mentionCacheCap with FIFO eviction so a misbehaving caller rotating
+	// patterns can't leak memory.
 	mentionCache map[string]*regexp.Regexp
+	mentionOrder []string
 
 	pendingLabelMu sync.Mutex
 	pendingLabel   map[string]pendingLabel
@@ -918,11 +925,18 @@ func (b *Bot) compiledMentionPattern(pat string) *regexp.Regexp {
 
 	re, err := regexp.Compile("(?i)" + pat)
 	if err != nil {
-		b.mentionCache[pat] = nil
-		return nil
+		re = nil
+	}
+
+	if len(b.mentionCache) >= mentionCacheCap && len(b.mentionOrder) > 0 {
+		evict := b.mentionOrder[0]
+		b.mentionOrder = b.mentionOrder[1:]
+
+		delete(b.mentionCache, evict)
 	}
 
 	b.mentionCache[pat] = re
+	b.mentionOrder = append(b.mentionOrder, pat)
 
 	return re
 }
