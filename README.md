@@ -9,6 +9,10 @@ Single Go binary. No node/bun runtime. Dies with its parent via
 `PR_SET_PDEATHSIG`. State is a JSON file under
 `~/.claude/channels/telegram/`.
 
+> **Linux only.** Uses Linux-specific kernel features (`PR_SET_PDEATHSIG`,
+> `/proc/<pid>/comm` for PID claim verification) and abstract unix sockets.
+> Does not build or run on macOS or Windows.
+
 > Not affiliated with Anthropic. Replaces the bun-runtime
 > `external_plugins/telegram` plugin with a leak-free, kernel-anchored Go
 > implementation.
@@ -80,8 +84,10 @@ cd telegram-mcp
 make build         # → bin/telegram-mcp
 ```
 
-Requires **Go 1.26**. Optional: `make lint` needs `golangci-lint` v2 built
-with Go 1.26 — `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`.
+Requires **Linux** and **Go 1.26**. macOS/Windows are not supported — the
+daemon/shim lifecycle depends on `PR_SET_PDEATHSIG` and `/proc/<pid>/comm`.
+Optional: `make lint` needs `golangci-lint` v2 built with Go 1.26 —
+`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`.
 
 ### 2. Create a bot
 
