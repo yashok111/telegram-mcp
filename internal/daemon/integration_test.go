@@ -90,6 +90,30 @@ func (t *tgFake) reactionCount() int {
 	return len(t.reactions)
 }
 
+// reactionEmojis returns a copy of every emoji string sent through
+// setMessageReaction so far. Tests use it instead of touching the
+// underlying slice, which the http handler owns under t.mu.
+func (t *tgFake) reactionEmojis() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	out := make([]string, 0, len(t.reactions))
+
+	for _, body := range t.reactions {
+		arr, _ := body["reaction"].([]any)
+		if len(arr) == 0 {
+			continue
+		}
+
+		first, _ := arr[0].(map[string]any)
+		if e, _ := first["emoji"].(string); e != "" {
+			out = append(out, e)
+		}
+	}
+
+	return out
+}
+
 type integrationFixture struct {
 	daemon  *Daemon
 	sock    string

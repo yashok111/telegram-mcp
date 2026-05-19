@@ -268,8 +268,70 @@ func TestTypingTracker_NilSafe(t *testing.T) {
 	require.NotPanics(t, func() {
 		tr.Mark("c", 1, true)
 		tr.Clear("c")
+		tr.Done(t.Context(), "c")
 		assert.Nil(t, tr.Pending())
 	}, "nil tracker calls are no-ops so daemon wiring can skip the field when disabled")
+}
+
+func TestTypingTracker_DoneReactsAndClears(t *testing.T) {
+	bot := &fakeTypingBot{}
+	tr := NewTypingTracker(bot, TypingConfig{})
+
+	tr.Mark("chat", 99, true)
+	tr.Done(t.Context(), "chat")
+
+	assert.Empty(t, tr.Pending(), "Done removes the entry like Clear does")
+
+	reacts := bot.snapshotReacts()
+	require.Len(t, reacts, 1)
+	assert.Equal(t, reactCall{chatID: "chat", msgID: 99, emoji: defaultDoneEmoji}, reacts[0])
+}
+
+func TestTypingTracker_DoneSkipsWhenRotationDisabled(t *testing.T) {
+	bot := &fakeTypingBot{}
+	tr := NewTypingTracker(bot, TypingConfig{})
+
+	tr.Mark("chat", 99, false)
+	tr.Done(t.Context(), "chat")
+
+	assert.Empty(t, tr.Pending(), "Done still clears even when rotation was off")
+	assert.Empty(t, bot.snapshotReacts(), "Done must not place a reaction when the user opted out of rotation")
+}
+
+func TestTypingTracker_DoneNoopForUnknownChat(t *testing.T) {
+	bot := &fakeTypingBot{}
+	tr := NewTypingTracker(bot, TypingConfig{})
+
+	tr.Done(t.Context(), "never-marked")
+
+	assert.Empty(t, bot.snapshotReacts())
+}
+
+func TestTypingTracker_DoneRespectsEmptyEmojiConfig(t *testing.T) {
+	bot := &fakeTypingBot{}
+	tr := NewTypingTracker(bot, TypingConfig{DoneEmoji: " "})
+
+	// Reset to truly empty — NewTypingTracker maps "" to defaultDoneEmoji,
+	// so we have to write past the constructor to disable the swap entirely.
+	tr.cfg.DoneEmoji = ""
+
+	tr.Mark("chat", 99, true)
+	tr.Done(t.Context(), "chat")
+
+	assert.Empty(t, tr.Pending())
+	assert.Empty(t, bot.snapshotReacts(), "empty DoneEmoji disables the swap and Done degenerates to Clear")
+}
+
+func TestTypingTracker_DoneIdempotent(t *testing.T) {
+	bot := &fakeTypingBot{}
+	tr := NewTypingTracker(bot, TypingConfig{})
+
+	tr.Mark("chat", 99, true)
+	tr.Done(t.Context(), "chat")
+	tr.Done(t.Context(), "chat")
+	tr.Done(t.Context(), "chat")
+
+	assert.Len(t, bot.snapshotReacts(), 1, "second Done after entry is gone must be a no-op — covers edit-after-send")
 }
 
 func TestTypingEnabled_EnvOptOut(t *testing.T) {
