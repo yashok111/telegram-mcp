@@ -16,6 +16,7 @@ import (
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
+	"github.com/yakov/telegram-mcp/internal/chunk"
 )
 
 func TestMain(m *testing.M) {
@@ -520,6 +521,29 @@ func TestRegisterNotifications_storesAndBroadcasts(t *testing.T) {
 }
 
 // ===== test plumbing =====
+
+func TestResolveChunkOpts_reservesPrefixBudget(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		limit, _, _ := resolveChunkOpts(access.State{})
+		assert.Equal(t, chunk.MaxChunkLimit-sourcePrefixReserve, limit)
+	})
+
+	t.Run("custom_above_minimum", func(t *testing.T) {
+		limit, _, _ := resolveChunkOpts(access.State{TextChunkLimit: 1000})
+		assert.Equal(t, 1000-sourcePrefixReserve, limit)
+	})
+
+	t.Run("custom_clamped_to_minimum", func(t *testing.T) {
+		limit, _, _ := resolveChunkOpts(access.State{TextChunkLimit: 30})
+		assert.GreaterOrEqual(t, limit, 64, "tiny user-configured limit clamps up to 64")
+	})
+
+	t.Run("mode_and_reply_unchanged", func(t *testing.T) {
+		_, mode, rep := resolveChunkOpts(access.State{ChunkMode: access.ChunkNewline})
+		assert.Equal(t, chunk.Newline, mode)
+		assert.Equal(t, access.ReplyToFirst, rep)
+	})
+}
 
 func contentText(res *mcptypes.CallToolResult) string {
 	if res == nil || len(res.Content) == 0 {

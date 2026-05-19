@@ -629,7 +629,7 @@ func TestBroadcastPermissionRequest_keyboardIncludesNewRows(t *testing.T) {
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
 
-	b.BroadcastPermissionRequest(t.Context(), "abcde", "Bash")
+	b.BroadcastPermissionRequest(t.Context(), "", "abcde", "Bash")
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)

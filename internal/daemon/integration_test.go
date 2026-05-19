@@ -203,9 +203,43 @@ func TestIntegrationPerChatAffinity(t *testing.T) {
 		return len(f.tg.sends) == 1
 	}, time.Second, 20*time.Millisecond)
 
+	f.tg.mu.Lock()
+	sentText, _ := f.tg.sends[0]["text"].(string)
+	f.tg.mu.Unlock()
+	assert.Equal(t, "@s1: hi", sentText, "shim A is alias s1; daemon must prepend prefix")
+
 	owner, ok := f.router.RouteInbound("123")
 	require.True(t, ok)
 	assert.Equal(t, idA, owner.ID, "chat 123 must route to shim A which last replied")
+}
+
+func TestIntegrationPrefixDisabledByEnv(t *testing.T) {
+	t.Setenv("TELEGRAM_PREFIX_ALIAS", "0")
+
+	f := newIntegration(t)
+	defer f.cleanup()
+
+	c, _ := connectShim(t, f.sock)
+	defer c.Close()
+
+	var sendRes struct {
+		MessageID int `json:"message_id"`
+	}
+	require.NoError(t, c.Call(t.Context(), ipc.MethodBotSendMessage, map[string]any{
+		"chat_id": "123", "text": "hi",
+	}, &sendRes))
+
+	require.Eventually(t, func() bool {
+		f.tg.mu.Lock()
+		defer f.tg.mu.Unlock()
+
+		return len(f.tg.sends) == 1
+	}, time.Second, 20*time.Millisecond)
+
+	f.tg.mu.Lock()
+	sentText, _ := f.tg.sends[0]["text"].(string)
+	f.tg.mu.Unlock()
+	assert.Equal(t, "hi", sentText, "env opt-out drops the daemon's prefix injection")
 }
 
 func TestIntegrationHelloReturnsAlias(t *testing.T) {

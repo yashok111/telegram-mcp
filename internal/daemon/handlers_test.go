@@ -40,7 +40,8 @@ type fakeBot struct {
 	downloadResult string
 	downloadErr    error
 
-	broadcastSeen []string // request_ids
+	broadcastSeen   []string // request_ids
+	broadcastPrefix []string // prefix per broadcast
 }
 
 func (b *fakeBot) SendMessage(_ context.Context, chatID, text string, opts bot.SendOpts) (int, error) {
@@ -76,8 +77,9 @@ func (b *fakeBot) DownloadFile(_ context.Context, _ string) (string, error) {
 	return b.downloadResult, b.downloadErr
 }
 
-func (b *fakeBot) BroadcastPermissionRequest(_ context.Context, reqID, _ string) {
+func (b *fakeBot) BroadcastPermissionRequest(_ context.Context, prefix, reqID, _ string) {
 	b.broadcastSeen = append(b.broadcastSeen, reqID)
+	b.broadcastPrefix = append(b.broadcastPrefix, prefix)
 }
 
 func newHandlersFixture(t *testing.T) (*Handlers, *fakeBot, *Router, *access.Store) {
@@ -128,11 +130,35 @@ func TestHandleSendMessageAllowed(t *testing.T) {
 		"chat_id": "123", "text": "hello", "reply_to": 0,
 	}))
 	require.Nil(t, rpcErr)
-	assert.Equal(t, "hello", fb.sentMessage.text)
+	assert.Equal(t, "@s1: hello", fb.sentMessage.text, "shim-a → alias s1 prefix prepended")
 	assert.Equal(t, map[string]any{"message_id": 42}, res)
 
 	_, ok := r.RouteInbound("123")
 	assert.True(t, ok, "RecordOutbound records on success")
+}
+
+func TestHandleSendMessage_prefixDisabledByEnv(t *testing.T) {
+	t.Setenv("TELEGRAM_PREFIX_ALIAS", "0")
+
+	h, fb, _, _ := newHandlersFixture(t)
+	fb.sentMessage.retID = 1
+
+	_, rpcErr := h.HandleSendMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "text": "hello",
+	}))
+	require.Nil(t, rpcErr)
+	assert.Equal(t, "hello", fb.sentMessage.text, "env opt-out drops prefix")
+}
+
+func TestHandleSendMessage_prefixSkippedForUnknownShim(t *testing.T) {
+	h, fb, _, _ := newHandlersFixture(t)
+	fb.sentMessage.retID = 1
+
+	_, rpcErr := h.HandleSendMessage(context.Background(), conn("ghost"), raw(t, map[string]any{
+		"chat_id": "123", "text": "hello",
+	}))
+	require.Nil(t, rpcErr)
+	assert.Equal(t, "hello", fb.sentMessage.text, "unknown shim → no alias → no prefix")
 }
 
 func TestHandleSendMessageRecordsOwnershipOnSuccess(t *testing.T) {
@@ -179,6 +205,7 @@ func TestHandleSendFileGatedAndRecorded(t *testing.T) {
 	}))
 	require.Nil(t, rpcErr)
 	assert.Equal(t, map[string]any{"message_id": 7}, res)
+	assert.Equal(t, "@s1", fb.sentFile.opts.Caption, "shim-a → alias s1 caption")
 
 	owner, ok := r.RouteInbound("123")
 	require.True(t, ok)
@@ -194,6 +221,7 @@ func TestHandleEditMessageGated(t *testing.T) {
 	}))
 	require.Nil(t, rpcErr)
 	assert.Equal(t, 5, fb.editedMessage.messageID)
+	assert.Equal(t, "@s1: edited", fb.editedMessage.text, "edit also gets prefix")
 }
 
 func TestHandleReactGated(t *testing.T) {
@@ -247,6 +275,7 @@ func TestHandleBroadcastPermissionRegistersAndForwards(t *testing.T) {
 	}))
 	require.Nil(t, rpcErr)
 	assert.Equal(t, []string{"ababc"}, fb.broadcastSeen)
+	assert.Equal(t, []string{"@s1: "}, fb.broadcastPrefix, "broadcast carries shim alias prefix")
 
 	d, ok := r.LookupPermissionDetails("ababc")
 	require.True(t, ok)

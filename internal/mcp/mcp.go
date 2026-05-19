@@ -46,6 +46,12 @@ const (
 	// pendingSweepInterval is how often the cleanup goroutine wakes to evict
 	// stale entries.
 	pendingSweepInterval = 10 * time.Minute
+
+	// sourcePrefixReserve is the byte budget held back from every chunk so the
+	// daemon can prepend a `@sN: ` source-alias marker without overflowing
+	// Telegram's 4096-byte cap. Worst-case alias is `s999` plus `@`, `:`, space
+	// → 7 bytes; rounded up to 16 for headroom against future format tweaks.
+	sourcePrefixReserve = 16
 )
 
 // pendingEntry tags a stored PermissionDetails with the time it was recorded
@@ -587,6 +593,8 @@ func resolveChunkOpts(st access.State) (int, chunk.Mode, access.ReplyToMode) {
 	if st.TextChunkLimit > 0 && st.TextChunkLimit < limit {
 		limit = st.TextChunkLimit
 	}
+
+	limit = max(limit-sourcePrefixReserve, 64)
 
 	mode := chunk.Length
 	if st.ChunkMode == access.ChunkNewline {
