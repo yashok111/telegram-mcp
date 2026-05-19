@@ -180,6 +180,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "idle", Description: "Show the most idle session"},
 				{Command: "rules", Description: "Manage auto-approve permission rules"},
 				{Command: "label", Description: "/label <text> — set session label (empty clears)"},
+				{Command: "reaction", Description: "/reaction <emoji>|off — set ack emoji on inbound (no args shows current)"},
 				{Command: "bg", Description: "/bg <prompt> [--in <dir>] — fire-and-forget Claude run"},
 				{Command: "spawn", Description: "/spawn [--in <dir>] — fork a Claude Code session owned by this daemon"},
 			},
@@ -279,6 +280,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/idle — show the most idle session\n"+
 				"/rules — list/clear/revoke auto-approve permission rules\n"+
 				"/label <text> — set session label (empty clears)\n"+
+				"/reaction <emoji>|off — set ack emoji on inbound (no args shows current)\n"+
 				"/bg <prompt> [--in <dir>] — fire-and-forget Claude run; /bg list, /bg cancel <id>\n"+
 				"/spawn [--in <dir>] — fork a daemon-owned Claude Code client; /spawn list, /spawn cancel <id>"))
 	case "status":
@@ -294,6 +296,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.handleRulesCommand(ctx, msg, st)
 	case "label":
 		b.handleLabelCommand(ctx, msg)
+	case "reaction":
+		b.handleReactionCommand(ctx, msg, st)
 	case "bg":
 		b.handleBgCommand(ctx, msg, b.bgRunner)
 	case "spawn":

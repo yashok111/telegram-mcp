@@ -25,6 +25,7 @@ func TestDefaultState(t *testing.T) {
 	assert.Empty(t, st.AllowFrom)
 	assert.Empty(t, st.Groups)
 	assert.Empty(t, st.Pending)
+	assert.Equal(t, DefaultAckReaction, st.AckReaction, "fresh installs get the default ack emoji")
 }
 
 func TestNewPairingCode_format(t *testing.T) {
@@ -46,6 +47,7 @@ func TestStore_load_missingFile_returnsDefault(t *testing.T) {
 	st := s.Load()
 	assert.Equal(t, PolicyPairing, st.DMPolicy)
 	assert.Empty(t, st.AllowFrom)
+	assert.Equal(t, DefaultAckReaction, st.AckReaction, "missing access.json yields the same default as defaultState")
 }
 
 func TestStore_save_thenLoad_roundTrip(t *testing.T) {
