@@ -243,6 +243,7 @@ when present and silently dropped otherwise.
 - Don't bypass the gate. Every outbound `assertAllowedChat` / inbound `gate()` call exists because the TS predecessor had vulnerabilities here. The daemon-side `Handlers.gate` is the load-bearing one — shim-side checks are convenience only.
 - Don't silently swallow errors. Either return wrapped, or `slog.Error` + explicit reason for the swallow (`//nolint:nilerr` with a comment).
 - Don't make the shim exit on daemon disconnect to force a CC re-spawn — #13 replaced that with reconnect-with-backoff. Exiting kills the CC session's MCP server, which is user-hostile.
+- Don't commit on local `main` (or `master`). Every PR lands as a squash merge, so origin gets one commit while a local main with the original N commits diverges (ahead N, behind 1) and `git pull` refuses to fast-forward. Before the first `git commit`, run `git fetch origin main && git checkout -b feat/<short-name> origin/main`; after the PR is merged, sync with `git checkout main && git pull` (fast-forward works only because local main was untouched).
 
 ## Gotchas
 
