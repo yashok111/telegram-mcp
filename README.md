@@ -191,6 +191,14 @@ systemctl --user enable --now telegram-mcp.service
 loginctl enable-linger "$USER"   # survive logout
 ```
 
+`enable-linger` is **not optional on headless servers**. Without it,
+`systemd-logind` reaps the user manager (and every `--user` unit, including
+this one) seconds after your last ssh session closes — `SpawnRunner.Stop()`
+fires on shutdown and kills every live `/spawn` along with the daemon. With
+linger enabled, the user manager persists across logout and reboot so
+long-running spawns survive an ssh disconnect. Check with
+`loginctl show-user "$USER" | grep Linger`.
+
 See [`contrib/systemd/README.md`](contrib/systemd/README.md).
 
 ---
