@@ -13,6 +13,8 @@ Single Go binary. No node/bun runtime. Dies with its parent via
 > `external_plugins/telegram` plugin with a leak-free, kernel-anchored Go
 > implementation.
 
+![telegram-mcp feature showcase](docs/images/feature-showcase.png)
+
 ---
 
 ## Features
@@ -148,6 +150,8 @@ managed pairing flow.
 ---
 
 ## Telegram commands (DM the bot)
+
+![Bot command map](docs/images/bot-command-map.png)
 
 | Command                | Effect                                                |
 | ---------------------- | ----------------------------------------------------- |
