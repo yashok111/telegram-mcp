@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -202,6 +203,42 @@ func TestIntegrationTypingRotatesReactionWhenAckConfigured(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return f.tg.reactionCount() >= 2
 	}, time.Second, 20*time.Millisecond, "rotation must fire React on the inbound msg when AckReaction is set")
+}
+
+func TestIntegrationTypingDoneStampsCheckOnOutbound(t *testing.T) {
+	f := newTypingIntegration(t, access.State{
+		DMPolicy:    access.PolicyAllowlist,
+		AllowFrom:   []string{"123"},
+		Groups:      map[string]access.GroupPolicy{},
+		Pending:     map[string]access.Pending{},
+		AckReaction: "👀",
+	})
+	defer f.cleanup()
+
+	c, _ := connectShim(t, f.sock)
+	defer c.Close()
+
+	n := NewNotifier(f.router, f.daemon.Store, f.daemon.Typing)
+	n.DeliverInbound("ping", map[string]string{
+		"chat_id":    "123",
+		"user":       "tester",
+		"message_id": "21",
+	})
+
+	require.Eventually(t, func() bool {
+		return len(f.daemon.Typing.Pending()) == 1
+	}, time.Second, 20*time.Millisecond, "chat must be marked pending before outbound")
+
+	var sendRes struct {
+		MessageID int `json:"message_id"`
+	}
+	require.NoError(t, c.Call(t.Context(), ipc.MethodBotSendMessage, map[string]any{
+		"chat_id": "123", "text": "done",
+	}, &sendRes))
+
+	require.Eventually(t, func() bool {
+		return slices.Contains(f.tg.reactionEmojis(), defaultDoneEmoji)
+	}, time.Second, 20*time.Millisecond, "Done must swap a %s onto the inbound after outbound lands", defaultDoneEmoji)
 }
 
 func TestIntegrationTypingSkipsRotationWhenAckUnset(t *testing.T) {

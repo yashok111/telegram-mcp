@@ -29,6 +29,12 @@ const (
 // access.State.AckReaction is set; the daemon rotates onwards from index 1.
 var defaultRotationEmojis = []string{"👀", "🤔", "✍"}
 
+// defaultDoneEmoji is what Done() swaps onto the inbound message after the
+// shim's first outbound lands — a visible "agent finished" marker. Must be
+// inside Telegram's bot-reaction allowlist for the same reason as
+// defaultRotationEmojis above; ✅ is in the allowlist.
+const defaultDoneEmoji = "✅"
+
 // typingBot is the slice of *bot.Bot the tracker needs. Defined here so
 // the typing package surface is testable with a tiny fake.
 type typingBot interface {
@@ -53,6 +59,11 @@ type TypingConfig struct {
 	// RotationEmojis is the cycle the daemon walks through. Nil falls back
 	// to defaultRotationEmojis. Empty (non-nil) slice disables rotation.
 	RotationEmojis []string
+
+	// DoneEmoji is what Done() places on the inbound message when the shim
+	// sends its first outbound. Empty string disables the swap (Done then
+	// degenerates into Clear). Zero value falls back to defaultDoneEmoji.
+	DoneEmoji string
 }
 
 // TypingTracker keeps a per-chat pending set and, while ctx is alive, sends a
@@ -93,6 +104,10 @@ func NewTypingTracker(b typingBot, cfg TypingConfig) *TypingTracker {
 
 	if cfg.RotationEmojis == nil {
 		cfg.RotationEmojis = defaultRotationEmojis
+	}
+
+	if cfg.DoneEmoji == "" {
+		cfg.DoneEmoji = defaultDoneEmoji
 	}
 
 	return &TypingTracker{
@@ -155,6 +170,50 @@ func (t *TypingTracker) Clear(chatID string) {
 	defer t.mu.Unlock()
 
 	delete(t.pending, chatID)
+}
+
+// Done is Clear plus a final "agent answered" reaction on the original
+// inbound message. Called instead of Clear when a shim's first outbound
+// for the pending chat lands, so the rotating 👀 / 🤔 / ✍ visibly settles
+// on a ✅ instead of freezing on whichever frame the ticker last set.
+//
+// The reaction fires only when rotation was armed for this chat (Mark was
+// called with rotateReaction=true and a non-zero msgID) and DoneEmoji is
+// non-empty — otherwise this degenerates into a Clear so users who opted
+// out of reactions via "/reaction off" don't suddenly get one.
+func (t *TypingTracker) Done(ctx context.Context, chatID string) {
+	if t == nil {
+		return
+	}
+
+	t.mu.Lock()
+	entry, ok := t.pending[chatID]
+
+	var msgID int
+
+	var rotateEnabled bool
+
+	if ok {
+		msgID = entry.msgID
+		rotateEnabled = entry.rotateEnabled
+		delete(t.pending, chatID)
+	}
+
+	emoji := t.cfg.DoneEmoji
+	t.mu.Unlock()
+
+	if !ok || !rotateEnabled || msgID == 0 || emoji == "" {
+		return
+	}
+
+	b := t.currentBot()
+	if b == nil {
+		return
+	}
+
+	if err := b.React(ctx, chatID, msgID, emoji); err != nil {
+		slog.Warn("typing tracker Done React failed", "chat_id", chatID, "msg_id", msgID, "emoji", emoji, "err", err)
+	}
 }
 
 // Pending returns the chat IDs currently tracked. Exposed for tests + daemon
