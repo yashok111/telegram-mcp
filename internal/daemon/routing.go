@@ -30,6 +30,7 @@ type Shim struct {
 	Label       string
 	Workdir     string
 	CCSessionID string
+	SpawnID     string
 	ConnectedAt time.Time
 	Notify      func(method string, params any) error // bound to the underlying ipc.Conn
 }
@@ -301,6 +302,7 @@ func (r *Router) Snapshot() []ShimInfo {
 			Label:        s.Label,
 			Workdir:      s.Workdir,
 			CCSessionID:  s.CCSessionID,
+			SpawnID:      s.SpawnID,
 			ConnectedAt:  s.ConnectedAt,
 			LastOutbound: r.lastOutbound[s.ID],
 			PinnedChats:  pinsByShim[s.ID],

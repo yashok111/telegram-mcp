@@ -1,0 +1,433 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"os"
+	"slices"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/yakov/telegram-mcp/internal/bot"
+)
+
+// recordingBot is a minimal botSurface that retains every Send/Edit call so
+// /spawn tests can assert on full traces.
+type recordingBot struct {
+	mu        sync.Mutex
+	sentTexts []string
+	editTexts []string
+	sendErr   error
+	sendID    int
+}
+
+func newRecordingBot(sendID int) *recordingBot { return &recordingBot{sendID: sendID} }
+
+func (b *recordingBot) SendMessage(_ context.Context, _, text string, _ bot.SendOpts) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.sendErr != nil {
+		return 0, b.sendErr
+	}
+
+	b.sentTexts = append(b.sentTexts, text)
+
+	return b.sendID, nil
+}
+
+func (b *recordingBot) SendFile(_ context.Context, _, _ string, _ bot.SendOpts) (int, error) {
+	return 0, nil
+}
+
+func (b *recordingBot) EditMessage(_ context.Context, _ string, _ int, text, _ string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.editTexts = append(b.editTexts, text)
+
+	return 0, nil
+}
+
+func (b *recordingBot) React(_ context.Context, _ string, _ int, _ string) error  { return nil }
+func (b *recordingBot) DownloadFile(_ context.Context, _ string) (string, error)  { return "", nil }
+func (b *recordingBot) BroadcastPermissionRequest(_ context.Context, _, _ string) {}
+
+func (b *recordingBot) sent() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	out := make([]string, len(b.sentTexts))
+	copy(out, b.sentTexts)
+
+	return out
+}
+
+// fakeSpawnProcess is a no-pipe stand-in for execSpawnProcess. Signal handler
+// pushes the signal to sigSeen, then closes waitCh so Wait returns.
+type fakeSpawnProcess struct {
+	pid     int
+	waitCh  chan error
+	closeCh chan struct{}
+	signal  func(os.Signal) error
+	closeFn func() error
+}
+
+func (p *fakeSpawnProcess) Pid() int                 { return p.pid }
+func (p *fakeSpawnProcess) Signal(s os.Signal) error { return p.signal(s) }
+func (p *fakeSpawnProcess) Wait() error              { return <-p.waitCh }
+func (p *fakeSpawnProcess) Close() error             { return p.closeFn() }
+
+type spawnCmdCall struct {
+	workdir, bin string
+	args, env    []string
+}
+
+type fakeSpawnCommander struct {
+	mu      sync.Mutex
+	startFn func(ctx context.Context, workdir, bin string, args, env []string) (SpawnProcess, error)
+	calls   []spawnCmdCall
+}
+
+func (f *fakeSpawnCommander) Start(ctx context.Context, workdir, bin string, args, env []string) (SpawnProcess, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, spawnCmdCall{workdir: workdir, bin: bin, args: args, env: env})
+	f.mu.Unlock()
+
+	return f.startFn(ctx, workdir, bin, args, env)
+}
+
+func (f *fakeSpawnCommander) lastCall() spawnCmdCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if len(f.calls) == 0 {
+		return spawnCmdCall{}
+	}
+
+	return f.calls[len(f.calls)-1]
+}
+
+// newFakeSpawnProcess builds a process whose Signal handler triggers waitCh
+// release on first SIGTERM, simulating a well-behaved child.
+func newFakeSpawnProcess(pid int) *fakeSpawnProcess {
+	waitCh := make(chan error, 1)
+
+	var once sync.Once
+
+	closeFn := func() error { return nil }
+
+	p := &fakeSpawnProcess{
+		pid:     pid,
+		waitCh:  waitCh,
+		closeCh: make(chan struct{}),
+		closeFn: closeFn,
+	}
+	p.signal = func(_ os.Signal) error {
+		once.Do(func() { waitCh <- nil })
+
+		return nil
+	}
+
+	return p
+}
+
+func TestSpawnRunner_DefaultsAppliedForZeroValues(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{})
+	assert.Equal(t, 3, r.cfg.MaxParallel)
+	assert.Equal(t, "claude", r.cfg.ClaudeBin)
+	assert.Positive(t, int64(r.cfg.HardTimeout))
+	assert.Equal(t, 5, r.cfg.RatePerHourPerUser)
+	assert.NotEmpty(t, r.cfg.ClaudeArgs, "default args must load the telegram plugin")
+}
+
+func TestSpawnRunner_EmptyList(t *testing.T) {
+	r := NewSpawnRunner(DefaultSpawnConfig())
+	assert.Empty(t, r.List())
+}
+
+func TestSpawnRunner_CancelUnknown(t *testing.T) {
+	r := NewSpawnRunner(DefaultSpawnConfig())
+	assert.ErrorIs(t, r.Cancel("nope"), ErrSpawnNotFound)
+}
+
+func TestSpawnRunner_ReserveSlotEnforcesMaxParallel(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{MaxParallel: 2, RatePerHourPerUser: 99})
+	id1, err := r.reserveSlot("u1")
+	require.NoError(t, err)
+	id2, err := r.reserveSlot("u1")
+	require.NoError(t, err)
+	_, err = r.reserveSlot("u2")
+	require.ErrorIs(t, err, ErrTooManySpawnTasks)
+	assert.NotEqual(t, id1, id2)
+}
+
+func TestSpawnRunner_ReserveSlotRateLimitsPerUser(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{MaxParallel: 99, RatePerHourPerUser: 2})
+
+	_, err := r.reserveSlot("u1")
+	require.NoError(t, err)
+
+	id2, err := r.reserveSlot("u1")
+	require.NoError(t, err)
+	r.releaseSlot(id2, SpawnStatusDone)
+
+	_, err = r.reserveSlot("u1")
+	require.ErrorIs(t, err, ErrSpawnRateLimited)
+	_, err = r.reserveSlot("u2")
+	require.NoError(t, err)
+}
+
+func TestSpawnRunner_SpawnPassesWorkdirArgsAndEnvWithSpawnID(t *testing.T) {
+	proc := newFakeSpawnProcess(4242)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+		ClaudeArgs:         []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"},
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	call := cmder.lastCall()
+	assert.Equal(t, "/tmp/wd", call.workdir)
+	assert.Equal(t, "/usr/local/bin/claude", call.bin)
+	assert.Equal(t, []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"}, call.args)
+	assert.True(t, slices.Contains(call.env, "TELEGRAM_SPAWN_ID="+id), "env must carry the spawn_id so the spawned shim can stamp it in hello")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_SpawnPostsStartConfirmation(t *testing.T) {
+	proc := newFakeSpawnProcess(123)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", Workdir: "/x"})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		for _, s := range fb.sent() {
+			if contains(s, "🚀 Spawn "+id+" started") {
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 20*time.Millisecond)
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_SpawnStartFailureReleasesSlot(t *testing.T) {
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return nil, errors.New("not found in $PATH")
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, fb, cmder)
+
+	_, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u"})
+	require.Error(t, err)
+	assert.Empty(t, r.List(), "start failure must release the slot")
+
+	var sawFailure bool
+
+	for _, s := range fb.sent() {
+		if contains(s, "❌ Spawn") {
+			sawFailure = true
+		}
+	}
+
+	assert.True(t, sawFailure, "start failure must post an error message to chat")
+}
+
+func TestSpawnRunner_CancelSendsSIGTERMAndReapsSlot(t *testing.T) {
+	sigSeen := make(chan os.Signal, 2)
+	proc := newFakeSpawnProcess(9000)
+	signalFn := proc.signal
+	proc.signal = func(s os.Signal) error {
+		sigSeen <- s
+
+		return signalFn(s)
+	}
+
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, newRecordingBot(100), cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	require.NoError(t, r.Cancel(id))
+
+	select {
+	case sig := <-sigSeen:
+		assert.Equal(t, os.Signal(syscall.SIGTERM), sig)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected SIGTERM after Cancel")
+	}
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_NaturalExitMarksDone(t *testing.T) {
+	proc := newFakeSpawnProcess(5555)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, newRecordingBot(100), cmder)
+
+	_, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	// Process exits on its own (no Cancel call).
+	proc.waitCh <- nil
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_StopCancelsAll(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{MaxParallel: 99, RatePerHourPerUser: 99})
+
+	var (
+		mu       sync.Mutex
+		canceled = map[string]bool{}
+	)
+
+	for range 3 {
+		id, err := r.reserveSlot("u1")
+		require.NoError(t, err)
+
+		taskID := id
+
+		r.mu.Lock()
+		r.tasks[taskID].cancel = func() {
+			mu.Lock()
+			canceled[taskID] = true
+			mu.Unlock()
+		}
+		r.mu.Unlock()
+	}
+
+	r.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Len(t, canceled, 3)
+}
+
+func TestSpawnRunner_WorkdirFallbackHome(t *testing.T) {
+	t.Setenv("HOME", "/tmp/home-spawn")
+
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return nil, errors.New("stop here")
+	}}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, newRecordingBot(1), cmder)
+
+	_, _ = r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u"})
+
+	assert.Equal(t, "/tmp/home-spawn", cmder.lastCall().workdir)
+}
+
+func TestSpawnRunner_WorkdirFallbackDefault(t *testing.T) {
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return nil, errors.New("stop here")
+	}}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		DefaultWorkdir:     "/srv/code",
+	}, newRecordingBot(1), cmder)
+
+	_, _ = r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u"})
+
+	assert.Equal(t, "/srv/code", cmder.lastCall().workdir)
+}
+
+func TestSpawnRunner_ListReflectsActiveSpawns(t *testing.T) {
+	proc := newFakeSpawnProcess(11)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, newRecordingBot(1), cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "C1", UserID: "u", Workdir: "/x"})
+	require.NoError(t, err)
+
+	infos := r.List()
+	require.Len(t, infos, 1)
+	assert.Equal(t, id, infos[0].ID)
+	assert.Equal(t, 11, infos[0].Pid)
+	assert.Equal(t, "/x", infos[0].Workdir)
+	assert.Equal(t, "C1", infos[0].ChatID)
+	assert.Equal(t, string(SpawnStatusRunning), infos[0].Status)
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+
+	return -1
+}

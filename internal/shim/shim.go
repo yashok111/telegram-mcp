@@ -183,6 +183,7 @@ func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
 		"label":         s.HelloLabel,
 		"workdir":       wd,
 		"cc_session_id": os.Getenv("CLAUDE_CODE_SESSION_ID"),
+		"spawn_id":      os.Getenv("TELEGRAM_SPAWN_ID"),
 	}, &hello); err != nil {
 		return err
 	}

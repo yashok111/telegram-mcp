@@ -133,6 +133,11 @@ func runDaemon(stateDir string) error {
 
 	defer bgRunner.Stop()
 
+	spawnRunner := daemonpkg.NewSpawnRunnerWithDeps(loadSpawnConfig(), tgBot, daemonpkg.NewExecSpawnCommander())
+	tgBot.SetSpawnRunner(spawnRunner)
+
+	defer spawnRunner.Stop()
+
 	idleSecs, _ := strconv.Atoi(os.Getenv("TELEGRAM_DAEMON_IDLE_EXIT"))
 	if idleSecs == 0 {
 		idleSecs = 1800
@@ -383,6 +388,43 @@ func loadBgConfig() daemonpkg.BgConfig {
 	return cfg
 }
 
+// loadSpawnConfig folds env vars into a SpawnConfig. Zero fields keep
+// daemonpkg.NewSpawnRunner's defaults (3 parallel · 24h hard · 5 starts per
+// hour · "claude" binary · telegram plugin args).
+func loadSpawnConfig() daemonpkg.SpawnConfig {
+	cfg := daemonpkg.SpawnConfig{}
+
+	if v, err := strconv.Atoi(os.Getenv("TELEGRAM_SPAWN_MAX_PARALLEL")); err == nil && v > 0 {
+		cfg.MaxParallel = v
+	}
+
+	if v := os.Getenv("TELEGRAM_SPAWN_HARD_TIMEOUT"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed > 0 {
+			cfg.HardTimeout = parsed
+		} else {
+			slog.Warn("invalid TELEGRAM_SPAWN_HARD_TIMEOUT, using default", "value", v)
+		}
+	}
+
+	if v := os.Getenv("TELEGRAM_SPAWN_DEFAULT_WORKDIR"); v != "" {
+		cfg.DefaultWorkdir = v
+	}
+
+	if v, err := strconv.Atoi(os.Getenv("TELEGRAM_SPAWN_RATE_PER_HOUR")); err == nil && v > 0 {
+		cfg.RatePerHourPerUser = v
+	}
+
+	if v := os.Getenv("TELEGRAM_SPAWN_CLAUDE_BIN"); v != "" {
+		cfg.ClaudeBin = v
+	}
+
+	if v := os.Getenv("TELEGRAM_SPAWN_CLAUDE_ARGS"); v != "" {
+		cfg.ClaudeArgs = strings.Fields(v)
+	}
+
+	return cfg
+}
+
 // routerAdapter adapts daemon.Router to bot.RouterView, converting
 // daemon.ShimInfo into bot.ShimInfo at the boundary so internal/bot doesn't
 // import internal/daemon.
@@ -456,6 +498,7 @@ func adaptShimInfo(s daemonpkg.ShimInfo) bot.ShimInfo {
 		Label:        s.Label,
 		Workdir:      s.Workdir,
 		CCSessionID:  s.CCSessionID,
+		SpawnID:      s.SpawnID,
 		ConnectedAt:  s.ConnectedAt,
 		LastOutbound: s.LastOutbound,
 		PinnedChats:  s.PinnedChats,
