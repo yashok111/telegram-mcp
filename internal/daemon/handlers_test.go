@@ -206,6 +206,25 @@ func TestHandleReactGated(t *testing.T) {
 	assert.Equal(t, ipc.CodeNotAllowlisted, rpcErr.Code)
 }
 
+func TestHandleReactBotErrorIsRPCError(t *testing.T) {
+	h, fb, _, _ := newHandlersFixture(t)
+	fb.reactedErr = errors.New("HTTP 400")
+
+	_, rpcErr := h.HandleReact(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "message_id": 7, "emoji": "👍",
+	}))
+	require.NotNil(t, rpcErr)
+	assert.Equal(t, ipc.CodeBotError, rpcErr.Code)
+}
+
+func TestHandleReactInvalidParams(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+
+	_, rpcErr := h.HandleReact(context.Background(), conn("shim-a"), json.RawMessage("not json"))
+	require.NotNil(t, rpcErr)
+	assert.Equal(t, ipc.CodeInvalidParams, rpcErr.Code)
+}
+
 func TestHandleDownloadFileReturnsPath(t *testing.T) {
 	h, fb, _, _ := newHandlersFixture(t)
 	fb.downloadResult = "/inbox/photo.jpg"

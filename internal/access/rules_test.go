@@ -175,6 +175,38 @@ func TestMatch_pathGlob_doubleStar(t *testing.T) {
 	}
 }
 
+func TestMatch_pathGlob_doubleStarEdges(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		path    string
+		match   bool
+	}{
+		{"trailing ** with 3 parts matches", "/a/**/b/**", "/a/x/b/y", true},
+		{"trailing ** with 3 parts requires middle present", "/a/**/b/**", "/a/x/c/y", false},
+		{"adjacent ** treated as one", "/a/**/**/b", "/a/x/y/b", true},
+		{"adjacent ** empty middle still requires prefix+suffix", "/a/**/**/b", "/q/b", false},
+		{"leading ** plus middle plus suffix", "**/x/y/**", "/q/x/y/z", true},
+		{"middle text must appear in order", "/a/**/b/**/c", "/a/c/b", false},
+	}
+
+	now := time.Now().UnixMilli()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := []PermissionRule{{
+				ID: "r", Tool: "Read", PathPattern: tt.pattern,
+				Action: RuleApprove, CreatedAt: now,
+			}}
+			got := Match(rules, "Read", tt.path)
+			if tt.match {
+				assert.NotNil(t, got, "expected match for pattern=%q path=%q", tt.pattern, tt.path)
+			} else {
+				assert.Nil(t, got, "expected no match for pattern=%q path=%q", tt.pattern, tt.path)
+			}
+		})
+	}
+}
+
 func TestMatch_emptyPath_withPathPattern_noMatch(t *testing.T) {
 	now := time.Now().UnixMilli()
 	rules := []PermissionRule{

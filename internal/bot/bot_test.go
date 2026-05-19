@@ -124,6 +124,31 @@ func TestFindPendingFor_skipsExpired(t *testing.T) {
 	assert.False(t, ok, "expired entry must not be returned even before next prune tick")
 }
 
+func TestClassifyMessageKind(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *telego.Message
+		want string
+	}{
+		{"photo", &telego.Message{Photo: []telego.PhotoSize{{FileID: "p"}}}, "photo"},
+		{"voice", &telego.Message{Voice: &telego.Voice{FileID: "v"}}, "voice"},
+		{"video_note", &telego.Message{VideoNote: &telego.VideoNote{FileID: "vn"}}, "video_note"},
+		{"video", &telego.Message{Video: &telego.Video{FileID: "vid"}}, "video"},
+		{"audio", &telego.Message{Audio: &telego.Audio{FileID: "a"}}, "audio"},
+		{"document", &telego.Message{Document: &telego.Document{FileID: "d"}}, "document"},
+		{"sticker", &telego.Message{Sticker: &telego.Sticker{FileID: "s"}}, "sticker"},
+		{"animation", &telego.Message{Animation: &telego.Animation{FileID: "anim"}}, "animation"},
+		{"text", &telego.Message{Text: "hi"}, "text"},
+		{"other (empty)", &telego.Message{}, "other"},
+		{"photo wins over text", &telego.Message{Photo: []telego.PhotoSize{{FileID: "p"}}, Text: "caption"}, "photo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, classifyMessageKind(tt.msg))
+		})
+	}
+}
+
 // ===== attachmentMeta =====
 
 func TestAttachmentMeta_nil_returnsNil(t *testing.T) {

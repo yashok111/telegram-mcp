@@ -93,6 +93,39 @@ func TestIdleExitDoesNotFireWhileConnected(t *testing.T) {
 	}
 }
 
+func TestIdleExitResetsOnReconnect(t *testing.T) {
+	r := NewRouter()
+
+	fired := make(chan struct{}, 1)
+	idle := NewIdleExit(r, 200*time.Millisecond, func() {
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	go idle.Run(ctx)
+
+	// Start with 0 shims; let the timer arm on the first tick (timeout/4 = 50ms).
+	require.Eventually(t, func() bool {
+		return r.ConnectedCount() == 0
+	}, 100*time.Millisecond, 10*time.Millisecond)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Connect a shim so the next tick sees count>0 and resets idleSince.
+	r.Register(&Shim{ID: "x", Notify: func(string, any) error { return nil }})
+
+	select {
+	case <-fired:
+		t.Fatal("idle exit fired after a shim reconnected before the timeout elapsed")
+	case <-time.After(400 * time.Millisecond):
+	}
+}
+
 func TestIdleExitDisabledByZero(t *testing.T) {
 	r := NewRouter()
 	fired := make(chan struct{}, 1)

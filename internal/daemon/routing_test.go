@@ -765,6 +765,58 @@ func TestRouterSetLabelUnknownShim(t *testing.T) {
 	require.ErrorIs(t, err, ErrShimNotFound)
 }
 
+func TestRouterLabelIndexedAtRegister(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a", Label: "main-bot"})
+
+	got := r.RouteInboundMulti("chat-1", "@main-bot", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID, "Register must seed the label index for non-empty Label")
+}
+
+func TestRouterLabelIndexClearedOnDrop(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a"})
+	r.Register(&Shim{ID: "b"})
+
+	_, err := r.SetLabel("a", "main-bot")
+	require.NoError(t, err)
+
+	r.Drop("a")
+
+	// Direct: the index must not retain a pointer to the dropped shim,
+	// otherwise the bucket leaks memory across the daemon's lifetime.
+	r.mu.RLock()
+	residual := r.labelIndex["main-bot"]
+	r.mu.RUnlock()
+	assert.Empty(t, residual, "Drop must remove the shim from labelIndex")
+
+	// Behavioral: mention falls through to chat owner.
+	r.RecordOutbound("b", "chat-1", 0)
+
+	got := r.RouteInboundMulti("chat-1", "@main-bot ping", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "dropped shim's label must fall through to owner")
+}
+
+func TestRouterLabelIndexReplacedOnSetLabel(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a", Label: "old-label"})
+	r.Register(&Shim{ID: "b"})
+
+	_, err := r.SetLabel("a", "new-label")
+	require.NoError(t, err)
+	r.RecordOutbound("b", "chat-1", 0)
+
+	got := r.RouteInboundMulti("chat-1", "@old-label", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "old label must no longer resolve after SetLabel")
+
+	got = r.RouteInboundMulti("chat-1", "@new-label", 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID)
+}
+
 func TestRouteInboundMultiLabelMatches(t *testing.T) {
 	r := NewRouter()
 	r.Register(&Shim{ID: "a"}) // alias s1
