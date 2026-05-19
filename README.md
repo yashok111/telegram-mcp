@@ -261,6 +261,44 @@ explicitly **out of scope**.
 
 ---
 
+## Caveat: the auto-mode classifier doesn't see your Telegram approvals
+
+Claude Code's permission auto-mode (the on-host classifier that decides
+whether a tool call is "obviously fine" or needs a prompt) reads only the
+session's local conversation. It does **not** treat inbound Telegram
+messages as authorization, even though those messages are what the LLM
+itself is responding to.
+
+Practical effect: if you DM the bot "go ahead, push the PR" or "edit the
+repo description", the agent receives that and may try the action — but
+the classifier evaluating the resulting `gh` / `git push` / `gh repo edit`
+call only sees that the agent decided to run a high-blast-radius command
+without any visible user prompt for *that specific* action. It will be
+auto-denied as scope creep. The reply you sent on Telegram is invisible
+to the classifier; from its point of view the agent escalated on its own.
+
+Workarounds:
+
+1. **Pre-approve at the host.** Add a `permissions` rule in
+   `~/.claude/settings.json` (or `.claude/settings.local.json` in the
+   project) for the exact command pattern you want to allow without
+   prompting. Example: `Bash(gh repo edit:*)`. This is the durable fix
+   when a workflow keeps tripping the same denial.
+2. **Approve from the host TTY when prompted.** If you're sitting at the
+   editor, the classifier surfaces a prompt locally and you can approve
+   there — the Telegram-side conversation continues unaffected.
+3. **Narrow the scope.** Phrase requests so the next tool call falls
+   inside what was already authorized. "Update the README and open a PR"
+   is in scope; "and while you're at it, edit the repo description" is a
+   second action the classifier will judge on its own merits.
+
+This is a property of Claude Code's permission model, not of this
+project. The trade-off is intentional: the classifier is conservative
+specifically because it cannot verify the provenance of messages reaching
+the LLM. Treat Telegram as a remote control with a brake.
+
+---
+
 ## Development
 
 ```bash
