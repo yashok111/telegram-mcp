@@ -1,6 +1,10 @@
 /bin/
+/server
 *.log
 .env
 .agents/skills/
 .worktrees/
+.claude/
 /docs/
+*.pid
+*.sock
