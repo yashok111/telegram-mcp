@@ -420,7 +420,7 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 			slog.Info("router pin expired", "chat_id", chatID)
 		} else if s, ok := r.shims[p.shimID]; ok {
 			slog.Info("RouteInbound pin", "chat_id", chatID, "shim_id", s.ID)
-			r.lastAssigned[s.ID] = time.Now()
+			r.recordAssignmentLocked(s.ID)
 
 			return s, true
 		}
@@ -429,7 +429,7 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	if owner, ok := r.chatOwners[chatID]; ok {
 		if s, ok := r.shims[owner]; ok {
 			slog.Info("RouteInbound owner", "chat_id", chatID, "shim_id", s.ID)
-			r.lastAssigned[s.ID] = time.Now()
+			r.recordAssignmentLocked(s.ID)
 
 			return s, true
 		}
@@ -440,7 +440,7 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	if len(r.shims) >= 2 {
 		if s, ok := r.lraPickLocked(); ok {
 			slog.Info("RouteInbound LRA", "chat_id", chatID, "shim_id", s.ID)
-			r.lastAssigned[s.ID] = time.Now()
+			r.recordAssignmentLocked(s.ID)
 
 			return s, true
 		}
@@ -454,10 +454,16 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	s, ok := r.shims[r.lru[0]]
 	if ok {
 		slog.Info("RouteInbound LRU fallback", "chat_id", chatID, "shim_id", s.ID, "lru", r.lru)
-		r.lastAssigned[s.ID] = time.Now()
+		r.recordAssignmentLocked(s.ID)
 	}
 
 	return s, ok
+}
+
+// recordAssignmentLocked stamps lastAssigned for the picked shim so the LRA
+// picker can rotate fairly across multiple connected shims. Caller holds r.mu.
+func (r *Router) recordAssignmentLocked(shimID string) {
+	r.lastAssigned[shimID] = time.Now()
 }
 
 // lraPickLocked picks the connected shim with the smallest
@@ -543,14 +549,8 @@ func (r *Router) resolveMentionsLocked(chatID string, mentions []string) []*Shim
 	for _, m := range mentions {
 		if m == "all" {
 			for _, id := range r.lru {
-				if _, dup := seen[id]; dup {
-					continue
-				}
-
 				if s, ok := r.shims[id]; ok {
-					seen[id] = struct{}{}
-
-					out = append(out, s)
+					out = addUnseenShim(seen, out, s)
 				}
 			}
 
@@ -558,14 +558,8 @@ func (r *Router) resolveMentionsLocked(chatID string, mentions []string) []*Shim
 		}
 
 		if id, ok := r.aliases[m]; ok {
-			if _, dup := seen[id]; dup {
-				continue
-			}
-
 			if s, ok := r.shims[id]; ok {
-				seen[id] = struct{}{}
-
-				out = append(out, s)
+				out = addUnseenShim(seen, out, s)
 			}
 
 			continue
@@ -587,17 +581,24 @@ func (r *Router) resolveMentionsLocked(chatID string, mentions []string) []*Shim
 		}
 
 		for _, s := range labelMatches {
-			if _, dup := seen[s.ID]; dup {
-				continue
-			}
-
-			seen[s.ID] = struct{}{}
-
-			out = append(out, s)
+			out = addUnseenShim(seen, out, s)
 		}
 	}
 
 	return out
+}
+
+// addUnseenShim appends s to out (and marks it in seen) only if s.ID isn't
+// already present. Used by mention dispatch to dedupe across @all, alias, and
+// label fan-outs that target overlapping shims.
+func addUnseenShim(seen map[string]struct{}, out []*Shim, s *Shim) []*Shim {
+	if _, dup := seen[s.ID]; dup {
+		return out
+	}
+
+	seen[s.ID] = struct{}{}
+
+	return append(out, s)
 }
 
 // matchByLabelLocked returns every shim whose non-empty Label equals token

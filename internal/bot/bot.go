@@ -56,6 +56,8 @@ type SendOpts struct {
 // Case-insensitive for phone autocorrect. Strict — no bare yes/no, no chatter.
 var permissionReplyRE = regexp.MustCompile(`(?i)^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$`)
 
+const pairingCodeTTLMs = int64(time.Hour / time.Millisecond)
+
 // Photo extensions go as sendPhoto (inline preview + compression); anything
 // else goes as sendDocument (raw bytes).
 var photoExts = map[string]struct{}{
@@ -619,17 +621,27 @@ func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 	return b.handleCallback(ctx, q)
 }
 
+// authorizeCallback enforces the allowlist on a callback query. Logs+answers
+// "Not authorized." and returns false on denial so the caller can early-return.
+func (b *Bot) authorizeCallback(ctx context.Context, q *telego.CallbackQuery, st access.State) bool {
+	senderID := strconv.FormatInt(q.From.ID, 10)
+	if slices.Contains(st.AllowFrom, senderID) {
+		return true
+	}
+
+	slog.Warn("callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
+	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: q.ID, Text: "Not authorized.",
+	})
+
+	return false
+}
+
 func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error {
 	st := b.store.Load()
-	senderID := strconv.FormatInt(q.From.ID, 10)
 
 	if lm := labelCallbackRE.FindStringSubmatch(q.Data); lm != nil {
-		if !slices.Contains(st.AllowFrom, senderID) {
-			slog.Warn("label callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
-			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-				CallbackQueryID: q.ID, Text: "Not authorized.",
-			})
-
+		if !b.authorizeCallback(ctx, &q, st) {
 			return nil
 		}
 
@@ -637,12 +649,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 	}
 
 	if sm := sessCallbackRE.FindStringSubmatch(q.Data); sm != nil {
-		if !slices.Contains(st.AllowFrom, senderID) {
-			slog.Warn("sess callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
-			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-				CallbackQueryID: q.ID, Text: "Not authorized.",
-			})
-
+		if !b.authorizeCallback(ctx, &q, st) {
 			return nil
 		}
 
@@ -657,13 +664,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		return nil
 	}
 
-	if !slices.Contains(st.AllowFrom, senderID) {
-		slog.Warn("callback denied: sender not allowlisted", "user_id", q.From.ID, "data", q.Data)
-		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-			CallbackQueryID: q.ID,
-			Text:            "Not authorized.",
-		})
-
+	if !b.authorizeCallback(ctx, &q, st) {
 		return nil
 	}
 
@@ -828,7 +829,7 @@ func (b *Bot) gate(msg *telego.Message) gateResult {
 			SenderID:  senderID,
 			ChatID:    strconv.FormatInt(msg.Chat.ID, 10),
 			CreatedAt: now,
-			ExpiresAt: now + 60*60*1000,
+			ExpiresAt: now + pairingCodeTTLMs,
 			Replies:   1,
 		}
 		_ = b.store.Save(st)
