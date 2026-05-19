@@ -121,11 +121,21 @@ func runDaemon(stateDir string) error {
 	store := access.NewStore(stateDir, os.Getenv("TELEGRAM_ACCESS_MODE") == "static")
 
 	router := daemonpkg.NewRouter()
-	notifier := daemonpkg.NewNotifier(router)
+
+	var typing *daemonpkg.TypingTracker
+	if daemonpkg.TypingEnabled() {
+		typing = daemonpkg.NewTypingTracker(nil, daemonpkg.TypingConfig{TTL: daemonpkg.TypingTTLFromEnv()})
+	}
+
+	notifier := daemonpkg.NewNotifier(router, store, typing)
 
 	tgBot, err := bot.NewWithRouter(token, store, notifier, &routerAdapter{r: router})
 	if err != nil {
 		return fmt.Errorf("telegram init: %w", err)
+	}
+
+	if typing != nil {
+		typing.AttachBot(tgBot)
 	}
 
 	bgRunner := daemonpkg.NewBgRunnerWithDeps(loadBgConfig(), tgBot, daemonpkg.NewExecCommander())
@@ -174,6 +184,7 @@ func runDaemon(stateDir string) error {
 		Store:       store,
 		Bot:         tgBot,
 		Router:      router,
+		Typing:      typing,
 		IdleTimeout: time.Duration(idleSecs) * time.Second,
 		InboxTTL:    inboxTTL,
 	}

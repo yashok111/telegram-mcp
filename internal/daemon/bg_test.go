@@ -171,6 +171,13 @@ func (b *lockedBot) BroadcastPermissionRequest(ctx context.Context, prefix, reqI
 	b.fb.BroadcastPermissionRequest(ctx, prefix, reqID, tool)
 }
 
+func (b *lockedBot) SendChatAction(ctx context.Context, chatID, action string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.fb.SendChatAction(ctx, chatID, action)
+}
+
 func (b *lockedBot) setSendRet(id int, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

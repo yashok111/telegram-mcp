@@ -26,6 +26,7 @@ type Daemon struct {
 	Store  *access.Store
 	Bot    botSurface
 	Router *Router
+	Typing *TypingTracker // nil disables typing-refresh goroutine
 
 	IdleTimeout time.Duration // 0 disables
 	InboxTTL    time.Duration // 0 disables inbox sweep
@@ -44,7 +45,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	server := ipc.NewServer(d.SocketPath)
 
-	handlers := NewHandlers(d.Store, d.Bot, d.Router)
+	handlers := NewHandlers(d.Store, d.Bot, d.Router, d.Typing)
 	handlers.Register(server)
 
 	server.OnDisconnect(func(c *ipc.Conn) {
@@ -121,6 +122,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if ic := NewInboxCleanup(d.Store, d.InboxTTL, time.Hour); ic != nil {
 		idleWG.Go(func() {
 			ic.Run(d.dctx)
+		})
+	}
+
+	if d.Typing != nil {
+		idleWG.Go(func() {
+			d.Typing.Run(d.dctx)
 		})
 	}
 

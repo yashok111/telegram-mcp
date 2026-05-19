@@ -42,6 +42,8 @@ type fakeBot struct {
 
 	broadcastSeen   []string // request_ids
 	broadcastPrefix []string // prefix per broadcast
+
+	chatActions []struct{ chatID, action string }
 }
 
 func (b *fakeBot) SendMessage(_ context.Context, chatID, text string, opts bot.SendOpts) (int, error) {
@@ -73,6 +75,11 @@ func (b *fakeBot) React(_ context.Context, _ string, _ int, _ string) error {
 	return b.reactedErr
 }
 
+func (b *fakeBot) SendChatAction(_ context.Context, chatID, action string) error {
+	b.chatActions = append(b.chatActions, struct{ chatID, action string }{chatID, action})
+	return nil
+}
+
 func (b *fakeBot) DownloadFile(_ context.Context, _ string) (string, error) {
 	return b.downloadResult, b.downloadErr
 }
@@ -100,7 +107,7 @@ func newHandlersFixture(t *testing.T) (*Handlers, *fakeBot, *Router, *access.Sto
 	r := NewRouter()
 	r.Register(&Shim{ID: "shim-a", Notify: func(string, any) error { return nil }})
 
-	h := NewHandlers(store, fb, r)
+	h := NewHandlers(store, fb, r, nil)
 
 	return h, fb, r, store
 }

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strconv"
 
+	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
 	"github.com/yakov/telegram-mcp/internal/ipc"
 )
@@ -13,9 +14,18 @@ import (
 // only bot.Notifier.
 type Notifier struct {
 	router *Router
+	store  *access.Store
+	typing *TypingTracker
 }
 
-func NewNotifier(r *Router) *Notifier { return &Notifier{router: r} }
+// NewNotifier wires the router used to fan out inbound messages plus, optionally,
+// a TypingTracker (nil disables typing-refresh) and the access.Store used to
+// decide whether the rotating-reaction half of the indicator should fire (only
+// when access.State.AckReaction is non-empty). Passing nil for store is allowed
+// and silently disables reaction rotation while typing-refresh still runs.
+func NewNotifier(r *Router, store *access.Store, typing *TypingTracker) *Notifier {
+	return &Notifier{router: r, store: store, typing: typing}
+}
 
 // DeliverInbound fans an inbound Telegram message out to every target shim
 // resolved by the Router. RouteInboundMulti returns a snapshot of *Shim
@@ -31,6 +41,13 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 		slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "user", meta["user"])
 		return
 	}
+
+	// Mark chat for typing-refresh BEFORE notifying shims. If the shim is fast
+	// enough to send an outbound (and the IPC handler calls Clear) before this
+	// goroutine reaches Mark, the order would invert and Mark would re-add a
+	// just-cleared chat — leaving the typing indicator armed for one full TTL.
+	msgID, _ := strconv.Atoi(meta["message_id"])
+	n.typing.Mark(chatID, msgID, n.shouldRotateReaction())
 
 	params := map[string]any{
 		"content": content,
@@ -49,6 +66,18 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 			slog.Error("inbound notify failed", "shim_id", t.ID, "chat_id", chatID, "err", err)
 		}
 	}
+}
+
+// shouldRotateReaction reports whether the user opted into ack reactions.
+// Returns false when the store is unwired (tests) or AckReaction is unset,
+// which keeps reaction rotation aligned with bot.handleMessage's initial
+// reaction placement.
+func (n *Notifier) shouldRotateReaction() bool {
+	if n.store == nil {
+		return false
+	}
+
+	return n.store.Load().AckReaction != ""
 }
 
 func shimIDs(targets []*Shim) []string {

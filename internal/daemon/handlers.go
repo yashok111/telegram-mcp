@@ -30,6 +30,7 @@ type botSurface interface {
 	SendFile(ctx context.Context, chatID, path string, opts bot.SendOpts) (int, error)
 	EditMessage(ctx context.Context, chatID string, msgID int, text, parseMode string) (int, error)
 	React(ctx context.Context, chatID string, msgID int, emoji string) error
+	SendChatAction(ctx context.Context, chatID, action string) error
 	DownloadFile(ctx context.Context, fileID string) (string, error)
 	BroadcastPermissionRequest(ctx context.Context, prefix, requestID, toolName string)
 }
@@ -38,10 +39,11 @@ type Handlers struct {
 	store  *access.Store
 	bot    botSurface
 	router *Router
+	typing *TypingTracker
 }
 
-func NewHandlers(store *access.Store, b botSurface, r *Router) *Handlers {
-	return &Handlers{store: store, bot: b, router: r}
+func NewHandlers(store *access.Store, b botSurface, r *Router, typing *TypingTracker) *Handlers {
+	return &Handlers{store: store, bot: b, router: r, typing: typing}
 }
 
 func (h *Handlers) shimID(c *ipc.Conn) string {
@@ -148,6 +150,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params js
 	slog.Info("bot.SendMessage ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "text_len", len(text), "reply_to", p.ReplyTo, "parse_mode", p.ParseMode)
 
 	h.router.RecordOutbound(h.shimID(c), p.ChatID, id)
+	h.typing.Clear(p.ChatID)
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -175,6 +178,7 @@ func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.
 	slog.Info("bot.SendFile ok", "shim_id", h.shimID(c), "chat_id", p.ChatID, "message_id", id, "path", p.Path, "reply_to", p.ReplyTo)
 
 	h.router.RecordOutbound(h.shimID(c), p.ChatID, id)
+	h.typing.Clear(p.ChatID)
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -203,6 +207,8 @@ func (h *Handlers) HandleEditMessage(ctx context.Context, c *ipc.Conn, params js
 	}
 
 	slog.Info("bot.EditMessage ok", "chat_id", p.ChatID, "message_id", id, "text_len", len(text), "parse_mode", p.ParseMode)
+
+	h.typing.Clear(p.ChatID)
 
 	return map[string]any{"message_id": id}, nil
 }
