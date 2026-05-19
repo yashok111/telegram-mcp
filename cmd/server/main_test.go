@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,4 +140,123 @@ func TestSelectModeDaemonSubcommand(t *testing.T) {
 func TestSelectModeShimSubcommand(t *testing.T) {
 	t.Setenv("TELEGRAM_DAEMON", "")
 	assert.Equal(t, modeShim, selectMode([]string{"telegram-mcp", "shim"}))
+}
+
+func TestResolveClaudeBin_lookPathHit(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755))
+	t.Setenv("PATH", dir)
+	t.Setenv("HOME", t.TempDir())
+
+	assert.Equal(t, bin, resolveClaudeBin())
+}
+
+func TestResolveClaudeBin_nvmFallbackPicksNewestByMtime(t *testing.T) {
+	home := t.TempDir()
+	older := filepath.Join(home, ".nvm", "versions", "node", "v23.10.0", "bin")
+	newer := filepath.Join(home, ".nvm", "versions", "node", "v9.5.0", "bin") // lex < v23 to ensure mtime sort, not name sort
+	require.NoError(t, os.MkdirAll(older, 0o755))
+	require.NoError(t, os.MkdirAll(newer, 0o755))
+
+	olderBin := filepath.Join(older, "claude")
+	newerBin := filepath.Join(newer, "claude")
+	require.NoError(t, os.WriteFile(olderBin, []byte("o"), 0o755))
+	require.NoError(t, os.WriteFile(newerBin, []byte("n"), 0o755))
+
+	past := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(olderBin, past, past))
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", filepath.Join(home, "no-claude-here"))
+
+	assert.Equal(t, newerBin, resolveClaudeBin())
+}
+
+func TestResolveClaudeBin_noMatchReturnsBareName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", filepath.Join(home, "empty"))
+
+	assert.Equal(t, "claude", resolveClaudeBin())
+}
+
+// installPlugin sets up a marketplace manifest at
+// ~/.claude/plugins/marketplaces/<channel>/.claude-plugin/marketplace.json
+// listing the given plugins. If `installedDataMtime` is non-zero, also creates
+// ~/.claude/plugins/data/telegram-<channel>/ with that mtime, simulating that
+// the user has the plugin installed and last used it at that time. A zero
+// mtime means "no data dir" → not installed.
+func installPlugin(t *testing.T, home, channel string, installedDataMtime time.Time, pluginNames ...string) {
+	t.Helper()
+
+	dir := filepath.Join(home, ".claude", "plugins", "marketplaces", channel, ".claude-plugin")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	plugins := make([]map[string]string, 0, len(pluginNames))
+	for _, n := range pluginNames {
+		plugins = append(plugins, map[string]string{"name": n})
+	}
+
+	body, err := json.Marshal(map[string]any{"name": channel, "plugins": plugins})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "marketplace.json"), body, 0o600))
+
+	if installedDataMtime.IsZero() {
+		return
+	}
+
+	dataDir := filepath.Join(home, ".claude", "plugins", "data", "telegram-"+channel)
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	require.NoError(t, os.Chtimes(dataDir, installedDataMtime, installedDataMtime))
+}
+
+func TestResolveSpawnPluginSpec_noMatchReturnsEmpty(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	assert.Empty(t, resolveSpawnPluginSpec())
+}
+
+func TestResolveSpawnPluginSpec_singleInstalledMarketplace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installPlugin(t, home, "local-yakov", time.Now(), "telegram", "voice")
+
+	assert.Equal(t, "plugin:telegram@local-yakov", resolveSpawnPluginSpec())
+}
+
+func TestResolveSpawnPluginSpec_marketplaceWithoutTelegramSkipped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installPlugin(t, home, "caveman", time.Now(), "caveman")
+
+	assert.Empty(t, resolveSpawnPluginSpec())
+}
+
+func TestResolveSpawnPluginSpec_skipsMarketplaceWithoutDataDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Marketplace exists but plugin is not installed (no data dir).
+	installPlugin(t, home, "claude-plugins-official", time.Time{}, "telegram")
+
+	assert.Empty(t, resolveSpawnPluginSpec())
+}
+
+func TestResolveSpawnPluginSpec_picksNewestByDataMtimeNotManifest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	now := time.Now()
+	// Official: marketplace.json fresh (will be touched by CC refresh), but
+	// data/ dir is older → user hasn't actually used this install recently.
+	installPlugin(t, home, "claude-plugins-official", now.Add(-time.Hour), "telegram")
+	// Bump the official marketplace.json mtime to be newest of all manifests.
+	mfPath := filepath.Join(home, ".claude", "plugins", "marketplaces", "claude-plugins-official", ".claude-plugin", "marketplace.json")
+	require.NoError(t, os.Chtimes(mfPath, now.Add(time.Hour), now.Add(time.Hour)))
+
+	// Local: data/ dir mtime is now (most recent actual usage).
+	installPlugin(t, home, "local-yakov", now, "telegram")
+
+	assert.Equal(t, "plugin:telegram@local-yakov", resolveSpawnPluginSpec())
 }
