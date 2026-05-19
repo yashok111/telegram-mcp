@@ -138,12 +138,12 @@ func (b *Bot) Poll(ctx context.Context) error {
 
 	updates, err := b.api.UpdatesViaLongPolling(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("updates via long-polling: %w", err)
 	}
 
 	bh, err := th.NewBotHandler(b.api, updates)
 	if err != nil {
-		return err
+		return fmt.Errorf("new bot handler: %w", err)
 	}
 
 	b.pollHandler = bh
@@ -196,7 +196,11 @@ func (b *Bot) Poll(ctx context.Context) error {
 
 		return nil
 	case err := <-done:
-		return err
+		if err != nil {
+			return fmt.Errorf("bot handler exited: %w", err)
+		}
+
+		return nil
 	}
 }
 
@@ -1073,7 +1077,7 @@ func (b *Bot) React(ctx context.Context, chatID string, messageID int, emoji str
 func (b *Bot) setReaction(ctx context.Context, chatID string, messageID int, emoji string) error {
 	id, err := parseChatID(chatID)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse chat id: %w", err)
 	}
 
 	return b.api.SetMessageReaction(ctx, &telego.SetMessageReactionParams{

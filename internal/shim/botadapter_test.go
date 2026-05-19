@@ -182,7 +182,7 @@ func TestBotAdapterSwapClient(t *testing.T) {
 }
 
 func TestBotAdapterMapsConnectionClosedToErrDaemonUnreachable(t *testing.T) {
-	fc := &fakeClient{returnErr: errors.New("connection closed")}
+	fc := &fakeClient{returnErr: ipc.ErrConnClosed}
 	a := NewBotAdapter(fc, nil)
 
 	_, err := a.SendMessage(context.Background(), "1", "x", bot.SendOpts{})
