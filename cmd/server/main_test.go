@@ -93,6 +93,22 @@ func TestResolveIdleTimeout_trimsWhitespace(t *testing.T) {
 	assert.Equal(t, 120*time.Second, resolveIdleTimeout())
 }
 
+func TestResolveIdleTimeout_overflowCapped(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "9223372036854775807")
+
+	got := resolveIdleTimeout()
+	assert.Positive(t, int64(got), "overflowed value must not become negative or zero")
+}
+
+func TestResolveIdleTimeout_largeSecondsDontOverflow(t *testing.T) {
+	// Without ParseInt+cap, secs * time.Second wraps to negative on a
+	// 64-bit overflow. With the cap, the result stays positive.
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "999999999999")
+
+	got := resolveIdleTimeout()
+	assert.Positive(t, int64(got))
+}
+
 func TestResolveStateDir_envOverride(t *testing.T) {
 	t.Setenv("TELEGRAM_STATE_DIR", "/explicit/path")
 	assert.Equal(t, "/explicit/path", resolveStateDir())

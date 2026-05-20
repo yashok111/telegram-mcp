@@ -183,10 +183,13 @@ func (c *Client) dispatch(frame []byte) {
 	}
 
 	if probe.ID != nil && probe.Method == "" {
+		// Hold mu through the send so a concurrent Close() cannot close ch
+		// between the lookup and the send. ch is buffered cap 1 and each id
+		// receives at most one response, so the send is non-blocking.
 		c.mu.Lock()
-		ch, ok := c.pending[*probe.ID]
-		c.mu.Unlock()
+		defer c.mu.Unlock()
 
+		ch, ok := c.pending[*probe.ID]
 		if !ok {
 			slog.Warn("ipc client orphan response", "id", *probe.ID)
 			return

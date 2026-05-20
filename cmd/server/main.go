@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -332,11 +334,21 @@ func resolveIdleTimeout() time.Duration {
 		return defaultDaemonIdleTimeout
 	}
 
-	secs, err := strconv.Atoi(strings.TrimSpace(raw))
+	secs, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
 		slog.Warn("invalid TELEGRAM_DAEMON_IDLE_EXIT, using default", "value", raw, "default", defaultDaemonIdleTimeout)
 
 		return defaultDaemonIdleTimeout
+	}
+
+	// time.Duration is int64 nanoseconds; cap to avoid overflow on huge
+	// values (e.g. user pastes max int64). The cap (~292 years) is well
+	// beyond any reasonable idle window.
+	const maxSecs = int64(math.MaxInt64) / int64(time.Second)
+	if secs > maxSecs {
+		slog.Warn("TELEGRAM_DAEMON_IDLE_EXIT too large, capping", "value", raw, "max_secs", maxSecs)
+
+		secs = maxSecs
 	}
 
 	return time.Duration(secs) * time.Second
@@ -510,6 +522,24 @@ func loadSpawnConfig() daemonpkg.SpawnConfig {
 	return cfg
 }
 
+// marketplaceManifestMaxBytes caps how much of a marketplace.json we'll read
+// into memory. Real manifests are a few KB; anything larger is either corrupt
+// or a hostile attempt to OOM the daemon at startup.
+const marketplaceManifestMaxBytes = 1 << 20 // 1 MiB
+
+// readBoundedFile reads at most maxBytes from path. Returns an error if the
+// file is unreadable; truncates silently if it exceeds maxBytes (caller will
+// fail the subsequent JSON parse on a truncated manifest).
+func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	return io.ReadAll(io.LimitReader(f, maxBytes))
+}
+
 // resolveSpawnPluginSpec scans `~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json`
 // for a marketplace that publishes the `telegram` plugin AND has a corresponding
 // installed-plugin dir at `~/.claude/plugins/data/telegram-<channel>`. Returns
@@ -537,7 +567,7 @@ func resolveSpawnPluginSpec() string {
 	var cands []candidate
 
 	for _, p := range matches {
-		b, err := os.ReadFile(p)
+		b, err := readBoundedFile(p, marketplaceManifestMaxBytes)
 		if err != nil {
 			continue
 		}
