@@ -240,6 +240,7 @@ func TestDeliverInboundParallelDispatchDoesNotSerializeOnRouterLock(t *testing.T
 	blockingNotify := func(started chan<- struct{}) func(string, any) error {
 		return func(_ string, _ any) error {
 			started <- struct{}{}
+
 			<-release
 
 			return nil

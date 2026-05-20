@@ -424,6 +424,7 @@ func TestServer_ensureInboxDir_idempotent(t *testing.T) {
 	inbox := filepath.Join(dir, "inbox")
 
 	require.NoError(t, srv.ensureInboxDir(), "first call should succeed")
+
 	info, err := os.Stat(inbox)
 	require.NoError(t, err)
 	assert.True(t, info.IsDir())

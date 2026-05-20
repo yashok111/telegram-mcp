@@ -76,14 +76,14 @@ var photoExts = map[string]struct{}{
 }
 
 type Bot struct {
-	api      *telego.Bot
-	token    string
-	username string
-	store        *access.Store
-	notifier     Notifier
-	router       RouterView
-	bgRunner     BgRunner
-	spawnRunner  SpawnRunner
+	api         *telego.Bot
+	token       string
+	username    string
+	store       *access.Store
+	notifier    Notifier
+	router      RouterView
+	bgRunner    BgRunner
+	spawnRunner SpawnRunner
 
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
@@ -776,6 +776,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 
 func (b *Bot) addRuleAndResolve(ctx context.Context, q *telego.CallbackQuery, requestID string, action access.RuleAction, ttl time.Duration) {
 	details, ok := b.notifier.LookupPermission(requestID)
+
 	toolName := "*"
 	if ok && details.ToolName != "" {
 		toolName = details.ToolName

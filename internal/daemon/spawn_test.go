@@ -54,10 +54,10 @@ func (b *recordingBot) EditMessage(_ context.Context, _ string, _ int, text, _ s
 	return 0, nil
 }
 
-func (b *recordingBot) React(_ context.Context, _ string, _ int, _ string) error      { return nil }
-func (b *recordingBot) SendChatAction(_ context.Context, _, _ string) error            { return nil }
-func (b *recordingBot) DownloadFile(_ context.Context, _ string) (string, error)       { return "", nil }
-func (b *recordingBot) BroadcastPermissionRequest(_ context.Context, _, _, _ string)   {}
+func (b *recordingBot) React(_ context.Context, _ string, _ int, _ string) error     { return nil }
+func (b *recordingBot) SendChatAction(_ context.Context, _, _ string) error          { return nil }
+func (b *recordingBot) DownloadFile(_ context.Context, _ string) (string, error)     { return "", nil }
+func (b *recordingBot) BroadcastPermissionRequest(_ context.Context, _, _, _ string) {}
 
 func (b *recordingBot) sent() []string {
 	b.mu.Lock()
@@ -430,6 +430,7 @@ func TestSpawnRunner_SweepIdle_CancelsWhenPairedShimIdleExceeds(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
+
 	r.mu.Lock()
 	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
 	r.mu.Unlock()
@@ -454,6 +455,7 @@ func TestSpawnRunner_SweepIdle_PairedShimUnderThresholdSurvives(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
+
 	r.mu.Lock()
 	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
 	r.mu.Unlock()
@@ -478,6 +480,7 @@ func TestSpawnRunner_SweepIdle_OrphanCancelledAfterGrace(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
+
 	r.mu.Lock()
 	r.tasks[id].info.StartedAt = time.Now().Add(-2 * time.Hour)
 	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
@@ -503,6 +506,7 @@ func TestSpawnRunner_SweepIdle_OrphanInsideGraceSurvives(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
+
 	r.mu.Lock()
 	r.tasks[id].info.StartedAt = time.Now()
 	r.tasks[id].cancel = func() { cancelled <- struct{}{} }
@@ -524,8 +528,7 @@ func TestSpawnRunner_Run_ZeroIdleTimeoutReturnsImmediately(t *testing.T) {
 		MaxParallel: 1, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: 0,
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	done := make(chan struct{})
 

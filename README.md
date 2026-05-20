@@ -226,7 +226,7 @@ Knobs (env vars, all optional):
 | `TELEGRAM_BOT_TOKEN`              | —                      | From BotFather. Required.                |
 | `TELEGRAM_STATE_DIR`              | `~/.claude/channels/telegram` | State root.                       |
 | `TELEGRAM_ACCESS_MODE`            | `dynamic`              | `static` freezes `access.json` at boot. |
-| `TELEGRAM_DAEMON_IDLE_EXIT`       | `1800` (30 min)        | Idle exit seconds. `0` disables.        |
+| `TELEGRAM_DAEMON_IDLE_EXIT`       | `604800` (7 days)      | Idle exit seconds. `0` or negative disables. |
 | `TELEGRAM_PREFIX_ALIAS`           | `1`                    | Inject `@sN:` source-alias prefix.       |
 | `TELEGRAM_BG_MAX_PARALLEL`        | `3`                    | Concurrent `/bg` tasks per host.         |
 | `TELEGRAM_BG_TIMEOUT`             | `30m`                  | Hard cap per `/bg` task.                 |

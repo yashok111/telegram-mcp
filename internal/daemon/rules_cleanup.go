@@ -37,9 +37,9 @@ func (rc *RulesCleanup) Run(ctx context.Context) {
 
 func (rc *RulesCleanup) pruneOnce() {
 	var (
-		rulesPruned     bool
-		pendingPruned   bool
-		rulesRemaining  int
+		rulesPruned      bool
+		pendingPruned    bool
+		rulesRemaining   int
 		pendingRemaining int
 	)
 

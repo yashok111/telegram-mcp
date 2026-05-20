@@ -56,13 +56,14 @@ func TestRouter_AliasForShim(t *testing.T) {
 	r := NewRouter()
 	a := &Shim{ID: "shim-a", Notify: func(string, any) error { return nil }}
 	b := &Shim{ID: "shim-b", Notify: func(string, any) error { return nil }}
+
 	r.Register(a)
 	r.Register(b)
 
 	assert.Equal(t, "s1", r.AliasForShim("shim-a"))
 	assert.Equal(t, "s2", r.AliasForShim("shim-b"))
-	assert.Equal(t, "", r.AliasForShim("unknown"))
+	assert.Empty(t, r.AliasForShim("unknown"))
 
 	r.Drop("shim-a")
-	assert.Equal(t, "", r.AliasForShim("shim-a"), "alias released on Drop")
+	assert.Empty(t, r.AliasForShim("shim-a"), "alias released on Drop")
 }

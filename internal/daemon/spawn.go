@@ -166,17 +166,17 @@ type spawnTask struct {
 	pid    int
 }
 
+// IdleLookup reports the idle duration for the shim currently paired with
+// spawnID. ok=false means no shim is registered with that spawn_id, in which
+// case the sweeper falls back to time-since-StartedAt to detect orphans.
+type IdleLookup func(spawnID string) (idle time.Duration, ok bool)
+
 // SpawnRunner bootstraps Claude Code clients owned by the daemon. Each /spawn
 // invocation forks `claude` with the telegram plugin pre-loaded, so the
 // spawned CC connects back as a fresh shim via the standard IPC handshake —
 // the daemon then routes via @sN mentions / reply-rings / chat affinity like
 // any user-launched session. SpawnRunner ONLY owns the subprocess lifecycle
 // (PID tracking, MaxParallel, Cancel via SIGTERM, hard timeout).
-// IdleLookup reports the idle duration for the shim currently paired with
-// spawnID. ok=false means no shim is registered with that spawn_id, in which
-// case the sweeper falls back to time-since-StartedAt to detect orphans.
-type IdleLookup func(spawnID string) (idle time.Duration, ok bool)
-
 type SpawnRunner struct {
 	cfg SpawnConfig
 	bot botSurface

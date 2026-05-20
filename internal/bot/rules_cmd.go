@@ -27,6 +27,7 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message, st acc
 		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, renderRules(st.Rules)).WithParseMode("MarkdownV2"))
 	case "clear":
 		var n int
+
 		err := b.store.Mutate(func(st *access.State) bool {
 			n = access.ClearRules(st)
 			return n > 0
@@ -46,6 +47,7 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message, st acc
 		id := parts[2]
 
 		var found bool
+
 		err := b.store.Mutate(func(st *access.State) bool {
 			found = access.RevokeRule(st, id)
 			return found
@@ -86,6 +88,7 @@ func renderRules(rules []access.PermissionRule) string {
 
 	for _, r := range active {
 		exp := "never"
+
 		if r.ExpiresAt > 0 {
 			left := time.Duration(r.ExpiresAt-now) * time.Millisecond
 			exp = "expires in " + left.Round(time.Minute).String()
@@ -98,8 +101,8 @@ func renderRules(rules []access.PermissionRule) string {
 			path = EscapeMarkdownV2(r.PathPattern)
 		}
 
-		sb.WriteString(fmt.Sprintf("• %s — %s %s \\[%s\\] — %s\n",
-			MdCode(r.ID), r.Action, r.Tool, path, EscapeMarkdownV2(exp)))
+		fmt.Fprintf(&sb, "• %s — %s %s \\[%s\\] — %s\n",
+			MdCode(r.ID), r.Action, r.Tool, path, EscapeMarkdownV2(exp))
 	}
 
 	return sb.String()
