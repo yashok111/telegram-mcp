@@ -74,7 +74,9 @@ func newTestLabelHandler(t *testing.T, c IPCClient, updater LabelUpdater) *notif
 // strictly serial).
 func flush(w *notifierWorker) {
 	done := make(chan struct{})
+
 	w.submit("flush", func() { close(done) })
+
 	<-done
 }
 
@@ -171,13 +173,14 @@ func TestAttachLabelHandlerNilUpdaterNoop(t *testing.T) {
 // notification arrives on the IPC read loop while Run's defer is calling
 // Stop. Pre-fix this panicked with "send on closed channel"; the worker
 // now coordinates via a stop channel and select-default.
-func TestNotifierWorker_concurrentSubmitAndStop(t *testing.T) {
+func TestNotifierWorker_concurrentSubmitAndStop(_ *testing.T) {
 	for range 50 {
 		w := newNotifierWorker()
-
 		done := make(chan struct{})
+
 		go func() {
 			defer close(done)
+
 			for range 200 {
 				w.submit("racy", func() {})
 			}
