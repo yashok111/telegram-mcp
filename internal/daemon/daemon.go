@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -145,9 +146,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // Test seams: swappable so tests can mock the comm guard and shorten waits.
 var (
-	isOurDaemonFn   = isOurDaemon
-	termWaitTimeout = 5 * time.Second
-	killWaitTimeout = 2 * time.Second
+	isOurDaemonFn          = isOurDaemon
+	socketPeerPIDFn        = socketPeerPID
+	socketPeerProbeTimeout = 500 * time.Millisecond
+	termWaitTimeout        = 5 * time.Second
+	killWaitTimeout        = 2 * time.Second
 )
 
 // claimPID writes daemon.pid; if a previous daemon owns it, signal SIGTERM
@@ -169,6 +172,15 @@ func (d *Daemon) claimPID() error {
 }
 
 func (d *Daemon) evictOldDaemon() error {
+	// Probe the socket first. The pidfile is unreliable as a "who owns the bot
+	// token" source — a daemon spawned outside the normal lifecycle (e.g. shim
+	// auto-spawn racing systemd) can hold the socket without ever writing
+	// daemon.pid. SO_PEERCRED on a fresh connect tells us who is actually
+	// listening right now.
+	if err := d.evictSocketPeer(); err != nil {
+		return err
+	}
+
 	raw, err := os.ReadFile(d.PidPath)
 	if err != nil {
 		return nil //nolint:nilerr // missing daemon.pid means no prior daemon to evict.
@@ -192,6 +204,27 @@ func (d *Daemon) evictOldDaemon() error {
 	}
 
 	return nil
+}
+
+func (d *Daemon) evictSocketPeer() error {
+	if d.SocketPath == "" {
+		return nil
+	}
+
+	peer, ok := socketPeerPIDFn(d.SocketPath, socketPeerProbeTimeout)
+	if !ok || peer <= 1 || peer == os.Getpid() {
+		return nil
+	}
+
+	if !isOurDaemonFn(peer) {
+		slog.Warn("daemon.sock peer is foreign process — leaving it alone", "pid", peer)
+
+		return nil
+	}
+
+	slog.Info("evicting daemon detected via socket peer", "pid", peer, "socket", d.SocketPath)
+
+	return terminateOldDaemon(peer)
 }
 
 func terminateOldDaemon(pid int) error {
@@ -260,4 +293,60 @@ func readPID(path string) (int, error) {
 	}
 
 	return strconv.Atoi(strings.TrimSpace(string(raw)))
+}
+
+// socketPeerPID dials socketPath and reports the listener's PID via
+// SO_PEERCRED. ok=false means nothing is listening, dial timed out, or the
+// kernel did not return credentials. Linux-only — falls back to ok=false
+// silently on other platforms (GetsockoptUcred unavailable).
+func socketPeerPID(socketPath string, timeout time.Duration) (int, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var dialer net.Dialer
+
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = conn.Close() }()
+
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return 0, false
+	}
+
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 0, false
+	}
+
+	var (
+		pid     int
+		credErr error
+	)
+
+	if ctlErr := raw.Control(func(fd uintptr) {
+		cred, e := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+		if e != nil {
+			credErr = e
+			return
+		}
+
+		pid = int(cred.Pid)
+	}); ctlErr != nil || credErr != nil {
+		// Connect succeeded but SO_PEERCRED didn't — platform unsupported,
+		// kernel denied, or a transient syscall error. Surface at debug so
+		// developers running with --log-level=debug can tell this apart from
+		// the much more common "nothing was listening" case.
+		slog.Debug("socketPeerPID: SO_PEERCRED unavailable", "ctl_err", ctlErr, "cred_err", credErr, "socket", socketPath)
+
+		return 0, false
+	}
+
+	if pid <= 1 {
+		return 0, false
+	}
+
+	return pid, true
 }
