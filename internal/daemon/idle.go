@@ -42,6 +42,16 @@ func (i *IdleExit) Run(ctx context.Context) {
 				}
 
 				if time.Since(idleSince) >= i.timeout {
+					// Re-check at expiry: a shim may have Register'd between the
+					// earlier ConnectedCount() and now (microseconds-wide window,
+					// but Register isn't atomic with the timer).
+					if i.router.ConnectedCount() != 0 {
+						slog.Info("idle expiry aborted — shim connected at expiry", "was_idle_for", time.Since(idleSince))
+						idleSince = time.Time{}
+
+						continue
+					}
+
 					slog.Info("idle timer elapsed — calling onIdle", "idle_for", time.Since(idleSince))
 					i.onIdle()
 
