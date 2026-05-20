@@ -183,6 +183,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "reaction", Description: "/reaction <emoji>|off — set ack emoji on inbound (no args shows current)"},
 				{Command: "bg", Description: "/bg <prompt> [--in <dir>] — fire-and-forget Claude run"},
 				{Command: "spawn", Description: "/spawn [--in <dir>] — fork a Claude Code session owned by this daemon"},
+				{Command: "effort", Description: "/effort <low|medium|high|xhigh|max>|show|clear — set per-chat model + thinking budget"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		}); err != nil {
@@ -282,7 +283,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/label <text> — set session label (empty clears)\n"+
 				"/reaction <emoji>|off — set ack emoji on inbound (no args shows current)\n"+
 				"/bg <prompt> [--in <dir>] — fire-and-forget Claude run; /bg list, /bg cancel <id>\n"+
-				"/spawn [--in <dir>] — fork a daemon-owned Claude Code client; /spawn list, /spawn cancel <id>"))
+				"/spawn [--in <dir>] — fork a daemon-owned Claude Code client; /spawn list, /spawn cancel <id>\n"+
+				"/effort <low|medium|high|xhigh|max>|show|clear — per-chat model + thinking budget for new /spawn and /bg"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
@@ -302,6 +304,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.handleBgCommand(ctx, msg, b.bgRunner)
 	case "spawn":
 		b.handleSpawnCommand(ctx, msg, b.spawnRunner)
+	case "effort":
+		b.handleEffortCommand(ctx, msg)
 	}
 
 	return nil
@@ -314,7 +318,8 @@ func (b *Bot) sendStatus(ctx context.Context, msg telego.Message, st access.Stat
 			label = "@" + msg.From.Username
 		}
 
-		text := fmt.Sprintf("Paired as %s\\.\n\n%s", EscapeMarkdownV2(label), b.renderShims(time.Now()))
+		effortLine := renderEffortLine(st, strconv.FormatInt(msg.Chat.ID, 10))
+		text := fmt.Sprintf("Paired as %s\\.\n%s\n%s", EscapeMarkdownV2(label), effortLine, b.renderShims(time.Now()))
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text).WithParseMode("MarkdownV2"))
 
 		return

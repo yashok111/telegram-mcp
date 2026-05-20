@@ -286,6 +286,53 @@ func TestHandleBgCommand_NoRunnerConfigured(t *testing.T) {
 	assert.Contains(t, texts[0], "not configured")
 }
 
+func TestHandleBgCommand_appliesEffortFromState(t *testing.T) {
+	b, _ := bgTestBot(t)
+	require.NoError(t, b.store.Save(access.State{
+		DMPolicy:     access.PolicyAllowlist,
+		AllowFrom:    []string{"99"},
+		Groups:       map[string]access.GroupPolicy{},
+		Pending:      map[string]access.Pending{},
+		EffortByChat: map[string]string{"1": "medium"},
+	}))
+
+	runner := &fakeBgRunner{spawnID: "abc"}
+	b.handleBgCommand(t.Context(), bgMsg("/bg do work"), runner)
+
+	require.Len(t, runner.spawnCalls, 1)
+	assert.Equal(t, "claude-sonnet-4-6", runner.spawnCalls[0].Model)
+	assert.Equal(t, 8000, runner.spawnCalls[0].ThinkingTokens)
+}
+
+func TestHandleBgCommand_noEffortFallsBackToZeroValues(t *testing.T) {
+	b, _ := bgTestBot(t)
+
+	runner := &fakeBgRunner{spawnID: "abc"}
+	b.handleBgCommand(t.Context(), bgMsg("/bg do work"), runner)
+
+	require.Len(t, runner.spawnCalls, 1)
+	assert.Empty(t, runner.spawnCalls[0].Model)
+	assert.Zero(t, runner.spawnCalls[0].ThinkingTokens)
+}
+
+func TestHandleBgCommand_unknownLevelInStateIgnored(t *testing.T) {
+	b, _ := bgTestBot(t)
+	require.NoError(t, b.store.Save(access.State{
+		DMPolicy:     access.PolicyAllowlist,
+		AllowFrom:    []string{"99"},
+		Groups:       map[string]access.GroupPolicy{},
+		Pending:      map[string]access.Pending{},
+		EffortByChat: map[string]string{"1": "potato"},
+	}))
+
+	runner := &fakeBgRunner{spawnID: "abc"}
+	b.handleBgCommand(t.Context(), bgMsg("/bg do work"), runner)
+
+	require.Len(t, runner.spawnCalls, 1)
+	assert.Empty(t, runner.spawnCalls[0].Model)
+	assert.Zero(t, runner.spawnCalls[0].ThinkingTokens)
+}
+
 func TestStripBotCmd(t *testing.T) {
 	cases := []struct {
 		name, in, want string

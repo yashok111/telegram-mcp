@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -215,7 +216,7 @@ func (r *BgRunner) releaseSlot(id string, finalStatus BgTaskStatus) {
 
 // Commander forks a child process whose lifetime tracks ctx. Mocked in tests.
 type Commander interface {
-	Start(ctx context.Context, workdir, bin string, args []string) (Process, error)
+	Start(ctx context.Context, workdir, bin string, args, env []string) (Process, error)
 }
 
 type Process interface {
@@ -230,11 +231,15 @@ type execCommander struct{}
 
 func NewExecCommander() Commander { return execCommander{} }
 
-func (execCommander) Start(ctx context.Context, workdir, bin string, args []string) (Process, error) {
+func (execCommander) Start(ctx context.Context, workdir, bin string, args, env []string) (Process, error) {
 	// bin is operator-configured via TELEGRAM_BG_CLAUDE_BIN (defaults to "claude").
 	// args[0] is the user prompt, passed as a single argv element — not shell-eval'd.
 	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // intentional subprocess; bin operator-trusted, prompt is argv not shell.
 	cmd.Dir = workdir
+
+	if len(env) > 0 {
+		cmd.Env = env
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -320,9 +325,20 @@ func (r *BgRunner) Spawn(ctx context.Context, req bot.BgSpawnRequest) (string, e
 func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id string, req bot.BgSpawnRequest, workdir string, progressMsgID int) {
 	defer cancel()
 
-	args := []string{"--print", "--output-format=stream-json", "--verbose", req.Prompt}
+	args := []string{"--print", "--output-format=stream-json", "--verbose"}
+	if req.Model != "" {
+		args = append(args, "--model="+req.Model)
+	}
 
-	proc, err := r.cmd.Start(ctx, workdir, r.cfg.ClaudeBin, args)
+	args = append(args, req.Prompt)
+
+	var env []string
+	if req.ThinkingTokens > 0 {
+		env = filterEnv(os.Environ(), "MAX_THINKING_TOKENS=")
+		env = append(env, "MAX_THINKING_TOKENS="+strconv.Itoa(req.ThinkingTokens))
+	}
+
+	proc, err := r.cmd.Start(ctx, workdir, r.cfg.ClaudeBin, args, env)
 	if err != nil {
 		r.editFinal(ctx, req.ChatID, progressMsgID, id, fmt.Sprintf("❌ Task %s failed to start: %v", id, err), 0)
 		r.releaseSlot(id, BgStatusFailed)

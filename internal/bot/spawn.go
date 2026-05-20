@@ -16,9 +16,11 @@ import (
 // /spawn bootstraps a fresh CC client; the user then drives it via @mention
 // in Telegram once the spawn's shim has hello-handshaked with the daemon.
 type SpawnRequest struct {
-	Workdir string
-	ChatID  string
-	UserID  string
+	Workdir        string
+	ChatID         string
+	UserID         string
+	Model          string
+	ThinkingTokens int
 }
 
 // SpawnTaskInfo is the runner's view of one live spawn. PID + StartedAt let
@@ -150,10 +152,27 @@ func (b *Bot) handleSpawnCommand(ctx context.Context, msg telego.Message, runner
 			userID = strconv.FormatInt(msg.From.ID, 10)
 		}
 
+		var (
+			model    string
+			thinking int
+		)
+
+		if b.store != nil {
+			st := b.store.Load()
+			if level, ok := st.EffortByChat[chatID]; ok {
+				if cfg, found := ResolveEffort(level); found {
+					model = cfg.Model
+					thinking = cfg.ThinkingTokens
+				}
+			}
+		}
+
 		_, serr := runner.Spawn(ctx, SpawnRequest{
-			Workdir: args.Workdir,
-			ChatID:  chatID,
-			UserID:  userID,
+			Workdir:        args.Workdir,
+			ChatID:         chatID,
+			UserID:         userID,
+			Model:          model,
+			ThinkingTokens: thinking,
 		})
 		if serr != nil {
 			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Spawn failed: "+serr.Error()))

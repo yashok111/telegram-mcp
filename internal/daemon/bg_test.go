@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -216,11 +217,11 @@ func (p *fakeProcess) Signal(s os.Signal) error { return p.signal(s) }
 func (p *fakeProcess) Wait() error              { return <-p.waitCh }
 
 type fakeCommander struct {
-	startFn func(ctx context.Context, workdir, bin string, args []string) (Process, error)
+	startFn func(ctx context.Context, workdir, bin string, args, env []string) (Process, error)
 }
 
-func (f *fakeCommander) Start(ctx context.Context, workdir, bin string, args []string) (Process, error) {
-	return f.startFn(ctx, workdir, bin, args)
+func (f *fakeCommander) Start(ctx context.Context, workdir, bin string, args, env []string) (Process, error) {
+	return f.startFn(ctx, workdir, bin, args, env)
 }
 
 func TestBgRunner_SpawnSendFailureReleasesSlot(t *testing.T) {
@@ -249,7 +250,7 @@ func TestBgRunner_SpawnHappyPath(t *testing.T) {
 	stderrR, stderrW := io.Pipe()
 	waitCh := make(chan error, 1)
 
-	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _ []string) (Process, error) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
 		return &fakeProcess{
 			stdout: pr,
 			stderr: stderrR,
@@ -294,7 +295,7 @@ func TestBgRunner_CancelSendsSIGTERMAndMarks(t *testing.T) {
 	waitCh := make(chan error, 1)
 	sigSeen := make(chan os.Signal, 4)
 
-	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _ []string) (Process, error) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
 		return &fakeProcess{
 			stdout: pr,
 			stderr: stderrR,
@@ -333,7 +334,7 @@ func TestBgRunner_CancelSendsSIGTERMAndMarks(t *testing.T) {
 }
 
 func TestBgRunner_StartFailureMarksFailed(t *testing.T) {
-	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _ []string) (Process, error) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
 		return nil, errors.New("not found in $PATH")
 	}}
 	fb := newLockedBot()
@@ -361,7 +362,7 @@ func TestBgRunner_WorkdirFallbackHome(t *testing.T) {
 		seenDir string
 	)
 
-	cmder := &fakeCommander{startFn: func(_ context.Context, dir, _ string, _ []string) (Process, error) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, dir, _ string, _, _ []string) (Process, error) {
 		mu.Lock()
 		seenDir = dir
 		mu.Unlock()
@@ -397,7 +398,7 @@ func TestBgRunner_WorkdirFallbackHome(t *testing.T) {
 }
 
 func TestBgRunner_SpawnRespectsRateLimit(t *testing.T) {
-	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _ []string) (Process, error) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
 		return nil, errors.New("stop")
 	}}
 	fb := newLockedBot()
@@ -416,4 +417,171 @@ func TestBgRunner_SpawnRespectsRateLimit(t *testing.T) {
 	require.ErrorIs(t, err, ErrRateLimited)
 
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, time.Second, 10*time.Millisecond)
+}
+
+type recordedBgCall struct {
+	args []string
+	env  []string
+}
+
+type recordingBgCommander struct {
+	mu     sync.Mutex
+	calls  []recordedBgCall
+	stdout func() io.ReadCloser
+	stderr func() io.ReadCloser
+	waitCh chan error
+}
+
+func (r *recordingBgCommander) Start(_ context.Context, _, _ string, args, env []string) (Process, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, recordedBgCall{args: slices.Clone(args), env: slices.Clone(env)})
+	r.mu.Unlock()
+
+	return &fakeProcess{
+		stdout: r.stdout(),
+		stderr: r.stderr(),
+		waitCh: r.waitCh,
+		signal: func(os.Signal) error { return nil },
+	}, nil
+}
+
+func (r *recordingBgCommander) lastCall() recordedBgCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.calls) == 0 {
+		return recordedBgCall{}
+	}
+
+	return r.calls[len(r.calls)-1]
+}
+
+// newRecordingBgRunner wires a recordingBgCommander that emits a clean result
+// event so runTask completes deterministically; returns the runner and the
+// commander so tests can read the captured args/env after Spawn finishes.
+func newRecordingBgRunner(t *testing.T) (*BgRunner, *recordingBgCommander, *lockedBot) {
+	t.Helper()
+
+	pr, pw := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	waitCh := make(chan error, 1)
+
+	cmder := &recordingBgCommander{
+		stdout: func() io.ReadCloser { return pr },
+		stderr: func() io.ReadCloser { return stderrR },
+		waitCh: waitCh,
+	}
+
+	fb := newLockedBot()
+	fb.setSendRet(100, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            5 * time.Second,
+	}, fb, cmder)
+
+	go func() {
+		defer pw.Close()
+		defer stderrW.Close()
+
+		_, _ = pw.Write([]byte(`{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"num_turns":1,"result":"ok","total_cost_usd":0.01}` + "\n"))
+	}()
+
+	waitCh <- nil
+
+	return r, cmder, fb
+}
+
+func TestBgRunner_RunTaskAppendsModelArg(t *testing.T) {
+	r, cmder, _ := newRecordingBgRunner(t)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{
+		Prompt: "say hi",
+		ChatID: "1",
+		UserID: "u",
+		Model:  "claude-haiku-4-5",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 10*time.Millisecond)
+
+	call := cmder.lastCall()
+	require.NotEmpty(t, call.args)
+	assert.Contains(t, call.args, "--model=claude-haiku-4-5")
+	assert.Equal(t, "say hi", call.args[len(call.args)-1], "prompt must be the last positional arg")
+}
+
+func TestBgRunner_RunTaskSetsThinkingTokensEnv(t *testing.T) {
+	t.Setenv("BG_TEST_SENTINEL", "present")
+
+	r, cmder, _ := newRecordingBgRunner(t)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{
+		Prompt:         "say hi",
+		ChatID:         "1",
+		UserID:         "u",
+		ThinkingTokens: 8000,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 10*time.Millisecond)
+
+	call := cmder.lastCall()
+	require.NotEmpty(t, call.env)
+	assert.Contains(t, call.env, "MAX_THINKING_TOKENS=8000")
+	assert.Contains(t, call.env, "BG_TEST_SENTINEL=present", "must inherit parent env, not replace it")
+}
+
+func TestBgRunner_RunTaskZeroValuesPreserveCurrentBehavior(t *testing.T) {
+	r, cmder, _ := newRecordingBgRunner(t)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{
+		Prompt: "say hi",
+		ChatID: "1",
+		UserID: "u",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 10*time.Millisecond)
+
+	call := cmder.lastCall()
+	for _, a := range call.args {
+		assert.NotContains(t, a, "--model=", "no --model arg when Model is empty")
+	}
+
+	assert.Empty(t, call.env, "env must be nil/empty when ThinkingTokens is 0")
+}
+
+func TestBgRunner_RunTaskDedupesThinkingTokensEnv(t *testing.T) {
+	t.Setenv("MAX_THINKING_TOKENS", "5000")
+
+	r, cmder, _ := newRecordingBgRunner(t)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{
+		Prompt:         "say hi",
+		ChatID:         "1",
+		UserID:         "u",
+		ThinkingTokens: 16000,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 10*time.Millisecond)
+
+	call := cmder.lastCall()
+	matches := 0
+
+	for _, e := range call.env {
+		if len(e) >= 20 && e[:20] == "MAX_THINKING_TOKENS=" {
+			matches++
+		}
+	}
+
+	assert.Equal(t, 1, matches, "exactly one MAX_THINKING_TOKENS entry expected; parent's value must be filtered before append")
+	assert.Contains(t, call.env, "MAX_THINKING_TOKENS=16000", "the request-supplied value must win")
 }

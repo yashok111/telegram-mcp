@@ -544,6 +544,172 @@ func TestSpawnRunner_Run_ZeroIdleTimeoutReturnsImmediately(t *testing.T) {
 	}
 }
 
+func TestSpawnRunner_SpawnAppendsModelArg(t *testing.T) {
+	proc := newFakeSpawnProcess(4243)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+		ClaudeArgs:         []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"},
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u", Model: "claude-opus-4-7",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	call := cmder.lastCall()
+	assert.True(t, slices.Contains(call.args, "--model=claude-opus-4-7"), "args must include --model flag")
+	assert.True(t, slices.Contains(call.args, "--dangerously-load-development-channels"), "default args must survive")
+	assert.True(t, slices.Contains(call.args, "plugin:telegram@local-yakov"), "default args must survive")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_SpawnAppendsThinkingTokensEnv(t *testing.T) {
+	proc := newFakeSpawnProcess(4244)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+		ClaudeArgs:         []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"},
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u", ThinkingTokens: 16000,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	call := cmder.lastCall()
+	assert.True(t, slices.Contains(call.env, "MAX_THINKING_TOKENS=16000"), "env must include MAX_THINKING_TOKENS")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_SpawnZeroValuesAreNoOp(t *testing.T) {
+	proc := newFakeSpawnProcess(4245)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+		ClaudeArgs:         []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"},
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	call := cmder.lastCall()
+	hasModel := slices.ContainsFunc(call.args, func(a string) bool {
+		return len(a) >= 8 && a[:8] == "--model="
+	})
+	assert.False(t, hasModel, "no --model arg when Model is empty")
+
+	hasThinking := slices.ContainsFunc(call.env, func(e string) bool {
+		return len(e) >= 20 && e[:20] == "MAX_THINKING_TOKENS="
+	})
+	assert.False(t, hasThinking, "no MAX_THINKING_TOKENS env when ThinkingTokens is zero")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_SpawnDoesNotMutateConfigClaudeArgs(t *testing.T) {
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return newFakeSpawnProcess(4246), nil
+	}}
+	fb := newRecordingBot(100)
+
+	baseArgs := []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        2,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+		ClaudeArgs:         baseArgs,
+	}, fb, cmder)
+
+	id1, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u", Model: "claude-opus-4-7",
+	})
+	require.NoError(t, err)
+
+	id2, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u", Model: "claude-sonnet-4",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"}, r.cfg.ClaudeArgs,
+		"cfg.ClaudeArgs must remain unchanged across Spawn calls")
+	assert.Len(t, r.cfg.ClaudeArgs, 2, "cfg.ClaudeArgs length must not grow")
+
+	require.NoError(t, r.Cancel(id1))
+	require.NoError(t, r.Cancel(id2))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_SpawnDedupesThinkingTokensEnv(t *testing.T) {
+	t.Setenv("MAX_THINKING_TOKENS", "5000")
+
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return newFakeSpawnProcess(4247), nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+		ClaudeArgs:         []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"},
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u", ThinkingTokens: 16000,
+	})
+	require.NoError(t, err)
+
+	call := cmder.lastCall()
+	matches := 0
+
+	for _, e := range call.env {
+		if len(e) >= 20 && e[:20] == "MAX_THINKING_TOKENS=" {
+			matches++
+		}
+	}
+
+	assert.Equal(t, 1, matches, "exactly one MAX_THINKING_TOKENS entry expected; parent's value must be filtered before append")
+	assert.Contains(t, call.env, "MAX_THINKING_TOKENS=16000", "the request-supplied value must win")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
 func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
 
 func indexOf(s, sub string) int {
