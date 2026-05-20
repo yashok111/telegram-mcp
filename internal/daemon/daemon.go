@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	defer func() { _ = os.Remove(d.PidPath) }()
+
+	release, err := AcquirePollerLock(filepath.Dir(d.PidPath))
+	if err != nil {
+		return fmt.Errorf("poller lock: %w", err)
+	}
+
+	defer release()
 
 	server := ipc.NewServer(d.SocketPath)
 
@@ -183,12 +191,16 @@ func (d *Daemon) evictOldDaemon() error {
 
 	raw, err := os.ReadFile(d.PidPath)
 	if err != nil {
-		return nil //nolint:nilerr // missing daemon.pid means no prior daemon to evict.
+		slog.Debug("evictOldDaemon: no daemon.pid to consult", "err", err, "path", d.PidPath)
+
+		return nil
 	}
 
 	old, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || old <= 1 || old == os.Getpid() {
-		return nil //nolint:nilerr // garbage / self / pid<=1 means no prior daemon to evict.
+		slog.Debug("evictOldDaemon: daemon.pid unusable", "raw", strings.TrimSpace(string(raw)), "parse_err", err, "self_pid", os.Getpid())
+
+		return nil
 	}
 
 	alive := processIsLive(old)
@@ -200,7 +212,7 @@ func (d *Daemon) evictOldDaemon() error {
 	case alive && !ours:
 		slog.Warn("daemon.pid points at foreign process — leaving it alone", "pid", old)
 	default:
-		slog.Info("daemon.pid stale, overwriting", "pid", old)
+		slog.Info("daemon.pid stale, overwriting", "pid", old, "alive", alive, "ours", ours)
 	}
 
 	return nil
