@@ -219,6 +219,51 @@ func TestHandleSpawnCommand_NoRunnerConfigured(t *testing.T) {
 	assert.Contains(t, texts[0], "not configured")
 }
 
+func TestHandleSpawnCommand_appliesEffortFromState(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy:     access.PolicyAllowlist,
+		AllowFrom:    []string{"99"},
+		Groups:       map[string]access.GroupPolicy{},
+		Pending:      map[string]access.Pending{},
+		EffortByChat: map[string]string{"1": "high"},
+	})
+	runner := &fakeSpawnRunner{spawnID: "ok"}
+
+	b.handleSpawnCommand(t.Context(), spawnMsg("/spawn"), runner)
+
+	require.Len(t, runner.spawnCalls, 1)
+	assert.Equal(t, "claude-opus-4-7", runner.spawnCalls[0].Model)
+	assert.Equal(t, 16000, runner.spawnCalls[0].ThinkingTokens)
+}
+
+func TestHandleSpawnCommand_noEffortFallsBackToZeroValues(t *testing.T) {
+	b, _ := spawnTestBot(t)
+	runner := &fakeSpawnRunner{spawnID: "ok"}
+
+	b.handleSpawnCommand(t.Context(), spawnMsg("/spawn"), runner)
+
+	require.Len(t, runner.spawnCalls, 1)
+	assert.Empty(t, runner.spawnCalls[0].Model)
+	assert.Zero(t, runner.spawnCalls[0].ThinkingTokens)
+}
+
+func TestHandleSpawnCommand_unknownLevelInStateIgnored(t *testing.T) {
+	b, _, _ := newTestBot(t, access.State{
+		DMPolicy:     access.PolicyAllowlist,
+		AllowFrom:    []string{"99"},
+		Groups:       map[string]access.GroupPolicy{},
+		Pending:      map[string]access.Pending{},
+		EffortByChat: map[string]string{"1": "garbage"},
+	})
+	runner := &fakeSpawnRunner{spawnID: "ok"}
+
+	b.handleSpawnCommand(t.Context(), spawnMsg("/spawn"), runner)
+
+	require.Len(t, runner.spawnCalls, 1)
+	assert.Empty(t, runner.spawnCalls[0].Model)
+	assert.Zero(t, runner.spawnCalls[0].ThinkingTokens)
+}
+
 func TestHandleSpawnCommand_InvalidSyntax(t *testing.T) {
 	b, api := spawnTestBot(t)
 	runner := &fakeSpawnRunner{}

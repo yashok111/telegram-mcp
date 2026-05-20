@@ -64,6 +64,7 @@ type State struct {
 	TextChunkLimit  int                    `json:"textChunkLimit,omitempty"`
 	ChunkMode       ChunkMode              `json:"chunkMode,omitempty"`
 	Rules           []PermissionRule       `json:"rules,omitempty"`
+	EffortByChat    map[string]string      `json:"effortByChat,omitempty"`
 }
 
 // DefaultAckReaction is the emoji set on inbound messages when a fresh
@@ -169,6 +170,10 @@ func cloneState(src *State) State {
 
 	if src.Pending != nil {
 		out.Pending = maps.Clone(src.Pending)
+	}
+
+	if src.EffortByChat != nil {
+		out.EffortByChat = maps.Clone(src.EffortByChat)
 	}
 
 	if src.Groups != nil {

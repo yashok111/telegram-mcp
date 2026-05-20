@@ -35,10 +35,12 @@ var (
 )
 
 type BgSpawnRequest struct {
-	Prompt  string
-	Workdir string
-	ChatID  string
-	UserID  string
+	Prompt         string
+	Workdir        string
+	ChatID         string
+	UserID         string
+	Model          string
+	ThinkingTokens int
 }
 
 type BgTaskInfo struct {
@@ -140,11 +142,30 @@ func (b *Bot) handleBgCommand(ctx context.Context, msg telego.Message, runner Bg
 			userID = strconv.FormatInt(msg.From.ID, 10)
 		}
 
+		var (
+			model    string
+			thinking int
+		)
+
+		chatIDStr := strconv.FormatInt(msg.Chat.ID, 10)
+
+		if b.store != nil {
+			st := b.store.Load()
+			if level, ok := st.EffortByChat[chatIDStr]; ok {
+				if cfg, found := ResolveEffort(level); found {
+					model = cfg.Model
+					thinking = cfg.ThinkingTokens
+				}
+			}
+		}
+
 		id, serr := runner.Spawn(ctx, BgSpawnRequest{
-			Prompt:  args.Prompt,
-			Workdir: args.Workdir,
-			ChatID:  strconv.FormatInt(msg.Chat.ID, 10),
-			UserID:  userID,
+			Prompt:         args.Prompt,
+			Workdir:        args.Workdir,
+			ChatID:         chatIDStr,
+			UserID:         userID,
+			Model:          model,
+			ThinkingTokens: thinking,
 		})
 		if serr != nil {
 			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Start failed: "+serr.Error()))

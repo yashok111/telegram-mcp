@@ -198,6 +198,7 @@ func TestStore_load_partialJSON_fillsDefaults(t *testing.T) {
 	assert.NotNil(t, got.AllowFrom)
 	assert.NotNil(t, got.Groups)
 	assert.NotNil(t, got.Pending)
+	assert.Nil(t, got.EffortByChat, "absent effortByChat stays nil (omitempty convention)")
 }
 
 func TestStore_Load_returnedMapsAndSlicesAreIndependentOfCache(t *testing.T) {
@@ -412,4 +413,58 @@ func TestStore_Save_compactJSON(t *testing.T) {
 	assert.Equal(t, PolicyAllowlist, got.DMPolicy)
 	assert.Equal(t, []string{"42"}, got.AllowFrom)
 	assert.True(t, got.Groups["-100200"].RequireMention)
+}
+
+func TestStore_save_thenLoad_effortByChatRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	original := State{
+		DMPolicy:     PolicyAllowlist,
+		AllowFrom:    []string{"330621952"},
+		Groups:       map[string]GroupPolicy{},
+		Pending:      map[string]Pending{},
+		EffortByChat: map[string]string{"330621952": "high", "-100200": "low"},
+	}
+	require.NoError(t, s.Save(original))
+
+	got := s.Load()
+	assert.Equal(t, original.EffortByChat, got.EffortByChat)
+}
+
+func TestStore_Load_returnedEffortByChatIsIndependentOfCache(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+	require.NoError(t, s.Save(State{
+		DMPolicy:     PolicyAllowlist,
+		AllowFrom:    []string{"1"},
+		Groups:       map[string]GroupPolicy{},
+		Pending:      map[string]Pending{},
+		EffortByChat: map[string]string{"123": "high"},
+	}))
+
+	a := s.Load()
+	a.EffortByChat["123"] = "mutated"
+	a.EffortByChat["999"] = "injected"
+
+	b := s.Load()
+	assert.Equal(t, "high", b.EffortByChat["123"], "EffortByChat value mutation must not corrupt cache")
+	assert.NotContains(t, b.EffortByChat, "999", "EffortByChat key insertion must not corrupt cache")
+}
+
+func TestStore_Save_effortByChatNil_omitsField(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, false)
+
+	require.NoError(t, s.Save(State{
+		DMPolicy:     PolicyAllowlist,
+		AllowFrom:    []string{"1"},
+		Groups:       map[string]GroupPolicy{},
+		Pending:      map[string]Pending{},
+		EffortByChat: nil,
+	}))
+
+	raw, err := os.ReadFile(filepath.Join(dir, "access.json"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "effortByChat", "nil EffortByChat must be omitted from JSON")
 }

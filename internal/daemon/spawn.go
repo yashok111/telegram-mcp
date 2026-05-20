@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -454,11 +456,21 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 	env := filterEnv(os.Environ(), "TELEGRAM_SPAWN_ID=")
 	env = append(env, "TELEGRAM_SPAWN_ID="+id)
 
+	args := slices.Clone(r.cfg.ClaudeArgs)
+	if req.Model != "" {
+		args = append(args, "--model="+req.Model)
+	}
+
+	if req.ThinkingTokens > 0 {
+		env = filterEnv(env, "MAX_THINKING_TOKENS=")
+		env = append(env, "MAX_THINKING_TOKENS="+strconv.Itoa(req.ThinkingTokens))
+	}
+
 	// Detached from caller's ctx — /spawn outlives the bot's request scope.
 	// HardTimeout is the only built-in cap; Cancel/Stop also flow here.
 	taskCtx, cancel := context.WithTimeout(context.Background(), r.cfg.HardTimeout)
 
-	proc, perr := r.cmd.Start(taskCtx, workdir, r.cfg.ClaudeBin, r.cfg.ClaudeArgs, env)
+	proc, perr := r.cmd.Start(taskCtx, workdir, r.cfg.ClaudeBin, args, env)
 	if perr != nil {
 		cancel()
 		r.releaseSlot(id, SpawnStatusFailed)
@@ -480,7 +492,16 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 
 	go r.runSpawn(taskCtx, cancel, id, proc)
 
-	slog.Info("spawn started", "spawn_id", id, "chat_id", req.ChatID, "workdir", workdir, "pid", proc.Pid())
+	attrs := []any{"spawn_id", id, "chat_id", req.ChatID, "workdir", workdir, "pid", proc.Pid()}
+	if req.Model != "" {
+		attrs = append(attrs, "model", req.Model)
+	}
+
+	if req.ThinkingTokens > 0 {
+		attrs = append(attrs, "thinking_tokens", req.ThinkingTokens)
+	}
+
+	slog.Info("spawn started", attrs...)
 
 	_, _ = r.bot.SendMessage(ctx, req.ChatID,
 		fmt.Sprintf("🚀 Spawn %s started · pid=%d · workdir=%s\nWait a moment for the shim to register — then use /sessions or @<alias> to talk to it.",
