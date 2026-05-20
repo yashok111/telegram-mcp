@@ -46,11 +46,11 @@ func TestShimSendsHelloOnWire(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abc","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		HelloPID:    1234,
-		HelloLabel:  "session-X",
+		Client:     fc,
+		MCP:        mcpSrv,
+		Store:      store,
+		HelloPID:   1234,
+		HelloLabel: "session-X",
 	}
 
 	require.NoError(t, sh.Wire(context.Background()))
@@ -72,9 +72,9 @@ func TestShimWireCapturesAlias(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abcd","daemon_version":"test","alias":"s7"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
+		Client: fc,
+		MCP:    mcpSrv,
+		Store:  store,
 	}
 
 	require.NoError(t, sh.Wire(context.Background()))
@@ -95,9 +95,9 @@ func TestShimWireSendsWorkdirAndSession(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id1","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
+		Client: fc,
+		MCP:    mcpSrv,
+		Store:  store,
 	}
 	require.NoError(t, sh.Wire(context.Background()))
 
@@ -116,12 +116,12 @@ func TestShimWireWritesSessionFile(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abcdef012345","alias":"s4","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		HelloPID:    5555,
-		CCPID:       12345,
+		Client:   fc,
+		MCP:      mcpSrv,
+		Store:    store,
+		StateDir: dir,
+		HelloPID: 5555,
+		CCPID:    12345,
 	}
 
 	require.NoError(t, sh.Wire(context.Background()))
@@ -150,11 +150,11 @@ func TestShimWireWritesSessionFileEvenWithoutCCSessionIDEnv(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		CCPID:       777,
+		Client:   fc,
+		MCP:      mcpSrv,
+		Store:    store,
+		StateDir: dir,
+		CCPID:    777,
 	}
 
 	require.NoError(t, sh.Wire(context.Background()))
@@ -175,10 +175,10 @@ func TestShimWireSkipsSessionFileWhenNoStateDir(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		CCPID:       4242,
+		Client: fc,
+		MCP:    mcpSrv,
+		Store:  store,
+		CCPID:  4242,
 	}
 
 	require.NoError(t, sh.Wire(context.Background()))
@@ -192,11 +192,11 @@ func TestShimRunRemovesSessionFile(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		CCPID:       9090,
+		Client:   fc,
+		MCP:      mcpSrv,
+		Store:    store,
+		StateDir: dir,
+		CCPID:    9090,
 	}
 
 	require.NoError(t, sh.Wire(context.Background()))
@@ -234,12 +234,12 @@ func TestShimRunReconnectsAfterClientDone(t *testing.T) {
 	served := make(chan error, 1)
 
 	sh := &Shim{
-		Client:      initClient,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		SocketPath:  filepath.Join(dir, "daemon.sock"),
-		CCPID:       4321,
+		Client:     initClient,
+		MCP:        mcpSrv,
+		Store:      store,
+		StateDir:   dir,
+		SocketPath: filepath.Join(dir, "daemon.sock"),
+		CCPID:      4321,
 		DialIPC: func(string) (IPCClient, error) {
 			dialed.Add(1)
 			return reconnClient, nil
@@ -301,12 +301,12 @@ func TestShimRunReconnectBackoffRespectsCtx(t *testing.T) {
 	var dialed atomic.Int32
 
 	sh := &Shim{
-		Client:      initClient,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		SocketPath:  filepath.Join(dir, "daemon.sock"),
-		CCPID:       9999,
+		Client:     initClient,
+		MCP:        mcpSrv,
+		Store:      store,
+		StateDir:   dir,
+		SocketPath: filepath.Join(dir, "daemon.sock"),
+		CCPID:      9999,
 		DialIPC: func(string) (IPCClient, error) {
 			dialed.Add(1)
 			return nil, errors.New("daemon unreachable")
@@ -402,12 +402,12 @@ func TestShimRunReconnectsThroughRealIPC(t *testing.T) {
 	require.NoError(t, err)
 
 	sh := &Shim{
-		Client:      client,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		SocketPath:  sock,
-		CCPID:       1234,
+		Client:     client,
+		MCP:        mcpSrv,
+		Store:      store,
+		StateDir:   dir,
+		SocketPath: sock,
+		CCPID:      1234,
 		DialIPC: func(p string) (IPCClient, error) {
 			return ipc.Dial(p)
 		},

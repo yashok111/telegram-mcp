@@ -87,7 +87,9 @@ func (s *Server) Listen(ctx context.Context) error {
 	// 0600 atomically. Post-listen os.Chmod would leave a race window where
 	// the socket is briefly world-accessible (modulo parent dir perms).
 	oldMask := syscall.Umask(0o177)
+
 	l, err := net.Listen("unix", s.socketPath)
+
 	syscall.Umask(oldMask)
 
 	if err != nil {
