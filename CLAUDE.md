@@ -112,6 +112,8 @@ Single daemon per host; every Claude Code session attaches to it via shim.
 
 **Rules cleanup:** background goroutine pulls `access.State`, calls `access.PruneRules`, and saves once a minute. Belt to the suspenders of the in-process `Match()` filter that already skips expired rules on each `permission_request` — keeps `/rules list` honest and disk size bounded over long runs.
 
+**Typing tracker:** `internal/daemon/typing.go` keeps the chat-action bubble alive and rotates a reaction emoji on the original inbound while the agent thinks; `Done()` swaps a final ✓-style emoji when the shim's first outbound lands. Env vars (all read by `cmd/server.loadTypingConfig`): `TELEGRAM_TYPING_REFRESH=0|false|no|off` disables the goroutine entirely; `TELEGRAM_TYPING_TTL=<seconds>` caps how long a chat stays pending without an outbound; `TELEGRAM_TYPING_ROTATION_EMOJIS=👀,🤔,✍` (comma-separated, whitespace trimmed) overrides the rotation cycle — empty value disables rotation entirely (matches `TypingConfig.RotationEmojis = []string{}`); `TELEGRAM_TYPING_DONE_EMOJI=👌` overrides the done-swap emoji — empty or `off` (case-insensitive) suppresses the swap so `Done()` degenerates into `Clear()`. **Caveat:** Telegram's Bot API accepts only a curated whitelist of emojis for `setMessageReaction`; anything outside it (`⏳`, `💭`, `✅`, etc.) returns `Bad Request: REACTION_INVALID`, which surfaces as a `slog.Warn` from `tickOnce` / `Done` rather than killing the daemon. Validation is on Telegram's side — pick from their allowlist or check `daemon.log` after the first inbound.
+
 **Files:**
 - `~/.claude/channels/telegram/daemon.sock` (0600) — IPC unix socket
 - `~/.claude/channels/telegram/daemon.pid` — daemon's PID (comm-checked before any SIGTERM)

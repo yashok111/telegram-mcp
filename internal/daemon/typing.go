@@ -27,6 +27,9 @@ const (
 //
 // The first emoji is already placed by bot.handleMessage when
 // access.State.AckReaction is set; the daemon rotates onwards from index 1.
+//
+// Override at runtime via TELEGRAM_TYPING_ROTATION_EMOJIS — see
+// TypingRotationEmojisFromEnv.
 var defaultRotationEmojis = []string{"👀", "🤔", "✍"}
 
 // defaultDoneEmoji is what Done() swaps onto the inbound message after the
@@ -34,6 +37,9 @@ var defaultRotationEmojis = []string{"👀", "🤔", "✍"}
 // inside Telegram's bot-reaction allowlist for the same reason as
 // defaultRotationEmojis above; ✅ is NOT in the allowlist (verified live as
 // `Bad Request: REACTION_INVALID`), so use 👌 instead.
+//
+// Override at runtime via TELEGRAM_TYPING_DONE_EMOJI — see
+// TypingDoneEmojiFromEnv.
 const defaultDoneEmoji = "👌"
 
 // typingBot is the slice of *bot.Bot the tracker needs. Defined here so
@@ -62,9 +68,16 @@ type TypingConfig struct {
 	RotationEmojis []string
 
 	// DoneEmoji is what Done() places on the inbound message when the shim
-	// sends its first outbound. Empty string disables the swap (Done then
-	// degenerates into Clear). Zero value falls back to defaultDoneEmoji.
+	// sends its first outbound. Zero value falls back to defaultDoneEmoji.
+	// To suppress the swap entirely, set DoneEmojiDisabled (see below); the
+	// empty string alone can't distinguish "unset" from "explicitly off".
 	DoneEmoji string
+
+	// DoneEmojiDisabled, when true, suppresses the Done() swap regardless of
+	// DoneEmoji's contents (NewTypingTracker zeroes DoneEmoji so Done()
+	// degenerates into Clear). Lets callers express "explicitly off" without
+	// overloading the zero-value-means-default convention on DoneEmoji.
+	DoneEmojiDisabled bool
 }
 
 // TypingTracker keeps a per-chat pending set and, while ctx is alive, sends a
@@ -107,7 +120,10 @@ func NewTypingTracker(b typingBot, cfg TypingConfig) *TypingTracker {
 		cfg.RotationEmojis = defaultRotationEmojis
 	}
 
-	if cfg.DoneEmoji == "" {
+	switch {
+	case cfg.DoneEmojiDisabled:
+		cfg.DoneEmoji = ""
+	case cfg.DoneEmoji == "":
 		cfg.DoneEmoji = defaultDoneEmoji
 	}
 
@@ -339,4 +355,66 @@ func TypingTTLFromEnv() time.Duration {
 	}
 
 	return time.Duration(n) * time.Second
+}
+
+// TypingRotationEmojisFromEnv reads TELEGRAM_TYPING_ROTATION_EMOJIS as a
+// comma-separated list of emojis. Return values:
+//
+//   - nil — env var unset; caller falls back to defaultRotationEmojis.
+//   - []string{} — env var set but empty or all-whitespace; caller should
+//     treat as explicit "rotation off" (matches TypingConfig.RotationEmojis
+//     semantics: nil = default, non-nil empty = disabled).
+//   - non-empty slice — split on commas, each entry whitespace-trimmed,
+//     empty fields dropped.
+//
+// Telegram only accepts a curated whitelist of emojis for bot reactions;
+// anything outside it surfaces as `Bad Request: REACTION_INVALID` and lands
+// as a slog.Warn from tickOnce (the rotation continues — a bad emoji doesn't
+// kill the daemon). Operators pick their own emojis at their own risk.
+func TypingRotationEmojisFromEnv() []string {
+	v, ok := os.LookupEnv("TELEGRAM_TYPING_ROTATION_EMOJIS")
+	if !ok {
+		return nil
+	}
+
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+
+	if len(out) == 0 {
+		return []string{}
+	}
+
+	return out
+}
+
+// TypingDoneEmojiFromEnv reads TELEGRAM_TYPING_DONE_EMOJI. The two return
+// values are (emoji, configured):
+//
+//   - configured=false — env var unset; caller leaves cfg untouched so
+//     defaultDoneEmoji applies.
+//   - configured=true, emoji="" — env value was empty or "off"
+//     (case-insensitive); caller should set DoneEmojiDisabled to suppress
+//     the swap entirely.
+//   - configured=true, emoji=<value> — user-chosen emoji.
+//
+// Same Telegram whitelist caveat as TypingRotationEmojisFromEnv: invalid
+// emojis surface as a slog.Warn at React time, not at startup.
+func TypingDoneEmojiFromEnv() (string, bool) {
+	v, ok := os.LookupEnv("TELEGRAM_TYPING_DONE_EMOJI")
+	if !ok {
+		return "", false
+	}
+
+	v = strings.TrimSpace(v)
+	if v == "" || strings.EqualFold(v, "off") {
+		return "", true
+	}
+
+	return v, true
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
 	"strconv"
 	"sync"
@@ -307,19 +308,29 @@ func TestTypingTracker_DoneNoopForUnknownChat(t *testing.T) {
 	assert.Empty(t, bot.snapshotReacts())
 }
 
-func TestTypingTracker_DoneRespectsEmptyEmojiConfig(t *testing.T) {
+func TestTypingTracker_DoneRespectsDisabledFlag(t *testing.T) {
 	bot := &fakeTypingBot{}
-	tr := NewTypingTracker(bot, TypingConfig{DoneEmoji: " "})
+	tr := NewTypingTracker(bot, TypingConfig{DoneEmojiDisabled: true})
 
-	// Reset to truly empty — NewTypingTracker maps "" to defaultDoneEmoji,
-	// so we have to write past the constructor to disable the swap entirely.
-	tr.cfg.DoneEmoji = ""
+	assert.Empty(t, tr.cfg.DoneEmoji, "DoneEmojiDisabled forces DoneEmoji to empty in the constructor")
 
 	tr.Mark("chat", 99, true)
 	tr.Done(t.Context(), "chat")
 
 	assert.Empty(t, tr.Pending())
-	assert.Empty(t, bot.snapshotReacts(), "empty DoneEmoji disables the swap and Done degenerates to Clear")
+	assert.Empty(t, bot.snapshotReacts(), "DoneEmojiDisabled suppresses the swap and Done degenerates to Clear")
+}
+
+func TestTypingTracker_DoneEmojiDisabledOverridesExplicitEmoji(t *testing.T) {
+	bot := &fakeTypingBot{}
+	tr := NewTypingTracker(bot, TypingConfig{DoneEmoji: "🔥", DoneEmojiDisabled: true})
+
+	assert.Empty(t, tr.cfg.DoneEmoji, "Disabled wins over any non-empty DoneEmoji")
+
+	tr.Mark("chat", 99, true)
+	tr.Done(t.Context(), "chat")
+
+	assert.Empty(t, bot.snapshotReacts())
 }
 
 func TestTypingTracker_DoneIdempotent(t *testing.T) {
@@ -374,6 +385,78 @@ func TestTypingTTLFromEnv(t *testing.T) {
 		t.Run(tc.val, func(t *testing.T) {
 			t.Setenv("TELEGRAM_TYPING_TTL", tc.val)
 			assert.Equal(t, tc.want, TypingTTLFromEnv())
+		})
+	}
+}
+
+func TestTypingRotationEmojisFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		set  bool
+		val  string
+		want []string
+	}{
+		{name: "unset returns nil so caller uses default", set: false, want: nil},
+		{name: "empty value disables rotation", set: true, val: "", want: []string{}},
+		{name: "whitespace-only value disables rotation", set: true, val: "   ", want: []string{}},
+		{name: "comma-only value disables rotation", set: true, val: ",,,", want: []string{}},
+		{name: "single emoji", set: true, val: "🔥", want: []string{"🔥"}},
+		{name: "comma list", set: true, val: "🔥,⚡,💯", want: []string{"🔥", "⚡", "💯"}},
+		{name: "whitespace around entries is trimmed", set: true, val: " 🔥 , ⚡ , 💯 ", want: []string{"🔥", "⚡", "💯"}},
+		{name: "empty fields between commas are dropped", set: true, val: "🔥,,⚡,,,💯,", want: []string{"🔥", "⚡", "💯"}},
+		{name: "preserves multi-codepoint emoji (writing hand)", set: true, val: "✍", want: []string{"✍"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("TELEGRAM_TYPING_ROTATION_EMOJIS", tc.val)
+			} else {
+				// t.Setenv only sets — explicitly clear so an outer-process value
+				// doesn't bleed into the "unset" case.
+				_ = os.Unsetenv("TELEGRAM_TYPING_ROTATION_EMOJIS")
+			}
+
+			got := TypingRotationEmojisFromEnv()
+			assert.Equal(t, tc.want, got)
+
+			if tc.set && len(tc.want) == 0 {
+				assert.NotNil(t, got, "set-but-disabled must return non-nil empty slice to distinguish from default")
+			}
+		})
+	}
+}
+
+func TestTypingDoneEmojiFromEnv(t *testing.T) {
+	cases := []struct {
+		name     string
+		set      bool
+		val      string
+		want     string
+		wantConf bool
+	}{
+		{name: "unset returns not-configured", set: false, want: "", wantConf: false},
+		{name: "empty disables", set: true, val: "", want: "", wantConf: true},
+		{name: "whitespace disables", set: true, val: "   ", want: "", wantConf: true},
+		{name: "off disables", set: true, val: "off", want: "", wantConf: true},
+		{name: "OFF case-insensitive", set: true, val: "OFF", want: "", wantConf: true},
+		{name: "Off mixed case", set: true, val: "Off", want: "", wantConf: true},
+		{name: "explicit emoji passes through", set: true, val: "🔥", want: "🔥", wantConf: true},
+		{name: "whitespace around emoji is trimmed", set: true, val: "  🔥  ", want: "🔥", wantConf: true},
+		{name: "garbage is forwarded as-is (Telegram rejects later)", set: true, val: "nope", want: "nope", wantConf: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("TELEGRAM_TYPING_DONE_EMOJI", tc.val)
+			} else {
+				_ = os.Unsetenv("TELEGRAM_TYPING_DONE_EMOJI")
+			}
+
+			emoji, configured := TypingDoneEmojiFromEnv()
+			assert.Equal(t, tc.want, emoji)
+			assert.Equal(t, tc.wantConf, configured)
 		})
 	}
 }
