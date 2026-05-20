@@ -164,6 +164,9 @@ func TestLoadConfig_tokenFromDotEnv(t *testing.T) {
 
 	t.Cleanup(func() { _ = os.Unsetenv("TELEGRAM_BOT_TOKEN") })
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("TELEGRAM_BOT_TOKEN=fromfile\n"), 0o600))
+	// main() loads .env before dispatching to loadConfig; reproduce that
+	// here so loadConfig finds the token in the process environment.
+	require.NoError(t, loadDotEnv(filepath.Join(dir, ".env")))
 	tok, err := loadConfig(dir)
 	require.NoError(t, err)
 	assert.Equal(t, "fromfile", tok)

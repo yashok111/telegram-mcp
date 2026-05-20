@@ -19,6 +19,13 @@ var ErrFrameTooLarge = errors.New("frame exceeds MaxFrameSize")
 
 // FrameReader reads Content-Length framed payloads from an io.Reader.
 // Not safe for concurrent use.
+//
+// ReadFrame uses bufio.Reader.ReadString('\n') for headers, which blocks
+// without a deadline. The threat model assumes a trusted local peer over
+// AF_UNIX 0600 — a misbehaving plugin could in principle stall the read
+// loop with a slow trickle, but it runs under the same UID so the only
+// damage is to itself. Set socket deadlines via SetReadDeadline on the
+// underlying net.Conn if a wider threat model becomes relevant.
 type FrameReader struct {
 	br *bufio.Reader
 }

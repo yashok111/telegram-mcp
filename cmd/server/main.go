@@ -377,13 +377,9 @@ func bootstrapStateDir() (string, error) {
 	return dir, nil
 }
 
-// loadConfig pulls TELEGRAM_BOT_TOKEN from .env first (if real env hasn't set
-// it) and returns the resolved token. Errors if neither source provides one.
+// loadConfig returns the resolved TELEGRAM_BOT_TOKEN. The .env file is read
+// once at startup in main(); we only consult the process environment here.
 func loadConfig(stateDir string) (string, error) {
-	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		slog.Warn(".env load failed", "err", err)
-	}
-
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
 		return "", fmt.Errorf("TELEGRAM_BOT_TOKEN required (set in %s/.env)", stateDir)
@@ -399,7 +395,9 @@ func loadDotEnv(path string) error {
 		return err
 	}
 
-	_ = os.Chmod(path, 0o600)
+	if err := os.Chmod(path, 0o600); err != nil {
+		slog.Warn(".env chmod 0600 failed", "path", path, "err", err)
+	}
 
 	for line := range strings.Lines(string(raw)) {
 		k, v, ok := strings.Cut(strings.TrimRight(line, "\n"), "=")

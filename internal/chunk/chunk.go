@@ -1,6 +1,15 @@
-// Package chunk splits long messages for Telegram's 4096-char cap. Mirrors
-// the TS plugin: 'length' = hard cut at limit, 'newline' = prefer paragraph
-// then line then space boundaries (only when boundary is past the halfway mark).
+// Package chunk splits long messages for Telegram's 4096-character cap.
+// Mirrors the TS plugin: 'length' = hard cut at limit, 'newline' = prefer
+// paragraph then line then space boundaries (only when boundary is past the
+// halfway mark).
+//
+// The limit is applied to byte length, not UTF-16 code-units (Telegram's
+// authoritative measure). For ASCII-dominant payloads they match; for
+// emoji-dense text the byte budget is more conservative than Telegram's
+// own cap, so we never overshoot. Newline mode cuts on ASCII separators
+// ("\n\n", "\n", " "), which are rune-boundary-safe. Length mode does a
+// hard byte-cut and can split a multi-byte rune — callers needing rune
+// safety should use Newline (the default for free-form text).
 package chunk
 
 import "strings"
