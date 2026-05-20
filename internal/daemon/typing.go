@@ -213,6 +213,7 @@ func (t *TypingTracker) Done(ctx context.Context, chatID string) {
 	if ok {
 		msgID = entry.msgID
 		rotateEnabled = entry.rotateEnabled
+
 		delete(t.pending, chatID)
 	}
 

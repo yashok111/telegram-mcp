@@ -663,6 +663,7 @@ func TestAddRuleAndResolve_atool1h_storesApproveRuleWithExpiry(t *testing.T) {
 	})
 
 	before := time.Now().UnixMilli()
+
 	b.addRuleAndResolve(t.Context(), newRuleCallbackQuery("abcde"), "abcde", access.RuleApprove, time.Hour)
 
 	st := b.store.Load()
@@ -791,6 +792,7 @@ func TestCompiledMentionPattern_compilesOnce(t *testing.T) {
 	b := &Bot{}
 	re1 := b.compiledMentionPattern("foo.*")
 	re2 := b.compiledMentionPattern("foo.*")
+
 	require.NotNil(t, re1)
 	require.NotNil(t, re2)
 	assert.Same(t, re1, re2)
@@ -827,6 +829,7 @@ func TestBot_ensureInboxDir_runsOnce(t *testing.T) {
 	require.NoError(t, os.RemoveAll(filepath.Join(dir, "inbox")))
 
 	require.NoError(t, b.ensureInboxDir())
+
 	_, err = os.Stat(filepath.Join(dir, "inbox"))
 	assert.True(t, os.IsNotExist(err), "inbox dir should NOT be re-created on second call")
 }

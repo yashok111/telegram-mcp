@@ -14,10 +14,12 @@ func prefixEnabled() bool {
 	if v == "" {
 		return true
 	}
+
 	switch strings.ToLower(v) {
 	case "0", "false", "no", "off":
 		return false
 	}
+
 	return true
 }
 
@@ -29,6 +31,7 @@ func formatTextPrefix(alias string) string {
 	if alias == "" {
 		return ""
 	}
+
 	return "@" + alias + ": "
 }
 
@@ -40,5 +43,6 @@ func formatCaption(alias string) string {
 	if alias == "" {
 		return ""
 	}
+
 	return "@" + alias
 }

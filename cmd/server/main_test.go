@@ -51,6 +51,48 @@ func TestLoadDotEnv_missingFile_returnsErr(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestResolveIdleTimeout_unsetReturnsDefault(t *testing.T) {
+	_ = os.Unsetenv("TELEGRAM_DAEMON_IDLE_EXIT")
+
+	assert.Equal(t, defaultDaemonIdleTimeout, resolveIdleTimeout())
+}
+
+func TestResolveIdleTimeout_zeroDisables(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "0")
+
+	assert.Equal(t, time.Duration(0), resolveIdleTimeout())
+}
+
+func TestResolveIdleTimeout_negativeDisables(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "-1")
+
+	assert.Equal(t, -1*time.Second, resolveIdleTimeout())
+}
+
+func TestResolveIdleTimeout_explicitSeconds(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "60")
+
+	assert.Equal(t, 60*time.Second, resolveIdleTimeout())
+}
+
+func TestResolveIdleTimeout_invalidFallsBackToDefault(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "not-a-number")
+
+	assert.Equal(t, defaultDaemonIdleTimeout, resolveIdleTimeout())
+}
+
+func TestResolveIdleTimeout_emptyFallsBackToDefault(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "")
+
+	assert.Equal(t, defaultDaemonIdleTimeout, resolveIdleTimeout())
+}
+
+func TestResolveIdleTimeout_trimsWhitespace(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "  120  ")
+
+	assert.Equal(t, 120*time.Second, resolveIdleTimeout())
+}
+
 func TestResolveStateDir_envOverride(t *testing.T) {
 	t.Setenv("TELEGRAM_STATE_DIR", "/explicit/path")
 	assert.Equal(t, "/explicit/path", resolveStateDir())
@@ -156,11 +198,13 @@ func TestResolveClaudeBin_nvmFallbackPicksNewestByMtime(t *testing.T) {
 	home := t.TempDir()
 	older := filepath.Join(home, ".nvm", "versions", "node", "v23.10.0", "bin")
 	newer := filepath.Join(home, ".nvm", "versions", "node", "v9.5.0", "bin") // lex < v23 to ensure mtime sort, not name sort
-	require.NoError(t, os.MkdirAll(older, 0o755))
-	require.NoError(t, os.MkdirAll(newer, 0o755))
+
+	require.NoError(t, os.MkdirAll(older, 0o750))
+	require.NoError(t, os.MkdirAll(newer, 0o750))
 
 	olderBin := filepath.Join(older, "claude")
 	newerBin := filepath.Join(newer, "claude")
+
 	require.NoError(t, os.WriteFile(olderBin, []byte("o"), 0o755))
 	require.NoError(t, os.WriteFile(newerBin, []byte("n"), 0o755))
 
@@ -191,7 +235,7 @@ func installPlugin(t *testing.T, home, channel string, installedDataMtime time.T
 	t.Helper()
 
 	dir := filepath.Join(home, ".claude", "plugins", "marketplaces", channel, ".claude-plugin")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.MkdirAll(dir, 0o750))
 
 	plugins := make([]map[string]string, 0, len(pluginNames))
 	for _, n := range pluginNames {
@@ -207,7 +251,7 @@ func installPlugin(t *testing.T, home, channel string, installedDataMtime time.T
 	}
 
 	dataDir := filepath.Join(home, ".claude", "plugins", "data", "telegram-"+channel)
-	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	require.NoError(t, os.MkdirAll(dataDir, 0o750))
 	require.NoError(t, os.Chtimes(dataDir, installedDataMtime, installedDataMtime))
 }
 

@@ -92,6 +92,7 @@ func (s *Server) ensureInboxDir() error {
 	s.inboxOnce.Do(func() {
 		s.inboxErr = os.MkdirAll(s.store.InboxDir(), 0o700)
 	})
+
 	return s.inboxErr
 }
 
@@ -162,8 +163,10 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 	sweepDone := make(chan struct{})
 	go func() {
 		defer close(sweepDone)
+
 		s.pendingCleanup(ctx, pendingSweepInterval)
 	}()
+
 	defer func() { <-sweepDone }()
 
 	return stdio.Listen(ctx, os.Stdin, os.Stdout)
@@ -194,9 +197,11 @@ func (s *Server) evictStalePending(now time.Time) int {
 	defer s.permMu.Unlock()
 
 	var evicted int
+
 	for id, e := range s.pending {
 		if e.createdAt.Before(cutoff) {
 			delete(s.pending, id)
+
 			evicted++
 		}
 	}
@@ -307,6 +312,7 @@ func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolNam
 	s.permMu.Unlock()
 
 	st := s.store.Load()
+
 	path := extractToolPath(toolName, inputPreview)
 	if rule := access.Match(st.Rules, toolName, path); rule != nil {
 		behavior := "deny"

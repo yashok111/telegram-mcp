@@ -124,12 +124,14 @@ func TestMatch_pathGlob_simple(t *testing.T) {
 	}
 
 	now := time.Now().UnixMilli()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rules := []PermissionRule{{
 				ID: "r", Tool: "Read", PathPattern: tt.pattern,
 				Action: RuleApprove, CreatedAt: now,
 			}}
+
 			got := Match(rules, "Read", tt.path)
 			if tt.match {
 				assert.NotNil(t, got)
@@ -159,12 +161,14 @@ func TestMatch_pathGlob_doubleStar(t *testing.T) {
 	}
 
 	now := time.Now().UnixMilli()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rules := []PermissionRule{{
 				ID: "r", Tool: "Read", PathPattern: tt.pattern,
 				Action: RuleApprove, CreatedAt: now,
 			}}
+
 			got := Match(rules, "Read", tt.path)
 			if tt.match {
 				assert.NotNil(t, got, "expected match for pattern=%q path=%q", tt.pattern, tt.path)
@@ -191,12 +195,14 @@ func TestMatch_pathGlob_doubleStarEdges(t *testing.T) {
 	}
 
 	now := time.Now().UnixMilli()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rules := []PermissionRule{{
 				ID: "r", Tool: "Read", PathPattern: tt.pattern,
 				Action: RuleApprove, CreatedAt: now,
 			}}
+
 			got := Match(rules, "Read", tt.path)
 			if tt.match {
 				assert.NotNil(t, got, "expected match for pattern=%q path=%q", tt.pattern, tt.path)
@@ -377,6 +383,7 @@ func TestState_rulesPersistThroughSaveLoad(t *testing.T) {
 
 	buf, err := os.ReadFile(filepath.Join(emptyDir, "access.json"))
 	require.NoError(t, err)
+
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(buf, &raw))
 	_, hasRules := raw["rules"]

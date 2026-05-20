@@ -115,6 +115,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	cleanup := NewRulesCleanup(d.Store, time.Minute)
+
 	idleWG.Go(func() {
 		cleanup.Run(d.dctx)
 	})

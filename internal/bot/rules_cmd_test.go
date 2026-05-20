@@ -122,7 +122,8 @@ func TestHandleRulesCommand_list_renders(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	text := calls[0].params["text"].(string)
+	text, ok := calls[0].params["text"].(string)
+	require.True(t, ok)
 	assert.Contains(t, text, "`ab1234`")
 	assert.Contains(t, text, "Bash")
 	assert.Contains(t, text, "approve")

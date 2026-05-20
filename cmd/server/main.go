@@ -2,7 +2,7 @@
 //
 // State lives in ~/.claude/channels/telegram (compat with the original TS
 // plugin). Lifecycle: shim is bound to its parent CC session via
-// PR_SET_PDEATHSIG; daemon outlives any single shim and idles out 30 minutes
+// PR_SET_PDEATHSIG; daemon outlives any single shim and idles out 7 days
 // after the last shim disconnects.
 package main
 
@@ -154,6 +154,7 @@ func runDaemon(stateDir string) error {
 	// given spawn_id. Used by SpawnRunner.Run to enforce TELEGRAM_SPAWN_IDLE_TIMEOUT.
 	spawnRunner.SetIdleLookup(func(spawnID string) (time.Duration, bool) {
 		now := time.Now()
+
 		for _, s := range router.Snapshot() {
 			if s.SpawnID == spawnID {
 				return s.IdleFor(now), true
@@ -167,12 +168,10 @@ func runDaemon(stateDir string) error {
 
 	defer spawnRunner.Stop()
 
-	idleSecs, _ := strconv.Atoi(os.Getenv("TELEGRAM_DAEMON_IDLE_EXIT"))
-	if idleSecs == 0 {
-		idleSecs = 1800
-	}
+	idleTimeout := resolveIdleTimeout()
 
 	inboxTTL := 7 * 24 * time.Hour
+
 	if v := os.Getenv("TELEGRAM_INBOX_TTL"); v != "" {
 		if parsed, err := time.ParseDuration(v); err == nil {
 			inboxTTL = parsed
@@ -189,7 +188,7 @@ func runDaemon(stateDir string) error {
 		Bot:         tgBot,
 		Router:      router,
 		Typing:      typing,
-		IdleTimeout: time.Duration(idleSecs) * time.Second,
+		IdleTimeout: idleTimeout,
 		InboxTTL:    inboxTTL,
 	}
 
@@ -324,6 +323,30 @@ func bindParentDeath() {
 	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGTERM), 0, 0, 0); err != nil {
 		slog.Warn("PR_SET_PDEATHSIG failed", "err", err)
 	}
+}
+
+// defaultDaemonIdleTimeout is the daemon's idle-exit window when
+// TELEGRAM_DAEMON_IDLE_EXIT is unset.
+const defaultDaemonIdleTimeout = 7 * 24 * time.Hour
+
+// resolveIdleTimeout returns the daemon's idle-exit timeout from
+// TELEGRAM_DAEMON_IDLE_EXIT (seconds). Unset or unparseable → default
+// (7 days). "0" or a negative value disables idle-exit (Daemon.Run treats
+// any non-positive duration as "no timer").
+func resolveIdleTimeout() time.Duration {
+	raw, ok := os.LookupEnv("TELEGRAM_DAEMON_IDLE_EXIT")
+	if !ok {
+		return defaultDaemonIdleTimeout
+	}
+
+	secs, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		slog.Warn("invalid TELEGRAM_DAEMON_IDLE_EXIT, using default", "value", raw, "default", defaultDaemonIdleTimeout)
+
+		return defaultDaemonIdleTimeout
+	}
+
+	return time.Duration(secs) * time.Second
 }
 
 // resolveStateDir returns the channel state directory: TELEGRAM_STATE_DIR if
@@ -521,7 +544,7 @@ func resolveSpawnPluginSpec() string {
 	var cands []candidate
 
 	for _, p := range matches {
-		b, err := os.ReadFile(p) //nolint:gosec // plugin dir is internal CC state.
+		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
@@ -539,7 +562,8 @@ func resolveSpawnPluginSpec() string {
 
 		if !slices.ContainsFunc(m.Plugins, func(pl struct {
 			Name string `json:"name"`
-		}) bool {
+		},
+		) bool {
 			return pl.Name == "telegram"
 		}) {
 			continue

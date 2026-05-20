@@ -168,6 +168,7 @@ func (b *lockedBot) DownloadFile(ctx context.Context, id string) (string, error)
 func (b *lockedBot) BroadcastPermissionRequest(ctx context.Context, prefix, reqID, tool string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.fb.BroadcastPermissionRequest(ctx, prefix, reqID, tool)
 }
 
@@ -181,6 +182,7 @@ func (b *lockedBot) SendChatAction(ctx context.Context, chatID, action string) e
 func (b *lockedBot) setSendRet(id int, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.fb.sentMessage.retID = id
 	b.fb.sentMessage.retErr = err
 }
@@ -272,6 +274,7 @@ func TestBgRunner_SpawnHappyPath(t *testing.T) {
 	go func() {
 		defer pw.Close()
 		defer stderrW.Close()
+
 		_, _ = pw.Write([]byte(`{"type":"system","subtype":"init"}` + "\n"))
 		_, _ = pw.Write([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}` + "\n"))
 		_, _ = pw.Write([]byte(`{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"num_turns":1,"result":"hi!","total_cost_usd":0.01}` + "\n"))
@@ -319,6 +322,7 @@ func TestBgRunner_CancelSendsSIGTERMAndMarks(t *testing.T) {
 		case <-sigSeen:
 			_ = pw.Close()
 			_ = stderrW.Close()
+
 			waitCh <- errors.New("signal: terminated")
 		case <-time.After(2 * time.Second):
 		}

@@ -87,6 +87,7 @@ func TestServer_pendingCleanup_ctxCancelReturns(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+
 		srv.pendingCleanup(ctx, time.Hour)
 	}()
 
@@ -112,6 +113,7 @@ func TestServer_pendingCleanup_evictsViaTicker(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+
 		srv.pendingCleanup(ctx, 10*time.Millisecond)
 	}()
 

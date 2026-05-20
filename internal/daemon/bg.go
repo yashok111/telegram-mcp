@@ -368,10 +368,12 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 			case <-doneCh:
 			case <-time.After(5 * time.Second):
 				_ = proc.Signal(syscall.SIGKILL)
+
 				<-doneCh
 			}
 
 			_ = proc.Wait()
+
 			<-stderrDone
 
 			text := fmt.Sprintf("🛑 Task %s cancelled · ran %s", id, time.Since(state.startedAt).Round(time.Second))
@@ -382,6 +384,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 		case derr := <-doneCh:
 			if derr != nil {
 				_ = proc.Wait()
+
 				<-stderrDone
 				r.finalizeFailure(ctx, req.ChatID, progressMsgID, id, derr, stderrTail.String())
 
@@ -391,6 +394,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 			result = state.last()
 			if result == nil {
 				_ = proc.Wait()
+
 				<-stderrDone
 				r.finalizeFailure(ctx, req.ChatID, progressMsgID, id, errors.New("stream ended without result"), stderrTail.String())
 
@@ -407,6 +411,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 	}
 
 	_ = proc.Wait()
+
 	<-stderrDone
 
 	dur := time.Since(state.startedAt).Round(time.Second)

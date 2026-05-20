@@ -148,7 +148,9 @@ func TestIntegrationTypingFiresOnInboundAndClearsOnOutbound(t *testing.T) {
 	// will still fire its HTTP call after Clear returns. Past that, the count
 	// must stay flat for a window of several refresh intervals.
 	beforeWindow := f.tg.chatActionCount()
+
 	time.Sleep(300 * time.Millisecond)
+
 	afterWindow := f.tg.chatActionCount()
 
 	assert.LessOrEqual(t, afterWindow-beforeWindow, 1,

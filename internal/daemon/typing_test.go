@@ -135,10 +135,10 @@ func TestTypingTracker_TickRotatesReactionsOnSchedule(t *testing.T) {
 	tr.Mark("chat", 42, true)
 
 	start := time.Now()
-	tr.tickOnce(t.Context(), start)                                  // tick 1: rotates (lastRotate was zero)
-	tr.tickOnce(t.Context(), start.Add(150*time.Millisecond))        // tick 2: no rotate yet
-	tr.tickOnce(t.Context(), start.Add(250*time.Millisecond))        // tick 3: rotates (>=200ms since last)
-	tr.tickOnce(t.Context(), start.Add(500*time.Millisecond))        // tick 4: rotates
+	tr.tickOnce(t.Context(), start)                           // tick 1: rotates (lastRotate was zero)
+	tr.tickOnce(t.Context(), start.Add(150*time.Millisecond)) // tick 2: no rotate yet
+	tr.tickOnce(t.Context(), start.Add(250*time.Millisecond)) // tick 3: rotates (>=200ms since last)
+	tr.tickOnce(t.Context(), start.Add(500*time.Millisecond)) // tick 4: rotates
 
 	actions := bot.snapshotActions()
 	assert.Len(t, actions, 4, "every tick fires typing regardless of rotation cadence")
@@ -259,6 +259,7 @@ func TestTypingTracker_ConcurrentMarkClearIsSafe(t *testing.T) {
 			tr.Clear(chat)
 		})
 	}
+
 	wg.Wait()
 	tr.tickOnce(t.Context(), time.Now())
 }

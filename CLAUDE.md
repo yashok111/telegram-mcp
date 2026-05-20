@@ -47,7 +47,7 @@ internal/daemon/                bot-owner process: holds telego, routes, fans ou
   routing.go                      Router: replyRing (reply_to → shim), chat affinity, mention/pin/LRU
   handlers.go                     IPC method handlers (send*, react, edit, download, peers, broadcast_permission)
   notifier.go                     bot.Notifier impl that fans messages out through Router
-  idle.go                         30-min idle timer (override via TELEGRAM_DAEMON_IDLE_EXIT)
+  idle.go                         7-day idle timer (override via TELEGRAM_DAEMON_IDLE_EXIT)
   rules_cleanup.go                1-min ticker: PruneRules + Save when anything expired
   aliases.go, mentions.go         @s1/@s2 alias allocation + mention parsing
   log_redirect.go                 dup stderr to daemon.log when shim-spawned and stderr isn't a tty
@@ -76,7 +76,7 @@ scripts/                        install-skills.sh, install-hooks.sh, pre-commit
 Two roles, daemon+shim. The legacy embedded mode (single-process, in-CC poller) was removed in #16 — there is no longer a code path where the shim runs the bot directly. Don't reintroduce it; the routing model assumes a separate daemon.
 
 1. **Shim (per Claude Code session)**: the binary launched by Claude Code with no args. Speaks stdio MCP to Claude Code; speaks IPC to the daemon. PR_SET_PDEATHSIG ties it to the parent CC session so it dies with Claude Code. On daemon disconnect, the shim reconnects with capped exponential backoff and re-issues `hello` — it does NOT exit to force a CC re-spawn.
-2. **Daemon (one per host)**: owns the bot token, runs the long-poller, holds the access gate, routes inbound traffic to the right shim. Spawned fork-detached by the first shim if not already running (or by systemd via `contrib/systemd/telegram-mcp.service`). Survives shim disconnects; idles out 30 minutes after the last shim leaves.
+2. **Daemon (one per host)**: owns the bot token, runs the long-poller, holds the access gate, routes inbound traffic to the right shim. Spawned fork-detached by the first shim if not already running (or by systemd via `contrib/systemd/telegram-mcp.service`). Survives shim disconnects; idles out 7 days after the last shim leaves.
 3. **Self (`telegram-mcp self`)**: read-only context renderer for the SessionStart hook + statusline; does not touch the bot or daemon.
 
 `cmd/server/main.go:selectMode` decides which role to run: explicit `daemon`/`shim`/`self` subcommand wins, otherwise `TELEGRAM_DAEMON=1` env → daemon, else shim. Auto-detect after dotenv load (PR #4).
@@ -108,7 +108,7 @@ Single daemon per host; every Claude Code session attaches to it via shim.
 
 **Daemon owns the bot token.** Shims never see it. Daemon enforces the access.json gate authoritatively — every IPC handler calls `Handlers.gate(chatID)` before forwarding to the bot. Shim-side checks are convenience only.
 
-**Idle exit:** daemon dies 30 minutes after the last shim disconnects. Override with `TELEGRAM_DAEMON_IDLE_EXIT=<seconds>`; `=0` disables.
+**Idle exit:** daemon dies 7 days after the last shim disconnects. Override with `TELEGRAM_DAEMON_IDLE_EXIT=<seconds>`; `=0` (or any non-positive value) disables. Unset / unparseable falls back to the 7-day default (`cmd/server.resolveIdleTimeout`). Unparseable values log a single `slog.Warn`.
 
 **Rules cleanup:** background goroutine pulls `access.State`, calls `access.PruneRules`, and saves once a minute. Belt to the suspenders of the in-process `Match()` filter that already skips expired rules on each `permission_request` — keeps `/rules list` honest and disk size bounded over long runs.
 

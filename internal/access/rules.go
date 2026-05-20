@@ -102,6 +102,7 @@ func pathMatches(pattern, path string) bool {
 	}
 
 	rest := path
+
 	for i, p := range parts {
 		if p == "" {
 			continue

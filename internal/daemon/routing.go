@@ -368,6 +368,7 @@ func (r *Router) SetLabel(shimID, label string) (ShimInfo, error) {
 	r.unindexLabelLocked(shimID, s.Label)
 	s.Label = label
 	r.indexLabelLocked(shimID, label)
+
 	notify := s.Notify
 
 	r.mu.Unlock()
