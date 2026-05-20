@@ -219,7 +219,7 @@ func TestHandleSendFileGatedAndRecorded(t *testing.T) {
 	assert.Equal(t, "shim-a", owner.ID)
 }
 
-func TestHandleEditMessageGated(t *testing.T) {
+func TestHandleEditMessage_ownedSucceeds(t *testing.T) {
 	h, fb, r, _ := newHandlersFixture(t)
 	fb.editedMessage.retID = 9
 
@@ -232,6 +232,19 @@ func TestHandleEditMessageGated(t *testing.T) {
 	require.Nil(t, rpcErr)
 	assert.Equal(t, 5, fb.editedMessage.messageID)
 	assert.Equal(t, "@s1: edited", fb.editedMessage.text, "edit also gets prefix")
+}
+
+func TestHandleEditMessage_blockedByGate(t *testing.T) {
+	h, fb, r, _ := newHandlersFixture(t)
+	// Even pre-existing ownership must not bypass the chat allowlist gate.
+	r.RecordOutbound("shim-a", "999", 5)
+
+	_, rpcErr := h.HandleEditMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "999", "message_id": 5, "text": "x",
+	}))
+	require.NotNil(t, rpcErr)
+	assert.Equal(t, ipc.CodeNotAllowlisted, rpcErr.Code)
+	assert.Zero(t, fb.editedMessage.messageID, "gate-blocked edit must not reach bot")
 }
 
 func TestHandleEditMessage_deniesCrossShimEdit(t *testing.T) {
