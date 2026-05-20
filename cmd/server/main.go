@@ -528,8 +528,9 @@ func loadSpawnConfig() daemonpkg.SpawnConfig {
 const marketplaceManifestMaxBytes = 1 << 20 // 1 MiB
 
 // readBoundedFile reads at most maxBytes from path. Returns an error if the
-// file is unreadable; truncates silently if it exceeds maxBytes (caller will
-// fail the subsequent JSON parse on a truncated manifest).
+// file is unreadable. If the file exceeds maxBytes, the result is truncated
+// and a warning is logged so an operator debugging a stuck startup can see
+// the manifest was rejected (the caller's JSON parse will then fail).
 func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -537,7 +538,19 @@ func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	return io.ReadAll(io.LimitReader(f, maxBytes))
+	// Read maxBytes+1 so we can tell "exactly maxBytes" apart from "exceeds".
+	b, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+
+	if int64(len(b)) > maxBytes {
+		slog.Warn("manifest exceeds size cap, truncating", "path", path, "max_bytes", maxBytes)
+
+		return b[:maxBytes], nil
+	}
+
+	return b, nil
 }
 
 // resolveSpawnPluginSpec scans `~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json`
