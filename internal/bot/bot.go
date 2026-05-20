@@ -112,7 +112,7 @@ func (b *Bot) SetBgRunner(r BgRunner) { b.bgRunner = r }
 // owned by the daemon process. Tests that pass nil for rv must avoid the
 // session-switcher commands (renderShims / sendSessions / sendIdle).
 func NewWithRouter(token string, store *access.Store, notifier Notifier, rv RouterView) (*Bot, error) {
-	api, err := telego.NewBot(token, telego.WithDefaultDebugLogger())
+	api, err := telego.NewBot(token, telego.WithDiscardLogger())
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +124,7 @@ func NewWithRouter(token string, store *access.Store, notifier Notifier, rv Rout
 // server URL (httptest) and accepts either a stubbed RouterView or nil for
 // tests that don't exercise session-switcher commands.
 func NewFromAPIWithRouter(token string, store *access.Store, notifier Notifier, apiURL string, rv RouterView) (*Bot, error) {
-	opts := []telego.BotOption{telego.WithDefaultDebugLogger()}
+	opts := []telego.BotOption{telego.WithDiscardLogger()}
 	if apiURL != "" {
 		opts = append(opts, telego.WithAPIServer(apiURL))
 	}
