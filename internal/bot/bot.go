@@ -781,11 +781,19 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 
 func (b *Bot) addRuleAndResolve(ctx context.Context, q *telego.CallbackQuery, requestID string, action access.RuleAction, ttl time.Duration) {
 	details, ok := b.notifier.LookupPermission(requestID)
+	if !ok || strings.TrimSpace(details.ToolName) == "" {
+		slog.Warn("addRule refused: missing tool name", "request_id", requestID, "lookup_ok", ok)
 
-	toolName := "*"
-	if ok && details.ToolName != "" {
-		toolName = details.ToolName
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID,
+			Text:            "⚠️ Can't create rule: tool name missing",
+			ShowAlert:       true,
+		})
+
+		return
 	}
+
+	toolName := details.ToolName
 
 	rule := access.PermissionRule{Tool: toolName, Action: action}
 	if ttl > 0 {
@@ -797,6 +805,14 @@ func (b *Bot) addRuleAndResolve(ctx context.Context, q *telego.CallbackQuery, re
 		return true
 	}); err != nil {
 		slog.Error("addRule save failed", "request_id", requestID, "tool", toolName, "err", err)
+
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID,
+			Text:            "⚠️ Rule save failed: " + err.Error(),
+			ShowAlert:       true,
+		})
+
+		return
 	}
 
 	behavior := "allow"

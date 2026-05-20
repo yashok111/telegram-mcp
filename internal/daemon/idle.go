@@ -34,23 +34,47 @@ func (i *IdleExit) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-check.C:
-			if i.router.ConnectedCount() == 0 {
-				if idleSince.IsZero() {
-					idleSince = time.Now()
-
-					slog.Info("idle timer started", "timeout", i.timeout)
-				}
-
-				if time.Since(idleSince) >= i.timeout {
-					slog.Info("idle timer elapsed — calling onIdle", "idle_for", time.Since(idleSince))
-					i.onIdle()
-
-					return
-				}
-			} else if !idleSince.IsZero() {
-				slog.Info("idle timer cancelled — shim reconnected", "was_idle_for", time.Since(idleSince))
-				idleSince = time.Time{}
+			if i.tick(&idleSince) {
+				return
 			}
 		}
 	}
+}
+
+// tick runs one polling pass. Returns true when onIdle has been invoked and
+// the caller should exit Run.
+func (i *IdleExit) tick(idleSince *time.Time) bool {
+	if i.router.ConnectedCount() != 0 {
+		if !idleSince.IsZero() {
+			slog.Info("idle timer cancelled — shim reconnected", "was_idle_for", time.Since(*idleSince))
+			*idleSince = time.Time{}
+		}
+
+		return false
+	}
+
+	if idleSince.IsZero() {
+		*idleSince = time.Now()
+
+		slog.Info("idle timer started", "timeout", i.timeout)
+	}
+
+	if time.Since(*idleSince) < i.timeout {
+		return false
+	}
+
+	// Re-check at expiry: a shim may have Register'd between the earlier
+	// ConnectedCount() and now (microseconds-wide window, but Register isn't
+	// atomic with the timer).
+	if i.router.ConnectedCount() != 0 {
+		slog.Info("idle expiry aborted — shim connected at expiry", "was_idle_for", time.Since(*idleSince))
+		*idleSince = time.Time{}
+
+		return false
+	}
+
+	slog.Info("idle timer elapsed — calling onIdle", "idle_for", time.Since(*idleSince))
+	i.onIdle()
+
+	return true
 }

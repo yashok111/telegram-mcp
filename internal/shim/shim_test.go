@@ -33,7 +33,7 @@ func TestShimNew(t *testing.T) {
 		Store:  store,
 	}
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 	assert.NotNil(t, mcpSrv.Bot())
 }
 
@@ -46,15 +46,14 @@ func TestShimSendsHelloOnWire(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abc","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		HelloPID:    1234,
-		HelloLabel:  "session-X",
-		WireContext: context.Background,
+		Client:     fc,
+		MCP:        mcpSrv,
+		Store:      store,
+		HelloPID:   1234,
+		HelloLabel: "session-X",
 	}
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 	assert.Equal(t, ipc.MethodHello, fc.calledMethod)
 	assert.Contains(t, string(fc.calledParams), `"shim_pid":1234`)
 	assert.Contains(t, string(fc.calledParams), `"label":"session-X"`)
@@ -73,13 +72,12 @@ func TestShimWireCapturesAlias(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abcd","daemon_version":"test","alias":"s7"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		WireContext: context.Background,
+		Client: fc,
+		MCP:    mcpSrv,
+		Store:  store,
 	}
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 
 	alias, ok := sh.ShimAlias()
 	require.True(t, ok)
@@ -97,12 +95,11 @@ func TestShimWireSendsWorkdirAndSession(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id1","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		WireContext: context.Background,
+		Client: fc,
+		MCP:    mcpSrv,
+		Store:  store,
 	}
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 
 	require.Equal(t, ipc.MethodHello, fc.calledMethod)
 	assert.Contains(t, string(fc.calledParams), `"workdir":"`+wd+`"`)
@@ -119,16 +116,15 @@ func TestShimWireWritesSessionFile(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"abcdef012345","alias":"s4","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		HelloPID:    5555,
-		CCPID:       12345,
-		WireContext: context.Background,
+		Client:   fc,
+		MCP:      mcpSrv,
+		Store:    store,
+		StateDir: dir,
+		HelloPID: 5555,
+		CCPID:    12345,
 	}
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 
 	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "12345.json"))
 	require.NoError(t, err)
@@ -154,15 +150,14 @@ func TestShimWireWritesSessionFileEvenWithoutCCSessionIDEnv(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		CCPID:       777,
-		WireContext: context.Background,
+		Client:   fc,
+		MCP:      mcpSrv,
+		Store:    store,
+		StateDir: dir,
+		CCPID:    777,
 	}
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 
 	raw, err := os.ReadFile(filepath.Join(dir, "sessions", "777.json"))
 	require.NoError(t, err)
@@ -180,14 +175,13 @@ func TestShimWireSkipsSessionFileWhenNoStateDir(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		CCPID:       4242,
-		WireContext: context.Background,
+		Client: fc,
+		MCP:    mcpSrv,
+		Store:  store,
+		CCPID:  4242,
 	}
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 }
 
 func TestShimRunRemovesSessionFile(t *testing.T) {
@@ -198,15 +192,14 @@ func TestShimRunRemovesSessionFile(t *testing.T) {
 
 	fc := &fakeClient{returnResult: []byte(`{"shim_id":"id","alias":"s1","daemon_version":"test"}`)}
 	sh := &Shim{
-		Client:      fc,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		CCPID:       9090,
-		WireContext: context.Background,
+		Client:   fc,
+		MCP:      mcpSrv,
+		Store:    store,
+		StateDir: dir,
+		CCPID:    9090,
 	}
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 
 	path := filepath.Join(dir, "sessions", "9090.json")
 	_, err = os.Stat(path)
@@ -241,13 +234,12 @@ func TestShimRunReconnectsAfterClientDone(t *testing.T) {
 	served := make(chan error, 1)
 
 	sh := &Shim{
-		Client:      initClient,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		SocketPath:  filepath.Join(dir, "daemon.sock"),
-		CCPID:       4321,
-		WireContext: context.Background,
+		Client:     initClient,
+		MCP:        mcpSrv,
+		Store:      store,
+		StateDir:   dir,
+		SocketPath: filepath.Join(dir, "daemon.sock"),
+		CCPID:      4321,
 		DialIPC: func(string) (IPCClient, error) {
 			dialed.Add(1)
 			return reconnClient, nil
@@ -309,13 +301,12 @@ func TestShimRunReconnectBackoffRespectsCtx(t *testing.T) {
 	var dialed atomic.Int32
 
 	sh := &Shim{
-		Client:      initClient,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		SocketPath:  filepath.Join(dir, "daemon.sock"),
-		CCPID:       9999,
-		WireContext: context.Background,
+		Client:     initClient,
+		MCP:        mcpSrv,
+		Store:      store,
+		StateDir:   dir,
+		SocketPath: filepath.Join(dir, "daemon.sock"),
+		CCPID:      9999,
 		DialIPC: func(string) (IPCClient, error) {
 			dialed.Add(1)
 			return nil, errors.New("daemon unreachable")
@@ -411,13 +402,12 @@ func TestShimRunReconnectsThroughRealIPC(t *testing.T) {
 	require.NoError(t, err)
 
 	sh := &Shim{
-		Client:      client,
-		MCP:         mcpSrv,
-		Store:       store,
-		StateDir:    dir,
-		SocketPath:  sock,
-		CCPID:       1234,
-		WireContext: context.Background,
+		Client:     client,
+		MCP:        mcpSrv,
+		Store:      store,
+		StateDir:   dir,
+		SocketPath: sock,
+		CCPID:      1234,
 		DialIPC: func(p string) (IPCClient, error) {
 			return ipc.Dial(p)
 		},
@@ -485,7 +475,7 @@ func TestShimRunStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	require.NoError(t, sh.Wire())
+	require.NoError(t, sh.Wire(context.Background()))
 
 	_ = ctx
 }

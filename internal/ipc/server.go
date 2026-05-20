@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"syscall"
 )
 
 type (
@@ -82,11 +83,21 @@ func (s *Server) OnDisconnect(f func(*Conn)) {
 func (s *Server) Listen(ctx context.Context) error {
 	_ = os.Remove(s.socketPath)
 
+	// Tighten umask around Listen so the kernel creates the socket inode with
+	// 0600 atomically. Post-listen os.Chmod would leave a race window where
+	// the socket is briefly world-accessible (modulo parent dir perms).
+	oldMask := syscall.Umask(0o177)
+
 	l, err := net.Listen("unix", s.socketPath)
+
+	syscall.Umask(oldMask)
+
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.socketPath, err)
 	}
 
+	// Belt-and-suspenders chmod in case the umask narrow window was widened by
+	// a concurrent setter; harmless when the inode is already 0600.
 	if err := os.Chmod(s.socketPath, 0o600); err != nil {
 		_ = l.Close()
 		return fmt.Errorf("chmod socket: %w", err)

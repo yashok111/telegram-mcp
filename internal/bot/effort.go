@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -122,7 +123,7 @@ func (b *Bot) handleEffortCommand(ctx context.Context, msg telego.Message) {
 	case EffortSubShow:
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), b.formatEffortStatus(chatID)).WithParseMode("MarkdownV2"))
 	case EffortSubClear:
-		_ = b.store.Mutate(func(st *access.State) bool {
+		if err := b.store.Mutate(func(st *access.State) bool {
 			if st.EffortByChat == nil {
 				return false
 			}
@@ -134,12 +135,19 @@ func (b *Bot) handleEffortCommand(ctx context.Context, msg telego.Message) {
 			delete(st.EffortByChat, chatID)
 
 			return true
-		})
+		}); err != nil {
+			slog.Error("effort clear persist failed", "chat_id", chatID, "err", err)
+			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
+				"⚠️ Failed to persist effort clear: "+err.Error()))
+
+			return
+		}
+
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
 			"🧹 Cleared\\. Future /spawn and /bg use daemon defaults\\.").WithParseMode("MarkdownV2"))
 	case EffortSubSet:
 		level := string(args.Level)
-		_ = b.store.Mutate(func(st *access.State) bool {
+		if err := b.store.Mutate(func(st *access.State) bool {
 			if st.EffortByChat == nil {
 				st.EffortByChat = map[string]string{}
 			}
@@ -147,7 +155,14 @@ func (b *Bot) handleEffortCommand(ctx context.Context, msg telego.Message) {
 			st.EffortByChat[chatID] = level
 
 			return true
-		})
+		}); err != nil {
+			slog.Error("effort set persist failed", "chat_id", chatID, "level", level, "err", err)
+			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
+				"⚠️ Failed to persist effort: "+err.Error()))
+
+			return
+		}
+
 		cfg, _ := ResolveEffort(level)
 		text := fmt.Sprintf("✅ Effort set to %s · model %s · thinking %d\nApplies to new /spawn and /bg\\. Existing sessions keep their settings until respawn\\.",
 			MdCode(level), MdCode(cfg.Model), cfg.ThinkingTokens)

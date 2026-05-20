@@ -704,11 +704,12 @@ func TestAddRuleAndResolve_dtoolall_storesDenyRule(t *testing.T) {
 	assert.Equal(t, "Bash", st.Rules[0].Tool)
 }
 
-func TestAddRuleAndResolve_unknownToolName_fallsBackToWildcard(t *testing.T) {
+func TestAddRuleAndResolve_unknownToolName_refusesRule(t *testing.T) {
 	b, _, _ := newTestBot(t, access.State{
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
+	n, _ := b.notifier.(*noopNotifier)
 
 	// noopNotifier returns false for any id != "abcde"
 	q := newRuleCallbackQuery("zzzzz")
@@ -716,8 +717,8 @@ func TestAddRuleAndResolve_unknownToolName_fallsBackToWildcard(t *testing.T) {
 	b.addRuleAndResolve(t.Context(), q, "zzzzz", access.RuleApprove, 0)
 
 	st := b.store.Load()
-	require.Len(t, st.Rules, 1)
-	assert.Equal(t, "*", st.Rules[0].Tool)
+	assert.Empty(t, st.Rules, "no rule should be created when ToolName is missing")
+	assert.Empty(t, n.resolved, "permission must not be resolved when rule creation fails")
 }
 
 func TestAddRuleAndResolve_callsResolvePermission(t *testing.T) {
