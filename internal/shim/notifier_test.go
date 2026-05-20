@@ -46,10 +46,42 @@ func (s *spyClient) OnNotify(method string, h ipc.NotifyHandler)  { s.handlers[m
 func (s *spyClient) Close() error                                 { return nil }
 func (s *spyClient) Done() <-chan struct{}                        { return nil }
 
+// newTestNotifier wires AttachNotifier with a worker for tests and registers
+// the worker for cleanup. Returns the worker so tests that fire notifications
+// can flush it.
+func newTestNotifier(t *testing.T, c IPCClient, sink MCPSink) *notifierWorker {
+	t.Helper()
+
+	w := newNotifierWorker()
+	t.Cleanup(w.Stop)
+	AttachNotifier(c, sink, w)
+
+	return w
+}
+
+func newTestLabelHandler(t *testing.T, c IPCClient, updater LabelUpdater) *notifierWorker {
+	t.Helper()
+
+	w := newNotifierWorker()
+	t.Cleanup(w.Stop)
+	AttachLabelHandler(c, updater, w)
+
+	return w
+}
+
+// flush submits a sentinel and waits for it to run, which guarantees every
+// previously-submitted task on the same worker has completed (the worker is
+// strictly serial).
+func flush(w *notifierWorker) {
+	done := make(chan struct{})
+	w.submit("flush", func() { close(done) })
+	<-done
+}
+
 func TestNotifierRegistersHandlersOnAttach(t *testing.T) {
 	c := newSpyClient()
 	mcp := &fakeMCP{}
-	AttachNotifier(c, mcp)
+	newTestNotifier(t, c, mcp)
 
 	_, hasInbound := c.handlers[ipc.NotifyInbound]
 	_, hasResolved := c.handlers[ipc.NotifyPermissionResolved]
@@ -61,10 +93,12 @@ func TestNotifierRegistersHandlersOnAttach(t *testing.T) {
 func TestNotifierDispatchesInbound(t *testing.T) {
 	c := newSpyClient()
 	mcp := &fakeMCP{}
-	AttachNotifier(c, mcp)
+	w := newTestNotifier(t, c, mcp)
 
 	params := json.RawMessage(`{"content":"hi","meta":{"chat_id":"1","user":"@x"}}`)
 	c.handlers[ipc.NotifyInbound](context.Background(), params)
+
+	flush(w)
 
 	require.Len(t, mcp.inbound, 1)
 	assert.Equal(t, "hi", mcp.inbound[0].content)
@@ -75,10 +109,12 @@ func TestNotifierDispatchesInbound(t *testing.T) {
 func TestNotifierDispatchesPermissionResolved(t *testing.T) {
 	c := newSpyClient()
 	mcp := &fakeMCP{}
-	AttachNotifier(c, mcp)
+	w := newTestNotifier(t, c, mcp)
 
 	c.handlers[ipc.NotifyPermissionResolved](context.Background(),
 		json.RawMessage(`{"request_id":"ababc","behavior":"allow"}`))
+
+	flush(w)
 
 	require.Len(t, mcp.resolved, 1)
 	assert.Equal(t, "ababc", mcp.resolved[0].requestID)
@@ -107,7 +143,7 @@ func (l *labelSpy) seen() []string {
 func TestAttachLabelHandlerInvokesUpdater(t *testing.T) {
 	c := newSpyClient()
 	spy := &labelSpy{}
-	AttachLabelHandler(c, spy)
+	w := newTestLabelHandler(t, c, spy)
 
 	h, ok := c.handlers[ipc.NotifyLabelChanged]
 	require.True(t, ok, "AttachLabelHandler must register the notify handler")
@@ -116,12 +152,16 @@ func TestAttachLabelHandlerInvokesUpdater(t *testing.T) {
 	require.NoError(t, err)
 	h(context.Background(), body)
 
+	flush(w)
+
 	assert.Equal(t, []string{"main"}, spy.seen())
 }
 
 func TestAttachLabelHandlerNilUpdaterNoop(t *testing.T) {
 	c := newSpyClient()
-	AttachLabelHandler(c, nil)
+	w := newNotifierWorker()
+	t.Cleanup(w.Stop)
+	AttachLabelHandler(c, nil, w)
 
 	_, ok := c.handlers[ipc.NotifyLabelChanged]
 	assert.False(t, ok, "nil updater must not register a handler")
@@ -130,11 +170,13 @@ func TestAttachLabelHandlerNilUpdaterNoop(t *testing.T) {
 func TestAttachLabelHandlerBadJSONIgnored(t *testing.T) {
 	c := newSpyClient()
 	spy := &labelSpy{}
-	AttachLabelHandler(c, spy)
+	w := newTestLabelHandler(t, c, spy)
 
 	h, ok := c.handlers[ipc.NotifyLabelChanged]
 	require.True(t, ok)
 
 	h(context.Background(), json.RawMessage(`{`))
+	flush(w)
+
 	assert.Empty(t, spy.seen())
 }

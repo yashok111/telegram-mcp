@@ -308,7 +308,7 @@ func PruneExpired(st *State) bool {
 	changed := false
 
 	for code, p := range st.Pending {
-		if p.ExpiresAt < now {
+		if p.ExpiresAt <= now {
 			delete(st.Pending, code)
 
 			changed = true

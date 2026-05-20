@@ -596,6 +596,15 @@ func resolveSpawnPluginSpec() string {
 			continue
 		}
 
+		// Reject manifest names that could break out of the data dir via
+		// path separators or ".." segments. Real channel names are short
+		// identifiers (e.g. "local-yakov", "stable").
+		if strings.ContainsAny(m.Name, `/\`) || strings.Contains(m.Name, "..") {
+			slog.Warn("marketplace name rejected (path-unsafe)", "path", p, "name", m.Name)
+
+			continue
+		}
+
 		if !slices.ContainsFunc(m.Plugins, func(pl struct {
 			Name string `json:"name"`
 		},
@@ -607,8 +616,11 @@ func resolveSpawnPluginSpec() string {
 
 		dataDir := filepath.Join(home, ".claude", "plugins", "data", "telegram-"+m.Name)
 
-		info, err := os.Stat(dataDir)
-		if err != nil {
+		// Lstat (not Stat) so a crafted marketplace.json with m.Name like
+		// "../../etc" can't follow a symlink to probe arbitrary paths under
+		// the daemon's UID. We require the data dir to be a real directory.
+		info, err := os.Lstat(dataDir)
+		if err != nil || !info.IsDir() {
 			continue
 		}
 

@@ -252,6 +252,11 @@ func (h *Handlers) HandleReact(ctx context.Context, _ *ipc.Conn, params json.Raw
 	return map[string]any{}, nil
 }
 
+// HandleDownloadFile intentionally does not call gate(chatID): the MCP
+// download_attachment tool takes only file_id (no chat_id), and file_ids are
+// cryptographically tied to the bot — they can only be obtained by an
+// inbound notification that already passed the gate at delivery time. If
+// download_attachment ever takes a chat_id, gate it here too.
 func (h *Handlers) HandleDownloadFile(ctx context.Context, _ *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
 	var p struct {
 		FileID string `json:"file_id"`

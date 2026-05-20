@@ -51,6 +51,14 @@ type Shim struct {
 	clientMu sync.RWMutex
 
 	adapter *BotAdapter
+	worker  *notifierWorker
+}
+
+// Stop drains the notifier worker. Called from Run's defer in production;
+// tests that exercise Wire directly (without Run) should call it explicitly
+// or via t.Cleanup so goleak sees a clean goroutine set.
+func (s *Shim) Stop() {
+	s.worker.Stop()
 }
 
 func (s *Shim) ShimID() (string, bool) {
@@ -144,8 +152,12 @@ func (s *Shim) Wire(ctx context.Context) error {
 		AttachNotifierDebug(filepath.Join(s.StateDir, "shim-debug.log"))
 	}
 
-	AttachNotifier(s.Client, s.MCP)
-	AttachLabelHandler(s.Client, s)
+	if s.worker == nil {
+		s.worker = newNotifierWorker()
+	}
+
+	AttachNotifier(s.Client, s.MCP, s.worker)
+	AttachLabelHandler(s.Client, s, s.worker)
 
 	if s.HelloPID == 0 {
 		s.HelloPID = os.Getpid()
@@ -243,6 +255,10 @@ func (s *Shim) Run(ctx context.Context) error {
 		}
 
 		_ = s.currentClient().Notify(ipc.MethodGoodbye, map[string]any{})
+
+		// Drain any in-flight notifier work before letting Run return so
+		// tests (goleak) and production teardown see a clean goroutine set.
+		s.Stop()
 	}()
 
 	sctx, cancel := context.WithCancel(ctx)
@@ -344,8 +360,8 @@ func (s *Shim) rewire(ctx context.Context, newClient IPCClient) error {
 		return err
 	}
 
-	AttachNotifier(newClient, s.MCP)
-	AttachLabelHandler(newClient, s)
+	AttachNotifier(newClient, s.MCP, s.worker)
+	AttachLabelHandler(newClient, s, s.worker)
 	s.adapter.SwapClient(newClient)
 	s.setClient(newClient)
 
