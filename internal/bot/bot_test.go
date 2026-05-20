@@ -150,6 +150,146 @@ func TestClassifyMessageKind(t *testing.T) {
 	}
 }
 
+// ===== replyToMeta =====
+
+func TestReplyToMeta(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *telego.Message
+		want map[string]string
+	}{
+		{
+			name: "no reply",
+			msg:  &telego.Message{Text: "hi"},
+			want: map[string]string{},
+		},
+		{
+			name: "reply with zero message_id is ignored",
+			msg:  &telego.Message{ReplyToMessage: &telego.Message{Text: "x"}},
+			want: map[string]string{},
+		},
+		{
+			name: "text reply",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 42,
+				Text:      "earlier",
+				From:      &telego.User{ID: 7, Username: "alice"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "42",
+				"reply_to_text":       "earlier",
+				"reply_to_from":       "@alice",
+			},
+		},
+		{
+			name: "caption used when cited message is media",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 5,
+				Caption:   "look at this",
+				Photo:     []telego.PhotoSize{{FileID: "p"}},
+				From:      &telego.User{ID: 9, Username: "bob"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "5",
+				"reply_to_text":       "look at this",
+				"reply_to_from":       "@bob",
+			},
+		},
+		{
+			name: "media reply with neither text nor caption omits reply_to_text",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 11,
+				Sticker:   &telego.Sticker{FileID: "s"},
+				From:      &telego.User{ID: 1, Username: "carol"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "11",
+				"reply_to_from":       "@carol",
+			},
+		},
+		{
+			name: "nil From and nil SenderChat omits reply_to_from",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 3,
+				Text:      "automated",
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "3",
+				"reply_to_text":       "automated",
+			},
+		},
+		{
+			name: "channel post falls back to SenderChat username",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID:  4,
+				Text:       "channel announcement",
+				SenderChat: &telego.Chat{ID: -100, Type: "channel", Username: "news_channel", Title: "News"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "4",
+				"reply_to_text":       "channel announcement",
+				"reply_to_from":       "@news_channel",
+			},
+		},
+		{
+			name: "anonymous group admin falls back to SenderChat title",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID:  6,
+				Text:       "from admin",
+				From:       &telego.User{ID: 1087968824, Username: "GroupAnonymousBot", IsBot: true},
+				SenderChat: &telego.Chat{ID: -100200, Type: "supergroup", Title: "Engineering"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "6",
+				"reply_to_text":       "from admin",
+				"reply_to_from":       "Engineering",
+			},
+		},
+		{
+			name: "SenderChat without username uses Title",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID:  10,
+				Text:       "private channel",
+				SenderChat: &telego.Chat{ID: -100333, Type: "channel", Title: "Private Internal"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "10",
+				"reply_to_text":       "private channel",
+				"reply_to_from":       "Private Internal",
+			},
+		},
+		{
+			name: "partial quote is forwarded",
+			msg: &telego.Message{
+				Quote: &telego.TextQuote{Text: "highlighted chunk"},
+				ReplyToMessage: &telego.Message{
+					MessageID: 8,
+					Text:      "full original text",
+					From:      &telego.User{ID: 2, Username: "dave"},
+				},
+			},
+			want: map[string]string{
+				"reply_to_message_id": "8",
+				"reply_to_text":       "full original text",
+				"reply_to_from":       "@dave",
+				"reply_to_quote":      "highlighted chunk",
+			},
+		},
+		{
+			name: "quote without reply_to is ignored (defensive)",
+			msg: &telego.Message{
+				Quote: &telego.TextQuote{Text: "orphan"},
+			},
+			want: map[string]string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, replyToMeta(tt.msg))
+		})
+	}
+}
+
 // ===== attachmentMeta =====
 
 func TestAttachmentMeta_nil_returnsNil(t *testing.T) {
