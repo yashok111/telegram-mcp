@@ -38,8 +38,6 @@ type Shim struct {
 	// tests inject fakes.
 	DialIPC func(socketPath string) (IPCClient, error)
 
-	WireContext func() context.Context // injected for tests; defaults to context.Background
-
 	// ServeStdio is injected for tests so Run can be exercised without blocking
 	// on os.Stdin. Production callers leave it nil; Run falls back to MCP.ServeStdio.
 	ServeStdio func(context.Context) error
@@ -125,7 +123,11 @@ func (s *Shim) setClient(c IPCClient) {
 	s.clientMu.Unlock()
 }
 
-func (s *Shim) Wire() error {
+func (s *Shim) Wire(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	adapter := NewBotAdapter(s.Client, func(reqID string) (string, string) {
 		d, ok := s.MCP.LookupPermission(reqID)
 		if !ok {
@@ -154,17 +156,12 @@ func (s *Shim) Wire() error {
 		ccPID = os.Getppid()
 	}
 
-	return s.hello(context.Background(), s.Client, ccPID)
+	return s.hello(ctx, s.Client, ccPID)
 }
 
 func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
-	wctx := ctx
-	if wctx == nil {
-		wctx = context.Background()
-	}
-
-	if s.WireContext != nil {
-		wctx = s.WireContext()
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	var hello struct {
@@ -178,7 +175,7 @@ func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
 		slog.Warn("os.Getwd failed; sending empty workdir in Hello", "err", err)
 	}
 
-	if err := c.Call(wctx, ipc.MethodHello, map[string]any{
+	if err := c.Call(ctx, ipc.MethodHello, map[string]any{
 		"shim_pid":      s.HelloPID,
 		"label":         s.HelloLabel,
 		"workdir":       wd,
@@ -230,7 +227,7 @@ func (s *Shim) Run(ctx context.Context) error {
 		s.DialIPC = func(p string) (IPCClient, error) { return ipc.Dial(p) }
 	}
 
-	if err := s.Wire(); err != nil {
+	if err := s.Wire(ctx); err != nil {
 		return err
 	}
 
