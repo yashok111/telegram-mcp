@@ -281,13 +281,6 @@ func runShim(stateDir string) error {
 		SocketPath: socketPath,
 		HelloLabel: os.Getenv("CLAUDE_SESSION_LABEL"),
 		DialIPC: func(p string) (shimpkg.IPCClient, error) {
-			if err := shimpkg.EnsureDaemon(ctx, shimpkg.EnsureOpts{
-				SocketPath: p,
-				StateDir:   stateDir,
-			}); err != nil {
-				return nil, fmt.Errorf("ensure daemon on reconnect: %w", err)
-			}
-
 			return ipc.Dial(p)
 		},
 	}

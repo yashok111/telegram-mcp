@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -362,4 +363,140 @@ func TestClaimPIDLeavesForeignProcessAlone(t *testing.T) {
 	got, err := strconv.Atoi(string(raw))
 	require.NoError(t, err)
 	require.Equal(t, os.Getpid(), got)
+}
+
+func swapSocketPeerPIDFn(t *testing.T, fn func(string, time.Duration) (int, bool)) {
+	t.Helper()
+
+	prev := socketPeerPIDFn
+	socketPeerPIDFn = fn
+
+	t.Cleanup(func() { socketPeerPIDFn = prev })
+}
+
+func TestSocketPeerPID_returnsListenerPID(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test.sock")
+
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = ln.Close() })
+
+	accepted := make(chan struct{})
+
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr == nil {
+			_ = c.Close()
+		}
+
+		close(accepted)
+	}()
+
+	pid, ok := socketPeerPID(sockPath, time.Second)
+	require.True(t, ok, "socketPeerPID must return ok=true against a live listener")
+	require.Equal(t, os.Getpid(), pid, "peer of an in-process listener is ourselves")
+
+	<-accepted
+}
+
+func TestSocketPeerPID_returnsFalseOnMissingSocket(t *testing.T) {
+	dir := t.TempDir()
+	pid, ok := socketPeerPID(filepath.Join(dir, "nope.sock"), 100*time.Millisecond)
+	require.False(t, ok)
+	require.Zero(t, pid)
+}
+
+// TestClaimPIDEvictsSocketPeerWhenPidfileStale exercises the bug-2 scenario:
+// a daemon is alive holding the socket, but daemon.pid points at a different
+// (dead) process. claimPID must still detect the live socket holder via
+// SO_PEERCRED and SIGTERM it before claiming.
+func TestClaimPIDEvictsSocketPeerWhenPidfileStale(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "daemon.pid")
+	sockPath := filepath.Join(dir, "daemon.sock")
+
+	cmd := exec.Command("sleep", "30") //nolint:noctx // see TestClaimPIDWaitsForOldDaemonExit.
+	require.NoError(t, cmd.Start())
+
+	peerPID := cmd.Process.Pid
+
+	reaped := make(chan struct{})
+
+	go func() {
+		_, _ = cmd.Process.Wait()
+
+		close(reaped)
+	}()
+
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+
+		<-reaped
+	})
+
+	// daemon.pid holds a stale (already-dead) PID. Without the socket-peer
+	// probe, claimPID would log "stale, overwriting" and miss the live daemon
+	// on the socket entirely.
+	require.NoError(t, os.WriteFile(pidPath, []byte("1"), 0o600))
+
+	// Stub the socket probe so the test doesn't need a real unix-socket
+	// listener inside the foreign subprocess.
+	swapSocketPeerPIDFn(t, func(p string, _ time.Duration) (int, bool) {
+		require.Equal(t, sockPath, p)
+		return peerPID, true
+	})
+	swapIsOurDaemonFn(t, func(int) bool { return true })
+	swapWaitTimeouts(t, 2*time.Second, 500*time.Millisecond)
+
+	d := &Daemon{PidPath: pidPath, SocketPath: sockPath}
+
+	done := make(chan error, 1)
+	go func() { done <- d.claimPID() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("claimPID did not return after socket-peer eviction")
+	}
+
+	<-reaped
+	require.Error(t, syscall.Kill(peerPID, 0), "socket-peer process should be terminated")
+
+	raw, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+
+	got, err := strconv.Atoi(string(raw))
+	require.NoError(t, err)
+	require.Equal(t, os.Getpid(), got)
+}
+
+// TestClaimPIDLeavesForeignSocketPeerAlone — peer holds the socket but is
+// not telegram-mcp (e.g. some unrelated user process owns daemon.sock). We
+// must NOT SIGTERM it.
+func TestClaimPIDLeavesForeignSocketPeerAlone(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "daemon.pid")
+	sockPath := filepath.Join(dir, "daemon.sock")
+
+	cmd := exec.Command("sleep", "30") //nolint:noctx // see TestClaimPIDWaitsForOldDaemonExit.
+	require.NoError(t, cmd.Start())
+
+	peerPID := cmd.Process.Pid
+
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	swapSocketPeerPIDFn(t, func(string, time.Duration) (int, bool) { return peerPID, true })
+	swapIsOurDaemonFn(t, func(int) bool { return false })
+	swapWaitTimeouts(t, 200*time.Millisecond, 200*time.Millisecond)
+
+	d := &Daemon{PidPath: pidPath, SocketPath: sockPath}
+
+	require.NoError(t, d.claimPID())
+	require.NoError(t, syscall.Kill(peerPID, 0), "foreign socket peer must remain alive")
 }
