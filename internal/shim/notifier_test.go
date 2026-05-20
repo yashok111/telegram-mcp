@@ -167,6 +167,40 @@ func TestAttachLabelHandlerNilUpdaterNoop(t *testing.T) {
 	assert.False(t, ok, "nil updater must not register a handler")
 }
 
+// TestNotifierWorker_concurrentSubmitAndStop exercises the race where a
+// notification arrives on the IPC read loop while Run's defer is calling
+// Stop. Pre-fix this panicked with "send on closed channel"; the worker
+// now coordinates via a stop channel and select-default.
+func TestNotifierWorker_concurrentSubmitAndStop(t *testing.T) {
+	for range 50 {
+		w := newNotifierWorker()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for range 200 {
+				w.submit("racy", func() {})
+			}
+		}()
+
+		w.Stop()
+		<-done
+	}
+}
+
+// TestNotifierWorker_submitAfterStopDoesNotPanic asserts the post-Stop drop
+// path: submit must log+drop rather than panic when called after Stop.
+func TestNotifierWorker_submitAfterStopDoesNotPanic(t *testing.T) {
+	w := newNotifierWorker()
+	w.Stop()
+
+	require.NotPanics(t, func() {
+		for range 10 {
+			w.submit("post-stop", func() { t.Fatal("post-stop fn must not run") })
+		}
+	})
+}
+
 func TestAttachLabelHandlerBadJSONIgnored(t *testing.T) {
 	c := newSpyClient()
 	spy := &labelSpy{}

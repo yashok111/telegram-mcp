@@ -48,25 +48,48 @@ const notifierQueueCap = 64
 // The consumer goroutine starts lazily on the first submit so tests that
 // only exercise Wire-without-Run (no notifications fire) do not leave a
 // dangling goroutine behind. One worker per Shim lifetime.
+//
+// The IPC read loop calls submit from its own goroutine, possibly racing
+// with Run's defer chain calling Stop. submit must not send on a closed
+// channel; we coordinate via the stop channel (closed exactly once) and a
+// select with default, never closing the work queue.
 type notifierWorker struct {
-	once  sync.Once
-	queue chan func()
-	done  chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
+	queue     chan func()
+	stop      chan struct{}
+	done      chan struct{}
 }
 
 func newNotifierWorker() *notifierWorker {
 	return &notifierWorker{
 		queue: make(chan func(), notifierQueueCap),
+		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
 	}
 }
 
 func (w *notifierWorker) ensureStarted() {
-	w.once.Do(func() {
+	w.startOnce.Do(func() {
 		go func() {
 			defer close(w.done)
-			for fn := range w.queue {
-				fn()
+
+			for {
+				select {
+				case fn := <-w.queue:
+					fn()
+				case <-w.stop:
+					// Drain anything already enqueued so a final
+					// permission_resolved isn't lost on shutdown.
+					for {
+						select {
+						case fn := <-w.queue:
+							fn()
+						default:
+							return
+						}
+					}
+				}
 			}
 		}()
 	})
@@ -80,8 +103,21 @@ func (w *notifierWorker) submit(kind string, fn func()) {
 
 	w.ensureStarted()
 
+	// Check stop first so a Stop in flight short-circuits before we touch
+	// the queue. The select below also has a stop case, but checking up
+	// front avoids racing with the consumer's drain loop.
+	select {
+	case <-w.stop:
+		slog.Warn("notifier stopped, dropping", "kind", kind)
+
+		return
+	default:
+	}
+
 	select {
 	case w.queue <- fn:
+	case <-w.stop:
+		slog.Warn("notifier stopped mid-send, dropping", "kind", kind)
 	default:
 		// Queue full — log and drop rather than block the read loop.
 		// Telegram will re-deliver the inbound if the user resends; permission
@@ -90,7 +126,8 @@ func (w *notifierWorker) submit(kind string, fn func()) {
 	}
 }
 
-// Stop drains any in-flight work. Safe to call before any submit (lazy-start
+// Stop signals the worker to drain and exit. Safe to call multiple times
+// concurrently from any goroutine; safe to call before any submit (lazy-start
 // means the consumer goroutine may have never been spawned — Stop kicks it
 // off briefly so done can be closed cleanly).
 func (w *notifierWorker) Stop() {
@@ -99,7 +136,7 @@ func (w *notifierWorker) Stop() {
 	}
 
 	w.ensureStarted()
-	close(w.queue)
+	w.stopOnce.Do(func() { close(w.stop) })
 	<-w.done
 }
 
