@@ -408,6 +408,30 @@ func TestSocketPeerPID_returnsFalseOnMissingSocket(t *testing.T) {
 	require.Zero(t, pid)
 }
 
+// TestSocketPeerPID_returnsFalseOnStaleSocketFile — the socket file exists
+// (left behind by a daemon that crashed without unlink) but no one is
+// listening. Dial returns ECONNREFUSED; socketPeerPID must report ok=false
+// so evictSocketPeer falls through to the pidfile path.
+func TestSocketPeerPID_returnsFalseOnStaleSocketFile(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "stale.sock")
+
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+
+	ul, ok := ln.(*net.UnixListener)
+	require.True(t, ok)
+	ul.SetUnlinkOnClose(false)
+	require.NoError(t, ln.Close())
+
+	_, err = os.Stat(sockPath)
+	require.NoError(t, err, "socket file must still exist after listener close")
+
+	pid, ok := socketPeerPID(sockPath, 200*time.Millisecond)
+	require.False(t, ok)
+	require.Zero(t, pid)
+}
+
 // TestClaimPIDEvictsSocketPeerWhenPidfileStale exercises the bug-2 scenario:
 // a daemon is alive holding the socket, but daemon.pid points at a different
 // (dead) process. claimPID must still detect the live socket holder via
@@ -464,6 +488,117 @@ func TestClaimPIDEvictsSocketPeerWhenPidfileStale(t *testing.T) {
 
 	<-reaped
 	require.Error(t, syscall.Kill(peerPID, 0), "socket-peer process should be terminated")
+
+	raw, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+
+	got, err := strconv.Atoi(string(raw))
+	require.NoError(t, err)
+	require.Equal(t, os.Getpid(), got)
+}
+
+// TestClaimPIDEscalatesSocketPeerToSIGKILL — socket-peer mirror of
+// TestClaimPIDEscalatesToSIGKILLOnHang. Verifies the SIGTERM→SIGKILL ladder
+// runs for daemons evicted via the socket-peer path, not just the pidfile
+// path.
+func TestClaimPIDEscalatesSocketPeerToSIGKILL(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "daemon.pid")
+	sockPath := filepath.Join(dir, "daemon.sock")
+
+	cmd := exec.Command("sh", "-c", "trap '' TERM; sleep 60") //nolint:noctx // see TestClaimPIDWaitsForOldDaemonExit.
+	require.NoError(t, cmd.Start())
+
+	peerPID := cmd.Process.Pid
+
+	reaped := make(chan struct{})
+
+	go func() {
+		_, _ = cmd.Process.Wait()
+
+		close(reaped)
+	}()
+
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+
+		<-reaped
+	})
+
+	swapSocketPeerPIDFn(t, func(string, time.Duration) (int, bool) { return peerPID, true })
+	swapIsOurDaemonFn(t, func(int) bool { return true })
+	swapWaitTimeouts(t, 200*time.Millisecond, 2*time.Second)
+
+	d := &Daemon{PidPath: pidPath, SocketPath: sockPath}
+
+	done := make(chan error, 1)
+	go func() { done <- d.claimPID() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("claimPID did not return after socket-peer SIGKILL escalation")
+	}
+
+	<-reaped
+	require.Error(t, syscall.Kill(peerPID, 0), "socket-peer should be killed by SIGKILL")
+}
+
+// TestClaimPIDEvictsBothSocketPeerAndPidfile — both eviction paths fire in
+// one claimPID: socket peer is one live telegram-mcp PID, pidfile points at
+// a different live telegram-mcp PID. Both must die before the new daemon
+// claims the pidfile.
+func TestClaimPIDEvictsBothSocketPeerAndPidfile(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "daemon.pid")
+	sockPath := filepath.Join(dir, "daemon.sock")
+
+	socketCmd := exec.Command("sleep", "30") //nolint:noctx // see TestClaimPIDWaitsForOldDaemonExit.
+	require.NoError(t, socketCmd.Start())
+
+	pidfileCmd := exec.Command("sleep", "30") //nolint:noctx // see TestClaimPIDWaitsForOldDaemonExit.
+	require.NoError(t, pidfileCmd.Start())
+
+	socketPID := socketCmd.Process.Pid
+	pidfilePID := pidfileCmd.Process.Pid
+
+	socketReaped := make(chan struct{})
+	pidfileReaped := make(chan struct{})
+
+	go func() { _, _ = socketCmd.Process.Wait(); close(socketReaped) }()
+	go func() { _, _ = pidfileCmd.Process.Wait(); close(pidfileReaped) }()
+
+	t.Cleanup(func() {
+		_ = socketCmd.Process.Kill()
+		_ = pidfileCmd.Process.Kill()
+
+		<-socketReaped
+		<-pidfileReaped
+	})
+
+	require.NoError(t, os.WriteFile(pidPath, []byte(strconv.Itoa(pidfilePID)), 0o600))
+
+	swapSocketPeerPIDFn(t, func(string, time.Duration) (int, bool) { return socketPID, true })
+	swapIsOurDaemonFn(t, func(int) bool { return true })
+	swapWaitTimeouts(t, 2*time.Second, 500*time.Millisecond)
+
+	d := &Daemon{PidPath: pidPath, SocketPath: sockPath}
+
+	done := make(chan error, 1)
+	go func() { done <- d.claimPID() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("claimPID did not return after dual eviction")
+	}
+
+	<-socketReaped
+	<-pidfileReaped
+	require.Error(t, syscall.Kill(socketPID, 0), "socket-peer must be terminated")
+	require.Error(t, syscall.Kill(pidfilePID, 0), "pidfile-peer must be terminated")
 
 	raw, err := os.ReadFile(pidPath)
 	require.NoError(t, err)

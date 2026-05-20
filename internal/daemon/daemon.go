@@ -146,11 +146,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // Test seams: swappable so tests can mock the comm guard and shorten waits.
 var (
-	isOurDaemonFn        = isOurDaemon
-	socketPeerPIDFn      = socketPeerPID
-	socketPeerProbeTimeo = 500 * time.Millisecond
-	termWaitTimeout      = 5 * time.Second
-	killWaitTimeout      = 2 * time.Second
+	isOurDaemonFn          = isOurDaemon
+	socketPeerPIDFn        = socketPeerPID
+	socketPeerProbeTimeout = 500 * time.Millisecond
+	termWaitTimeout        = 5 * time.Second
+	killWaitTimeout        = 2 * time.Second
 )
 
 // claimPID writes daemon.pid; if a previous daemon owns it, signal SIGTERM
@@ -211,7 +211,7 @@ func (d *Daemon) evictSocketPeer() error {
 		return nil
 	}
 
-	peer, ok := socketPeerPIDFn(d.SocketPath, socketPeerProbeTimeo)
+	peer, ok := socketPeerPIDFn(d.SocketPath, socketPeerProbeTimeout)
 	if !ok || peer <= 1 || peer == os.Getpid() {
 		return nil
 	}
@@ -335,6 +335,12 @@ func socketPeerPID(socketPath string, timeout time.Duration) (int, bool) {
 
 		pid = int(cred.Pid)
 	}); ctlErr != nil || credErr != nil {
+		// Connect succeeded but SO_PEERCRED didn't — platform unsupported,
+		// kernel denied, or a transient syscall error. Surface at debug so
+		// developers running with --log-level=debug can tell this apart from
+		// the much more common "nothing was listening" case.
+		slog.Debug("socketPeerPID: SO_PEERCRED unavailable", "ctl_err", ctlErr, "cred_err", credErr, "socket", socketPath)
+
 		return 0, false
 	}
 
