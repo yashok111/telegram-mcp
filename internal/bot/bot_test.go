@@ -884,3 +884,19 @@ func TestIsMentioned_usesCacheAcrossCalls(t *testing.T) {
 	assert.True(t, ok)
 	assert.NotNil(t, entry)
 }
+
+func TestHandleMessage_pairingCode_wrapped(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyPairing, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	msg := telego.Message{Chat: telego.Chat{ID: 7, Type: "private"}, From: &telego.User{ID: 7}, Text: "hi"}
+	require.NoError(t, b.handleMessage(t.Context(), msg))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
+	text, ok := calls[0].params["text"].(string)
+	require.True(t, ok)
+	assert.Contains(t, text, "`")
+}

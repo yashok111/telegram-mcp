@@ -82,6 +82,9 @@ func TestRenderShimsWithSessions(t *testing.T) {
 	assert.Contains(t, out, "main")
 	assert.Contains(t, out, "/code")
 	assert.Contains(t, out, "busy")
+	assert.Contains(t, out, "`abcdef01`")
+	assert.Contains(t, out, "`s1`")
+	assert.Contains(t, out, "\\(s\\)")
 }
 
 func TestRenderShimsIdleState(t *testing.T) {
@@ -98,7 +101,7 @@ func TestRenderShimsIdleState(t *testing.T) {
 	b := &Bot{router: fv}
 	out := b.renderShims(now)
 	assert.Contains(t, out, "idle")
-	assert.Contains(t, out, "(no label)")
+	assert.Contains(t, out, "\\(no label\\)")
 	assert.Contains(t, out, "?")
 }
 
@@ -136,7 +139,7 @@ func TestHandleUseSuccessEmptyLabel(t *testing.T) {
 
 	reply, ok := b.handleUseCommand("123", "/use abcdef")
 	require.True(t, ok)
-	assert.Contains(t, reply, "(no label)")
+	assert.Contains(t, reply, "\\(no label\\)")
 }
 
 func TestHandleUseStripsBotMention(t *testing.T) {
@@ -213,6 +216,7 @@ func TestHandleCommand_statusPairedWithShims(t *testing.T) {
 	assert.Contains(t, calls[0].params["text"], "Paired as")
 	assert.Contains(t, calls[0].params["text"], "deadbeef")
 	assert.Contains(t, calls[0].params["text"], "demo")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleCommand_sessions_listsShims(t *testing.T) {
@@ -236,6 +240,7 @@ func TestHandleCommand_sessions_emptyList(t *testing.T) {
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].params["text"], "No active CC sessions")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleCommand_sessions_noRouter(t *testing.T) {
@@ -259,6 +264,7 @@ func TestHandleCommand_use_pinsShim(t *testing.T) {
 	assert.Contains(t, calls[0].params["text"], "Pinned")
 	assert.Equal(t, "1", fv.lastPin.chatID)
 	assert.Equal(t, "abcdef", fv.lastPin.prefix)
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func allowlistState(userID string) access.State {
@@ -334,6 +340,7 @@ func TestHandleCommand_idle_listsMostIdle(t *testing.T) {
 	assert.Contains(t, calls[0].params["text"], "Most idle")
 	assert.Contains(t, calls[0].params["text"], "abcd1111")
 	assert.Contains(t, calls[0].params["text"], "main")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 
 	payload := payloadString(calls[0].params)
 	assert.Contains(t, payload, "sess:use:abcd1111")
@@ -492,7 +499,8 @@ func TestLabelCommandSingleSession(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, payloadString(calls[0].params), "✅ abcdef01 [s1] → main")
+	assert.Contains(t, payloadString(calls[0].params), "✅ `abcdef01` \\\\[`s1`\\\\] → main")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 	assert.Equal(t, "abcdef01", fv.lastLabel.prefix)
 	assert.Equal(t, "main", fv.lastLabel.label)
 }
@@ -513,7 +521,7 @@ func TestLabelCommandEmptyClears(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, payloadString(calls[0].params), "(no label)")
+	assert.Contains(t, payloadString(calls[0].params), "\\\\(no label\\\\)")
 	assert.Empty(t, fv.lastLabel.label)
 }
 
@@ -536,9 +544,10 @@ func TestLabelCommandPickerWhenMultiple(t *testing.T) {
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	payload := payloadString(calls[0].params)
-	assert.Contains(t, payload, `Which session should get label \"foo\"`)
+	assert.Contains(t, payload, `Which session should get label \\\"foo\\\"`)
 	assert.Contains(t, payload, "sess:label:aa000000")
 	assert.Contains(t, payload, "sess:label:bb000000")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 
 	stashed, ok := b.takePendingLabel("7")
 	require.True(t, ok)
@@ -592,7 +601,10 @@ func TestLabelCallbackResolvesPending(t *testing.T) {
 
 	edits := api.recordedCalls("editMessageText")
 	require.NotEmpty(t, edits)
-	assert.Contains(t, payloadString(edits[0].params), "✅ aa000000 [s1] → foo")
+	// Edit is now MarkdownV2 with tap-to-copy code spans, so id/alias appear
+	// wrapped in backticks and the surrounding `[...]` is escaped to `\[…\]`.
+	assert.Contains(t, payloadString(edits[0].params), "✅ `aa000000` \\\\[`s1`\\\\] → foo")
+	assert.Equal(t, "MarkdownV2", edits[0].params["parse_mode"])
 }
 
 func TestLabelCallbackExpired(t *testing.T) {

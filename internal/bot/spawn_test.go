@@ -162,7 +162,8 @@ func TestHandleSpawnCommand_CancelOK(t *testing.T) {
 
 	texts := sentMessageTexts(api)
 	require.Len(t, texts, 1)
-	assert.Contains(t, texts[0], "🛑 Cancelling spawn zz9")
+	assert.Contains(t, texts[0], "🛑 Cancelling spawn `zz9`")
+	assert.Equal(t, "MarkdownV2", api.recordedCalls("sendMessage")[0].params["parse_mode"])
 }
 
 func TestHandleSpawnCommand_CancelUnknown(t *testing.T) {
@@ -184,7 +185,8 @@ func TestHandleSpawnCommand_ListEmpty(t *testing.T) {
 
 	texts := sentMessageTexts(api)
 	require.Len(t, texts, 1)
-	assert.Equal(t, "No /spawn sessions running.", texts[0])
+	assert.Equal(t, "No /spawn sessions running\\.", texts[0])
+	assert.Equal(t, "MarkdownV2", api.recordedCalls("sendMessage")[0].params["parse_mode"])
 }
 
 func TestHandleSpawnCommand_ListRendersMatchedAlias(t *testing.T) {
@@ -202,8 +204,9 @@ func TestHandleSpawnCommand_ListRendersMatchedAlias(t *testing.T) {
 
 	texts := sentMessageTexts(api)
 	require.Len(t, texts, 1)
-	assert.Contains(t, texts[0], "ff00aa · running · @s2 · pid=4242")
-	assert.Contains(t, texts[0], "bbbbbb · starting · (no shim) · pid=4343")
+	assert.Contains(t, texts[0], "`ff00aa` · running · `@s2` · pid\\=`4242`")
+	assert.Contains(t, texts[0], "`bbbbbb` · starting · \\(no shim\\) · pid\\=`4343`")
+	assert.Equal(t, "MarkdownV2", api.recordedCalls("sendMessage")[0].params["parse_mode"])
 }
 
 func TestHandleSpawnCommand_NoRunnerConfigured(t *testing.T) {

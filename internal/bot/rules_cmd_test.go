@@ -34,7 +34,7 @@ func TestRenderRules_singleRuleWithExpiry(t *testing.T) {
 	assert.Contains(t, out, "Bash")
 	assert.Contains(t, out, "approve")
 	assert.Contains(t, out, "expires in")
-	assert.Contains(t, out, "(any path)")
+	assert.Contains(t, out, "\\(any path\\)")
 }
 
 func TestRenderRules_singleRuleNoExpiry(t *testing.T) {
@@ -81,8 +81,11 @@ func TestRenderRules_multiplerules_listed(t *testing.T) {
 	assert.Contains(t, out, "r2")
 	assert.Contains(t, out, "Bash")
 	assert.Contains(t, out, "Edit")
-	assert.Contains(t, out, "/foo/*.go")
+	assert.Contains(t, out, "/foo/\\*\\.go")
 	assert.Contains(t, out, "deny")
+	// Square brackets around the path field must be escaped — MarkdownV2 parses
+	// unescaped `[...]` as the start of an inline-link and rejects the message.
+	assert.Contains(t, out, "\\[/foo/\\*\\.go\\]")
 
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	// Header + 2 rule lines.
@@ -120,9 +123,10 @@ func TestHandleRulesCommand_list_renders(t *testing.T) {
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	text := calls[0].params["text"].(string)
-	assert.Contains(t, text, "ab1234")
+	assert.Contains(t, text, "`ab1234`")
 	assert.Contains(t, text, "Bash")
 	assert.Contains(t, text, "approve")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
 func TestHandleRulesCommand_clear(t *testing.T) {
@@ -161,7 +165,8 @@ func TestHandleRulesCommand_revoke_existing(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"], "Revoked rule abc")
+	assert.Contains(t, calls[0].params["text"], "Revoked rule `abc`")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 
 	st := b.store.Load()
 	require.Len(t, st.Rules, 1)
@@ -182,7 +187,8 @@ func TestHandleRulesCommand_revoke_missing(t *testing.T) {
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
-	assert.Contains(t, calls[0].params["text"], "No rule with id nope")
+	assert.Contains(t, calls[0].params["text"], "No rule with id `nope`")
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 
 	st := b.store.Load()
 	require.Len(t, st.Rules, 1)

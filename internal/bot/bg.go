@@ -127,12 +127,12 @@ func (b *Bot) handleBgCommand(ctx context.Context, msg telego.Message, runner Bg
 	case BgSubHelp:
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), formatBgHelpReply()))
 	case BgSubList:
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), formatBgListReply(runner.List())))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), formatBgListReply(runner.List())).WithParseMode("MarkdownV2"))
 	case BgSubCancel:
 		if cerr := runner.Cancel(args.TaskID); cerr != nil {
 			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Cancel failed: "+cerr.Error()))
 		} else {
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "🛑 Cancelling task "+args.TaskID))
+			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "🛑 Cancelling task "+MdCode(args.TaskID)).WithParseMode("MarkdownV2"))
 		}
 	case BgSubStart:
 		var userID string
@@ -152,7 +152,7 @@ func (b *Bot) handleBgCommand(ctx context.Context, msg telego.Message, runner Bg
 		}
 
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
-			"📋 Started task "+id+". Use `/bg cancel "+id+"` to stop."))
+			"📋 Started task "+MdCode(id)+"\\. Use "+MdCode("/bg cancel "+id)+" to stop\\.").WithParseMode("MarkdownV2"))
 	}
 }
 
@@ -168,14 +168,14 @@ func formatBgHelpReply() string {
 
 func formatBgListReply(tasks []BgTaskInfo) string {
 	if len(tasks) == 0 {
-		return "No /bg tasks running."
+		return "No /bg tasks running\\."
 	}
 
 	var b strings.Builder
 
 	now := time.Now()
 	for _, t := range tasks {
-		fmt.Fprintf(&b, "%s · %s · %s ago · %s\n", t.ID, t.Status, now.Sub(t.StartedAt).Round(time.Second), t.PromptHead)
+		fmt.Fprintf(&b, "%s · %s · %s ago · %s\n", MdCode(t.ID), t.Status, now.Sub(t.StartedAt).Round(time.Second), EscapeMarkdownV2(t.PromptHead))
 	}
 
 	return strings.TrimRight(b.String(), "\n")

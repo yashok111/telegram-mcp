@@ -24,7 +24,7 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message, st acc
 
 	switch sub {
 	case "", "list":
-		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, renderRules(st.Rules)))
+		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, renderRules(st.Rules)).WithParseMode("MarkdownV2"))
 	case "clear":
 		var n int
 		err := b.store.Mutate(func(st *access.State) bool {
@@ -51,7 +51,7 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message, st acc
 			return found
 		})
 		if !found {
-			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "No rule with id "+id))
+			_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "No rule with id "+MdCode(id)).WithParseMode("MarkdownV2"))
 			return
 		}
 
@@ -60,7 +60,7 @@ func (b *Bot) handleRulesCommand(ctx context.Context, msg telego.Message, st acc
 			return
 		}
 
-		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Revoked rule "+id))
+		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Revoked rule "+MdCode(id)).WithParseMode("MarkdownV2"))
 	default:
 		_, _ = b.api.SendMessage(ctx, tu.Message(chatID, "Usage: /rules [list|clear|revoke <id>]"))
 	}
@@ -77,7 +77,7 @@ func renderRules(rules []access.PermissionRule) string {
 	}
 
 	if len(active) == 0 {
-		return "No permission rules. Tap a button on a permission prompt to add one."
+		return "No permission rules\\. Tap a button on a permission prompt to add one\\."
 	}
 
 	var sb strings.Builder
@@ -91,13 +91,15 @@ func renderRules(rules []access.PermissionRule) string {
 			exp = "expires in " + left.Round(time.Minute).String()
 		}
 
-		path := r.PathPattern
-		if path == "" {
-			path = "(any path)"
+		var path string
+		if r.PathPattern == "" {
+			path = "\\(any path\\)"
+		} else {
+			path = EscapeMarkdownV2(r.PathPattern)
 		}
 
-		sb.WriteString(fmt.Sprintf("• %s — %s %s [%s] — %s\n",
-			r.ID, r.Action, r.Tool, path, exp))
+		sb.WriteString(fmt.Sprintf("• %s — %s %s \\[%s\\] — %s\n",
+			MdCode(r.ID), r.Action, r.Tool, path, EscapeMarkdownV2(exp)))
 	}
 
 	return sb.String()

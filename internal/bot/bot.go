@@ -289,7 +289,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.sendSessions(ctx, msg)
 	case "use":
 		reply, _ := b.handleUseCommand(strconv.FormatInt(msg.Chat.ID, 10), msg.Text)
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply).WithParseMode("MarkdownV2"))
 	case "idle":
 		b.sendIdle(ctx, msg)
 	case "rules":
@@ -314,15 +314,15 @@ func (b *Bot) sendStatus(ctx context.Context, msg telego.Message, st access.Stat
 			label = "@" + msg.From.Username
 		}
 
-		text := fmt.Sprintf("Paired as %s.\n\n%s", label, b.renderShims(time.Now()))
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text))
+		text := fmt.Sprintf("Paired as %s\\.\n\n%s", EscapeMarkdownV2(label), b.renderShims(time.Now()))
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), text).WithParseMode("MarkdownV2"))
 
 		return
 	}
 
 	if code, _, ok := findPendingFor(st.Pending, senderID); ok {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
-			"Pending pairing — run in Claude Code:\n\n/telegram:access pair "+code))
+			"Pending pairing — run in Claude Code:\n\n/telegram:access pair "+MdCode(code)).WithParseMode("MarkdownV2"))
 
 		return
 	}
@@ -358,7 +358,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 		slog.Info("inbound pairing", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "is_resend", decision.isResend)
 
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
-			fmt.Sprintf("%s — run in Claude Code:\n\n/telegram:access pair %s", lead, decision.code)))
+			fmt.Sprintf("%s — run in Claude Code:\n\n/telegram:access pair %s", lead, MdCode(decision.code))).WithParseMode("MarkdownV2"))
 
 		return nil
 	case actionDeliver:
