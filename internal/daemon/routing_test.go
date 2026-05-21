@@ -128,6 +128,103 @@ func TestRouterPermissionDetailsLookup(t *testing.T) {
 	assert.Equal(t, d, got)
 }
 
+func TestRouteInboundMulti_topicArmWinsOverReply(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a)
+	r.Register(b)
+	r.BindTopic("b", 42)
+
+	// b sent message_id=100 in chat-1; reply would normally route to b.
+	// Topic 42 also owned by b — same shim, but topic arm is exercised
+	// when threadID > 0 even with a reply present.
+	r.RecordOutbound("a", "chat-1", 100)
+
+	// Topic 42 → b; reply 100 alone would → a. Topic wins.
+	got := r.RouteInboundMulti("chat-1", "anything", 100, 42)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "topic arm wins over reply-to")
+}
+
+func TestRouteInboundMulti_topicArmWinsOverMention(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a) // s1
+	r.Register(b) // s2
+	r.BindTopic("a", 7)
+
+	got := r.RouteInboundMulti("chat-1", "@s2 do it", 0, 7)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID, "topic 7 owned by a; @s2 mention ignored")
+}
+
+func TestRouteInboundMulti_unknownTopicFallsThrough(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a) // s1
+	r.Register(b) // s2
+
+	got := r.RouteInboundMulti("chat-1", "@s2 please", 0, 999)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "unknown thread → fall back to mention")
+}
+
+func TestRouteInboundMulti_zeroThreadID_skipsTopicArm(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	r.Register(a)
+	r.BindTopic("a", 42)
+
+	got := r.RouteInboundMulti("chat-1", "hello", 0, 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID, "threadID=0 → existing arms still work")
+}
+
+func TestRouter_BindTopic_setsOwnerAndShimField(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	r.Register(a)
+
+	r.BindTopic("a", 17)
+
+	got := r.RouteInboundMulti("chat-1", "", 0, 17)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID)
+	assert.Equal(t, 17, got[0].TopicID, "shim updated in place")
+}
+
+func TestRouter_BindTopic_unknownShimIsNoop(t *testing.T) {
+	r := NewRouter()
+
+	r.BindTopic("ghost", 100)
+
+	got := r.RouteInboundMulti("chat-1", "", 0, 100)
+	assert.Empty(t, got, "no shim → no fallback")
+}
+
+func TestRouter_Drop_clearsTopicOwner(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	r.Register(a)
+	r.BindTopic("a", 50)
+
+	r.Drop("a")
+
+	// Another shim attaches → topic 50 should NOT route to the dropped shim.
+	b := &Shim{ID: "b"}
+	r.Register(b)
+
+	got := r.RouteInboundMulti("chat-1", "", 0, 50)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "dropped shim's topic key cleared; fell through to LRU")
+}
+
 func TestRouteInboundMultiNoMentionFallsThroughToOwner(t *testing.T) {
 	r := NewRouter()
 	a := &Shim{ID: "a"}
@@ -138,7 +235,7 @@ func TestRouteInboundMultiNoMentionFallsThroughToOwner(t *testing.T) {
 
 	r.RecordOutbound("a", "chat-1", 0)
 
-	got := r.RouteInboundMulti("chat-1", "no mentions here", 0)
+	got := r.RouteInboundMulti("chat-1", "no mentions here", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "a", got[0].ID)
 }
@@ -151,7 +248,7 @@ func TestRouteInboundMultiSingleMentionResolves(t *testing.T) {
 	r.Register(a) // s1
 	r.Register(b) // s2
 
-	got := r.RouteInboundMulti("chat-1", "@s2 please", 0)
+	got := r.RouteInboundMulti("chat-1", "@s2 please", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID)
 }
@@ -166,7 +263,7 @@ func TestRouteInboundMultiMultipleMentionsResolveEach(t *testing.T) {
 	r.Register(b) // s2
 	r.Register(c) // s3
 
-	got := r.RouteInboundMulti("chat-1", "@s1 and @s3 do this", 0)
+	got := r.RouteInboundMulti("chat-1", "@s1 and @s3 do this", 0, 0)
 	require.Len(t, got, 2)
 	ids := []string{got[0].ID, got[1].ID}
 	assert.ElementsMatch(t, []string{"a", "c"}, ids)
@@ -182,7 +279,7 @@ func TestRouteInboundMultiAllBroadcasts(t *testing.T) {
 	r.Register(b)
 	r.Register(c)
 
-	got := r.RouteInboundMulti("chat-1", "@all status", 0)
+	got := r.RouteInboundMulti("chat-1", "@all status", 0, 0)
 	assert.Len(t, got, 3)
 }
 
@@ -195,7 +292,7 @@ func TestRouteInboundMultiUnknownMentionFallsThrough(t *testing.T) {
 	r.Register(b)
 	r.RecordOutbound("a", "chat-1", 0)
 
-	got := r.RouteInboundMulti("chat-1", "@s99 wrong", 0)
+	got := r.RouteInboundMulti("chat-1", "@s99 wrong", 0, 0)
 	require.Len(t, got, 1, "unknown mention falls through to owner")
 	assert.Equal(t, "a", got[0].ID)
 }
@@ -208,14 +305,14 @@ func TestRouteInboundMultiMixOfKnownAndUnknownReturnsOnlyKnown(t *testing.T) {
 	r.Register(a) // s1
 	r.Register(b) // s2
 
-	got := r.RouteInboundMulti("chat-1", "@s1 and @s99 mix", 0)
+	got := r.RouteInboundMulti("chat-1", "@s1 and @s99 mix", 0, 0)
 	require.Len(t, got, 1, "known mention wins; unknown is silently dropped")
 	assert.Equal(t, "a", got[0].ID)
 }
 
 func TestRouteInboundMultiNoShimsReturnsEmpty(t *testing.T) {
 	r := NewRouter()
-	got := r.RouteInboundMulti("chat-1", "@s1 hi", 0)
+	got := r.RouteInboundMulti("chat-1", "@s1 hi", 0, 0)
 	assert.Empty(t, got)
 }
 
@@ -228,7 +325,7 @@ func TestRouteInboundMultiMentionDoesNotChangeOwner(t *testing.T) {
 	r.Register(b) // s2
 	r.RecordOutbound("a", "chat-1", 0)
 
-	_ = r.RouteInboundMulti("chat-1", "@s2 hello", 0)
+	_ = r.RouteInboundMulti("chat-1", "@s2 hello", 0, 0)
 
 	owner, ok := r.RouteInbound("chat-1")
 	require.True(t, ok)
@@ -398,7 +495,7 @@ func TestRouteInboundMultiReplyBeatsMentionsOwnerAndLRU(t *testing.T) {
 	r.RecordOutbound("c", "chat-1", 99) // s3 owns chat-1 via last-writer-wins
 
 	// Reply to s2's msg even with @s1 mention and s3 owning the chat.
-	got := r.RouteInboundMulti("chat-1", "@s1 reply text", 77)
+	got := r.RouteInboundMulti("chat-1", "@s1 reply text", 77, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID, "reply must outrank @mention, owner, and LRU")
 }
@@ -410,7 +507,7 @@ func TestRouteInboundMultiReplyMissFallsThroughToMention(t *testing.T) {
 
 	r.RecordOutbound("a", "chat-1", 0) // a owns chat-1; no reply entry
 
-	got := r.RouteInboundMulti("chat-1", "@s2 hi", 12345)
+	got := r.RouteInboundMulti("chat-1", "@s2 hi", 12345, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID, "unknown reply_to falls through to mention")
 }
@@ -422,7 +519,7 @@ func TestRouteInboundMultiReplyMissFallsThroughToOwner(t *testing.T) {
 
 	r.RecordOutbound("a", "chat-1", 0)
 
-	got := r.RouteInboundMulti("chat-1", "plain text", 999)
+	got := r.RouteInboundMulti("chat-1", "plain text", 999, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "a", got[0].ID, "unknown reply_to with no mention falls to owner")
 }
@@ -434,7 +531,7 @@ func TestRouteInboundMultiReplyToShimWhoseConnIsGone(t *testing.T) {
 	r.RecordOutbound("a", "chat-1", 42)
 	r.Drop("a")
 
-	got := r.RouteInboundMulti("chat-1", "@b please", 42)
+	got := r.RouteInboundMulti("chat-1", "@b please", 42, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID, "reply target gone — fall through to mention @b")
 }
@@ -665,7 +762,7 @@ func TestRouterLRAMentionStillBeatsRoundRobin(t *testing.T) {
 
 	// LRA alone (no mention, no pin, no owner) would prefer a by lex.
 	// A mention of @s3 must still win.
-	got := r.RouteInboundMulti("chat-1", "@s3 do this", 0)
+	got := r.RouteInboundMulti("chat-1", "@s3 do this", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "c", got[0].ID)
 }
@@ -769,7 +866,7 @@ func TestRouterLabelIndexedAtRegister(t *testing.T) {
 	r := NewRouter()
 	r.Register(&Shim{ID: "a", Label: "main-bot"})
 
-	got := r.RouteInboundMulti("chat-1", "@main-bot", 0)
+	got := r.RouteInboundMulti("chat-1", "@main-bot", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "a", got[0].ID, "Register must seed the label index for non-empty Label")
 }
@@ -794,7 +891,7 @@ func TestRouterLabelIndexClearedOnDrop(t *testing.T) {
 	// Behavioral: mention falls through to chat owner.
 	r.RecordOutbound("b", "chat-1", 0)
 
-	got := r.RouteInboundMulti("chat-1", "@main-bot ping", 0)
+	got := r.RouteInboundMulti("chat-1", "@main-bot ping", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID, "dropped shim's label must fall through to owner")
 }
@@ -808,11 +905,11 @@ func TestRouterLabelIndexReplacedOnSetLabel(t *testing.T) {
 	require.NoError(t, err)
 	r.RecordOutbound("b", "chat-1", 0)
 
-	got := r.RouteInboundMulti("chat-1", "@old-label", 0)
+	got := r.RouteInboundMulti("chat-1", "@old-label", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID, "old label must no longer resolve after SetLabel")
 
-	got = r.RouteInboundMulti("chat-1", "@new-label", 0)
+	got = r.RouteInboundMulti("chat-1", "@new-label", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "a", got[0].ID)
 }
@@ -825,7 +922,7 @@ func TestRouteInboundMultiLabelMatches(t *testing.T) {
 	_, err := r.SetLabel("b", "main-bot")
 	require.NoError(t, err)
 
-	got := r.RouteInboundMulti("chat-1", "@main-bot please", 0)
+	got := r.RouteInboundMulti("chat-1", "@main-bot please", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID)
 }
@@ -838,7 +935,7 @@ func TestRouteInboundMultiAliasBeatsLabel(t *testing.T) {
 	_, err := r.SetLabel("a", "s2") // label collides with b's alias
 	require.NoError(t, err)
 
-	got := r.RouteInboundMulti("chat-1", "@s2 hi", 0)
+	got := r.RouteInboundMulti("chat-1", "@s2 hi", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID, "alias wins over same-name label")
 }
@@ -854,7 +951,7 @@ func TestRouteInboundMultiLabelCollisionFansOut(t *testing.T) {
 	_, err = r.SetLabel("b", "dup")
 	require.NoError(t, err)
 
-	got := r.RouteInboundMulti("chat-1", "@dup go", 0)
+	got := r.RouteInboundMulti("chat-1", "@dup go", 0, 0)
 	require.Len(t, got, 2)
 	ids := []string{got[0].ID, got[1].ID}
 	assert.ElementsMatch(t, []string{"a", "b"}, ids)
@@ -866,7 +963,7 @@ func TestRouteInboundMultiUnknownLabelFallsThroughToOwner(t *testing.T) {
 	r.Register(&Shim{ID: "b"})
 	r.RecordOutbound("a", "chat-1", 0)
 
-	got := r.RouteInboundMulti("chat-1", "@no-such-label", 0)
+	got := r.RouteInboundMulti("chat-1", "@no-such-label", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "a", got[0].ID)
 }
@@ -878,7 +975,7 @@ func TestRouteInboundMultiLabelCaseInsensitive(t *testing.T) {
 	_, err := r.SetLabel("a", "Main-Bot")
 	require.NoError(t, err)
 
-	got := r.RouteInboundMulti("chat-1", "@main-bot ping", 0)
+	got := r.RouteInboundMulti("chat-1", "@main-bot ping", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "a", got[0].ID)
 }
@@ -889,7 +986,7 @@ func TestRouteInboundMultiEmptyLabelNotMatched(t *testing.T) {
 	r.Register(&Shim{ID: "b"})
 	r.RecordOutbound("b", "chat-1", 0)
 
-	got := r.RouteInboundMulti("chat-1", "@whatever", 0)
+	got := r.RouteInboundMulti("chat-1", "@whatever", 0, 0)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID, "empty Label never matches mentions")
 }
@@ -902,7 +999,7 @@ func TestRouteInboundMultiLabelMixedWithAlias(t *testing.T) {
 	_, err := r.SetLabel("b", "worker")
 	require.NoError(t, err)
 
-	got := r.RouteInboundMulti("chat-1", "@s1 and @worker do this", 0)
+	got := r.RouteInboundMulti("chat-1", "@s1 and @worker do this", 0, 0)
 	require.Len(t, got, 2)
 	ids := []string{got[0].ID, got[1].ID}
 	assert.ElementsMatch(t, []string{"a", "b"}, ids)

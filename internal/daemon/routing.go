@@ -31,6 +31,9 @@ type Shim struct {
 	Workdir     string
 	CCSessionID string
 	SpawnID     string
+	// TopicID is the forum thread_id allocated for this shim when
+	// access.State.ForumChatID is configured; zero means DM/non-forum mode.
+	TopicID     int
 	ConnectedAt time.Time
 	Notify      func(method string, params any) error // bound to the underlying ipc.Conn
 }
@@ -59,6 +62,12 @@ type Router struct {
 	// labelIndex maps lowercase Shim.Label → shim_ids that currently carry it.
 	// Lets matchByLabelLocked run in O(1) instead of scanning every shim.
 	labelIndex map[string][]string
+
+	// topicOwners maps a forum thread_id → shim_id. Populated on Register
+	// when shim.TopicID > 0, drained on Drop. Lookup is the first arm of
+	// RouteInboundMulti so a message inside a topic always lands on the
+	// right shim regardless of mention/reply/affinity.
+	topicOwners map[int]string
 
 	lastOutbound map[string]time.Time  // shim_id → time
 	lastAssigned map[string]time.Time  // shim_id → most recent inbound-route resolution
@@ -143,6 +152,7 @@ func NewRouter() *Router {
 		aliases:      map[string]string{},
 		shimAlias:    map[string]string{},
 		labelIndex:   map[string][]string{},
+		topicOwners:  map[int]string{},
 		lastOutbound: map[string]time.Time{},
 		lastAssigned: map[string]time.Time{},
 		pins:         map[string]pin{},
@@ -166,6 +176,31 @@ func (r *Router) Register(s *Shim) {
 	r.shims[s.ID] = s
 	r.lru = prepend(r.lru, s.ID)
 	r.indexLabelLocked(s.ID, s.Label)
+
+	if s.TopicID > 0 {
+		r.topicOwners[s.TopicID] = s.ID
+	}
+}
+
+// BindTopic associates a forum thread_id with shimID after the shim is
+// already registered. Called by the daemon after Forum.AllocateOrReuse
+// returns a non-zero thread_id (Register happens first so resolveReuseKey
+// can see the freshly-allocated alias).
+func (r *Router) BindTopic(shimID string, threadID int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if threadID <= 0 {
+		return
+	}
+
+	s, ok := r.shims[shimID]
+	if !ok {
+		return
+	}
+
+	s.TopicID = threadID
+	r.topicOwners[threadID] = shimID
 }
 
 func (r *Router) Drop(id string) {
@@ -179,6 +214,10 @@ func (r *Router) Drop(id string) {
 
 	if s, ok := r.shims[id]; ok {
 		r.unindexLabelLocked(id, s.Label)
+
+		if s.TopicID > 0 {
+			delete(r.topicOwners, s.TopicID)
+		}
 	}
 
 	delete(r.shims, id)
@@ -330,6 +369,7 @@ func (r *Router) Snapshot() []ShimInfo {
 			Workdir:      s.Workdir,
 			CCSessionID:  s.CCSessionID,
 			SpawnID:      s.SpawnID,
+			TopicID:      s.TopicID,
 			ConnectedAt:  s.ConnectedAt,
 			LastOutbound: r.lastOutbound[s.ID],
 			PinnedChats:  pinsByShim[s.ID],
@@ -434,6 +474,27 @@ func (r *Router) ResolveShimByPrefix(prefix string) (*Shim, error) {
 	return found, nil
 }
 
+// ShimByTopic returns the shim that currently owns the given forum thread,
+// nil/false when no one does. Used by TopicCloser to find which shim a
+// `/topic close` should shutdown.
+func (r *Router) ShimByTopic(threadID int) (*Shim, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if threadID <= 0 {
+		return nil, false
+	}
+
+	owner, ok := r.topicOwners[threadID]
+	if !ok {
+		return nil, false
+	}
+
+	s, ok := r.shims[owner]
+
+	return s, ok
+}
+
 func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -532,16 +593,36 @@ func (r *Router) lraPickLocked() (*Shim, bool) {
 }
 
 // RouteInboundMulti resolves an inbound message to a set of target shims using
-// the precedence chain: reply-to → mentions (incl. @all broadcast) → pin →
-// chat owner → LRA (least-recently-assigned, when 2+ shims) → LRU. Reply wins
-// because the user explicitly targeted the prior sender via Telegram's
-// quote-reply UI. A mention dispatch never rewrites chatOwners — it's a
-// one-shot address. Returns nil if no shims are connected.
-func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID int) []*Shim {
+// the precedence chain: forum topic → reply-to → mentions (incl. @all
+// broadcast) → pin → chat owner → LRA (least-recently-assigned, when 2+
+// shims) → LRU. Topic wins because Telegram's UI groups every message in
+// a topic by the shim that owns it; reply wins second because the user
+// explicitly targeted the prior sender via the quote-reply UI. A mention
+// dispatch never rewrites chatOwners — it's a one-shot address. Returns
+// nil if no shims are connected.
+//
+// threadID is the inbound's message_thread_id (0 = non-forum / general chat
+// in a forum supergroup). When non-zero and a shim owns that topic, the
+// route is exclusive — mentions/reply within the topic don't fan out.
+func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID, threadID int) []*Shim {
 	mentions := parseMentions(content)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if threadID > 0 {
+		if owner, ok := r.topicOwners[threadID]; ok {
+			if s, ok := r.shims[owner]; ok {
+				slog.Info("RouteInbound topic", "chat_id", chatID, "thread_id", threadID, "shim_id", s.ID)
+				r.recordAssignmentLocked(s.ID)
+
+				return []*Shim{s}
+			}
+			// Stale owner — fall through. Drop should have cleaned this, log
+			// for visibility and avoid silent misrouting.
+			slog.Warn("RouteInbound topic owner gone", "thread_id", threadID, "stale_owner", owner)
+		}
+	}
 
 	if s, ok := r.routeByReplyLocked(chatID, replyToMsgID); ok {
 		return []*Shim{s}
