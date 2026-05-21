@@ -765,13 +765,13 @@ func TestCallback_atool1h_notAllowlisted_doesNotAddRule(t *testing.T) {
 	assert.Empty(t, n.resolved, "non-allowlisted callback must not resolve permission")
 }
 
-func TestBroadcastPermissionRequest_keyboardIncludesNewRows(t *testing.T) {
+func TestSendPermissionPrompt_keyboardIncludesNewRows(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
 
-	b.BroadcastPermissionRequest(t.Context(), "", "abcde", "Bash")
+	b.SendPermissionPrompt(t.Context(), PermissionTarget{ChatID: 42}, "", "abcde", "Bash")
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)

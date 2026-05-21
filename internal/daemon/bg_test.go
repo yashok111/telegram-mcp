@@ -194,11 +194,11 @@ func (b *lockedBot) DownloadFile(ctx context.Context, id string) (string, error)
 	return b.fb.DownloadFile(ctx, id)
 }
 
-func (b *lockedBot) BroadcastPermissionRequest(ctx context.Context, prefix, reqID, tool string) {
+func (b *lockedBot) SendPermissionPrompt(ctx context.Context, target bot.PermissionTarget, prefix, reqID, tool string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.fb.BroadcastPermissionRequest(ctx, prefix, reqID, tool)
+	b.fb.SendPermissionPrompt(ctx, target, prefix, reqID, tool)
 }
 
 func (b *lockedBot) SendChatAction(ctx context.Context, chatID, action string) error {
