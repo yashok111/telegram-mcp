@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/yakov/telegram-mcp/internal/bot"
 	"github.com/yakov/telegram-mcp/internal/ipc"
@@ -43,15 +44,42 @@ type IPCClient interface {
 type PermDetailsProvider func(requestID string) (description, inputPreview string)
 
 // BotAdapter implements mcp.BotAPI by forwarding to the daemon over IPC.
+//
+// topicID is set by the shim after a successful hello when the daemon
+// assigned a forum thread for this session. Subsequent send/file calls
+// inject it as message_thread_id unless the caller explicitly set
+// SendOpts.MessageThreadID — that lets future tools target a specific
+// topic without going through the default-injection path.
 type BotAdapter struct {
 	PermDetails PermDetailsProvider
 
-	mu     sync.RWMutex
-	client IPCClient
+	mu      sync.RWMutex
+	client  IPCClient
+	topicID atomic.Int64
 }
 
 func NewBotAdapter(c IPCClient, perm PermDetailsProvider) *BotAdapter {
 	return &BotAdapter{client: c, PermDetails: perm}
+}
+
+// SetTopicID stores the forum thread_id assigned to this shim by the daemon
+// at hello time. Zero clears the binding (e.g., after daemon restart that
+// rotates topics). Safe to call from any goroutine — atomic write. int64
+// matches Go's underlying int width on 64-bit platforms and gives headroom
+// over Telegram's message_id range without runtime truncation.
+func (a *BotAdapter) SetTopicID(id int) {
+	a.topicID.Store(int64(id))
+}
+
+// resolveThreadID picks the effective message_thread_id for an outbound:
+// explicit opts.MessageThreadID wins (caller intent), otherwise fall back
+// to the shim's allocated topicID. Zero means no thread routing.
+func (a *BotAdapter) resolveThreadID(explicit int) int {
+	if explicit > 0 {
+		return explicit
+	}
+
+	return int(a.topicID.Load())
 }
 
 func (a *BotAdapter) Client() IPCClient {
@@ -72,11 +100,17 @@ func (a *BotAdapter) SendMessage(ctx context.Context, chatID, text string, opts 
 		MessageID int `json:"message_id"`
 	}
 
+	params := map[string]any{
+		"chat_id": chatID, "text": text, "reply_to": opts.ReplyTo, "parse_mode": opts.ParseMode,
+	}
+
+	if tid := a.resolveThreadID(opts.MessageThreadID); tid > 0 {
+		params["message_thread_id"] = tid
+	}
+
 	c := a.Client()
 
-	err := c.Call(ctx, ipc.MethodBotSendMessage, map[string]any{
-		"chat_id": chatID, "text": text, "reply_to": opts.ReplyTo, "parse_mode": opts.ParseMode,
-	}, &res)
+	err := c.Call(ctx, ipc.MethodBotSendMessage, params, &res)
 	if err != nil {
 		return 0, mapErr(err)
 	}
@@ -89,11 +123,17 @@ func (a *BotAdapter) SendFile(ctx context.Context, chatID, path string, opts bot
 		MessageID int `json:"message_id"`
 	}
 
+	params := map[string]any{
+		"chat_id": chatID, "path": path, "reply_to": opts.ReplyTo,
+	}
+
+	if tid := a.resolveThreadID(opts.MessageThreadID); tid > 0 {
+		params["message_thread_id"] = tid
+	}
+
 	c := a.Client()
 
-	err := c.Call(ctx, ipc.MethodBotSendFile, map[string]any{
-		"chat_id": chatID, "path": path, "reply_to": opts.ReplyTo,
-	}, &res)
+	err := c.Call(ctx, ipc.MethodBotSendFile, params, &res)
 	if err != nil {
 		return 0, mapErr(err)
 	}

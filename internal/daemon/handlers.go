@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/yakov/telegram-mcp/internal/access"
@@ -32,7 +33,7 @@ type botSurface interface {
 	React(ctx context.Context, chatID string, msgID int, emoji string) error
 	SendChatAction(ctx context.Context, chatID, action string) error
 	DownloadFile(ctx context.Context, fileID string) (string, error)
-	BroadcastPermissionRequest(ctx context.Context, prefix, requestID, toolName string)
+	SendPermissionPrompt(ctx context.Context, target bot.PermissionTarget, prefix, requestID, toolName string)
 }
 
 type Handlers struct {
@@ -126,10 +127,11 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 
 func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
 	var p struct {
-		ChatID    string `json:"chat_id"`
-		Text      string `json:"text"`
-		ReplyTo   int    `json:"reply_to"`
-		ParseMode string `json:"parse_mode"`
+		ChatID          string `json:"chat_id"`
+		Text            string `json:"text"`
+		ReplyTo         int    `json:"reply_to"`
+		ParseMode       string `json:"parse_mode"`
+		MessageThreadID int    `json:"message_thread_id"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &ipc.Error{Code: ipc.CodeInvalidParams, Message: err.Error()}
@@ -141,7 +143,11 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params js
 
 	text := h.textPrefixFor(c) + p.Text
 
-	id, err := h.bot.SendMessage(ctx, p.ChatID, text, bot.SendOpts{ReplyTo: p.ReplyTo, ParseMode: p.ParseMode})
+	id, err := h.bot.SendMessage(ctx, p.ChatID, text, bot.SendOpts{
+		ReplyTo:         p.ReplyTo,
+		ParseMode:       p.ParseMode,
+		MessageThreadID: p.MessageThreadID,
+	})
 	if err != nil {
 		slog.Error("bot.SendMessage failed", "shim_id", h.shimID(c), "chat_id", p.ChatID, "text_len", len(text), "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
@@ -157,9 +163,10 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params js
 
 func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
 	var p struct {
-		ChatID  string `json:"chat_id"`
-		Path    string `json:"path"`
-		ReplyTo int    `json:"reply_to"`
+		ChatID          string `json:"chat_id"`
+		Path            string `json:"path"`
+		ReplyTo         int    `json:"reply_to"`
+		MessageThreadID int    `json:"message_thread_id"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &ipc.Error{Code: ipc.CodeInvalidParams, Message: err.Error()}
@@ -169,7 +176,11 @@ func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.
 		return nil, rpcErr
 	}
 
-	id, err := h.bot.SendFile(ctx, p.ChatID, p.Path, bot.SendOpts{ReplyTo: p.ReplyTo, Caption: h.captionFor(c)})
+	id, err := h.bot.SendFile(ctx, p.ChatID, p.Path, bot.SendOpts{
+		ReplyTo:         p.ReplyTo,
+		Caption:         h.captionFor(c),
+		MessageThreadID: p.MessageThreadID,
+	})
 	if err != nil {
 		slog.Error("bot.SendFile failed", "shim_id", h.shimID(c), "chat_id", p.ChatID, "path", p.Path, "err", err)
 		return nil, &ipc.Error{Code: ipc.CodeBotError, Message: err.Error()}
@@ -299,9 +310,55 @@ func (h *Handlers) HandleBroadcastPermission(ctx context.Context, c *ipc.Conn, p
 
 	slog.Info("permission registered", "request_id", p.RequestID, "shim_id", shimID, "tool", p.ToolName, "desc_len", len(p.Description), "preview_len", len(p.InputPreview))
 
-	h.bot.BroadcastPermissionRequest(ctx, h.textPrefixFor(c), p.RequestID, p.ToolName)
+	target := h.pickPermissionTarget(shimID)
+	h.bot.SendPermissionPrompt(ctx, target, h.textPrefixFor(c), p.RequestID, p.ToolName)
 
 	return map[string]any{}, nil
+}
+
+// pickPermissionTarget resolves the single chat that should receive a
+// permission prompt for the shim calling HandleBroadcastPermission.
+//
+// Order:
+//  1. Forum-mode (access.State.ForumChatID != 0 + shim has a TopicID) →
+//     route to the shim's forum topic. Keeps the prompt next to the tool
+//     output that triggered it.
+//  2. Fallback DM: first parseable allowlisted chat (single-user project
+//     per CLAUDE.md "Out of scope: multi-user / multi-tenant"; unparseable
+//     entries skipped with a Warn so a typo doesn't black-hole prompts).
+//
+// Returns a zero target (ChatID=0) when neither path applies — bot.SendPermissionPrompt
+// treats that as a no-op + warn rather than panicking.
+func (h *Handlers) pickPermissionTarget(shimID string) bot.PermissionTarget {
+	st := h.store.Load()
+
+	if st.ForumChatID != 0 && shimID != "" {
+		// Snapshot is read-only and the lookup is O(N) over connected shims;
+		// N is single-digit in practice.
+		for _, info := range h.router.Snapshot() {
+			if info.ID != shimID {
+				continue
+			}
+
+			if info.TopicID > 0 {
+				return bot.PermissionTarget{ChatID: st.ForumChatID, ThreadID: info.TopicID}
+			}
+
+			break
+		}
+	}
+
+	for _, raw := range st.AllowFrom {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			slog.Warn("pickPermissionTarget skipping unparseable AllowFrom entry", "raw", raw, "err", err)
+			continue
+		}
+
+		return bot.PermissionTarget{ChatID: id}
+	}
+
+	return bot.PermissionTarget{}
 }
 
 func (h *Handlers) HandlePeers(_ context.Context, c *ipc.Conn, _ json.RawMessage) (any, *ipc.Error) {

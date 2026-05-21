@@ -53,6 +53,10 @@ type SendOpts struct {
 	// Caption is rendered under photo/document uploads when non-empty.
 	// Ignored by SendMessage and EditMessage.
 	Caption string
+	// MessageThreadID, when non-zero, scopes the outbound to a supergroup
+	// forum topic (Telegram's message_thread_id). Telego omits the field
+	// when zero, so DM/plain-supergroup callers leave it unset.
+	MessageThreadID int
 }
 
 // Permission-reply spec from the TS plugin: 5 lowercase letters a-z minus 'l'.
@@ -84,6 +88,7 @@ type Bot struct {
 	router      RouterView
 	bgRunner    BgRunner
 	spawnRunner SpawnRunner
+	topicCloser TopicCloser
 
 	pollHandler *th.BotHandler
 	stopOnce    sync.Once
@@ -184,6 +189,7 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "bg", Description: "/bg <prompt> [--in <dir>] — fire-and-forget Claude run"},
 				{Command: "spawn", Description: "/spawn [--in <dir>] — fork a Claude Code session owned by this daemon"},
 				{Command: "effort", Description: "/effort <low|medium|high|xhigh|max>|show|clear — set per-chat model + thinking budget"},
+				{Command: "topics", Description: "List forum topics with shim attachment + lock state (DM only)"},
 			},
 			Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		}); err != nil {
@@ -242,6 +248,15 @@ func (b *Bot) onCommand(ctx *th.Context, msg telego.Message) error {
 // handleCommand routes /start, /help, /status. DM-only — group commands would
 // leak pairing codes and confirm bot presence in unapproved chats.
 func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
+	cmd := commandName(msg.Text)
+
+	// Forum-topic commands run inside a supergroup topic, not DM. Branch
+	// before the DM gate so the supergroup case isn't filtered out below.
+	if cmd == "topic" {
+		b.handleTopicCommand(ctx, msg)
+		return nil
+	}
+
 	if msg.Chat.Type != "private" || msg.From == nil {
 		return nil
 	}
@@ -257,8 +272,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	if st.DMPolicy == access.PolicyAllowlist && !slices.Contains(st.AllowFrom, senderID) {
 		return nil
 	}
-
-	cmd := commandName(msg.Text)
 
 	slog.Info("inbound command", "cmd", cmd, "user_id", msg.From.ID, "chat_id", msg.Chat.ID, "user", userLabel(msg.From), "dm_policy", st.DMPolicy)
 
@@ -284,7 +297,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/reaction <emoji>|off — set ack emoji on inbound (no args shows current)\n"+
 				"/bg <prompt> [--in <dir>] — fire-and-forget Claude run; /bg list, /bg cancel <id>\n"+
 				"/spawn [--in <dir>] — fork a daemon-owned Claude Code client; /spawn list, /spawn cancel <id>\n"+
-				"/effort <low|medium|high|xhigh|max>|show|clear — per-chat model + thinking budget for new /spawn and /bg"))
+				"/effort <low|medium|high|xhigh|max>|show|clear — per-chat model + thinking budget for new /spawn and /bg\n"+
+				"/topics — list forum topics (DM only); /topic inside a topic for info/close/rename"))
 	case "status":
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
@@ -306,6 +320,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.handleSpawnCommand(ctx, msg, b.spawnRunner)
 	case "effort":
 		b.handleEffortCommand(ctx, msg)
+	case "topics":
+		b.handleTopicsListCommand(ctx, msg)
 	}
 
 	return nil
@@ -407,6 +423,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg telego.Message) error {
 		"user":       userLabel(msg.From),
 		"user_id":    strconv.FormatInt(msg.From.ID, 10),
 		"ts":         time.Unix(msg.Date, 0).UTC().Format(time.RFC3339),
+	}
+
+	if msg.MessageThreadID != 0 {
+		meta["message_thread_id"] = strconv.Itoa(msg.MessageThreadID)
 	}
 
 	maps.Copy(meta, replyToMeta(&msg))
@@ -1075,6 +1095,10 @@ func (b *Bot) SendMessage(ctx context.Context, chatID, text string, opts SendOpt
 		p = p.WithParseMode(opts.ParseMode)
 	}
 
+	if opts.MessageThreadID > 0 {
+		p = p.WithMessageThreadID(opts.MessageThreadID)
+	}
+
 	m, err := b.api.SendMessage(ctx, p)
 	if err != nil {
 		slog.Error("Telegram sendMessage failed", "chat_id", id, "text_len", len(text), "reply_to", opts.ReplyTo, "parse_mode", opts.ParseMode, "err", err)
@@ -1110,6 +1134,10 @@ func (b *Bot) SendFile(ctx context.Context, chatID, path string, opts SendOpts) 
 			p = p.WithCaption(opts.Caption)
 		}
 
+		if opts.MessageThreadID > 0 {
+			p = p.WithMessageThreadID(opts.MessageThreadID)
+		}
+
 		m, err := b.api.SendPhoto(ctx, p)
 		if err != nil {
 			slog.Error("Telegram sendPhoto failed", "chat_id", id, "path", path, "err", err)
@@ -1128,6 +1156,10 @@ func (b *Bot) SendFile(ctx context.Context, chatID, path string, opts SendOpts) 
 
 	if opts.Caption != "" {
 		p = p.WithCaption(opts.Caption)
+	}
+
+	if opts.MessageThreadID > 0 {
+		p = p.WithMessageThreadID(opts.MessageThreadID)
 	}
 
 	m, err := b.api.SendDocument(ctx, p)
@@ -1206,12 +1238,100 @@ func (b *Bot) DownloadFile(ctx context.Context, fileID string) (string, error) {
 	return b.fetchFile(ctx, fileID, fileID)
 }
 
-// BroadcastPermissionRequest fans an inline-keyboard prompt to every
-// allowlisted DM. Called by mcp.Server.SendPermissionRequest. The prefix is
-// prepended verbatim (e.g. "@s1: ") so DM recipients can tell which session
-// asked; pass "" to disable.
-func (b *Bot) BroadcastPermissionRequest(ctx context.Context, prefix, requestID, toolName string) {
-	st := b.store.Load()
+// CreateForumTopic creates a new forum topic in supergroup chatID and returns
+// the new thread_id. Requires can_manage_topics on the bot in that chat. A
+// zero iconColor lets Telegram pick the default; non-zero must be one of the
+// six preset hex colors documented in the Bot API.
+func (b *Bot) CreateForumTopic(ctx context.Context, chatID int64, name string, iconColor int) (int, error) {
+	p := &telego.CreateForumTopicParams{
+		ChatID: tu.ID(chatID),
+		Name:   name,
+	}
+	if iconColor != 0 {
+		p.IconColor = iconColor
+	}
+
+	topic, err := b.api.CreateForumTopic(ctx, p)
+	if err != nil {
+		slog.Error("Telegram createForumTopic failed", "chat_id", chatID, "name", name, "err", err)
+		return 0, fmt.Errorf("create forum topic: %w", err)
+	}
+
+	slog.Info("Telegram createForumTopic ok", "chat_id", chatID, "name", name, "thread_id", topic.MessageThreadID)
+
+	return topic.MessageThreadID, nil
+}
+
+// EditForumTopic renames an existing topic. Icon left unchanged.
+func (b *Bot) EditForumTopic(ctx context.Context, chatID int64, threadID int, name string) error {
+	if err := b.api.EditForumTopic(ctx, &telego.EditForumTopicParams{
+		ChatID:          tu.ID(chatID),
+		MessageThreadID: threadID,
+		Name:            name,
+	}); err != nil {
+		slog.Error("Telegram editForumTopic failed", "chat_id", chatID, "thread_id", threadID, "name", name, "err", err)
+		return fmt.Errorf("edit forum topic: %w", err)
+	}
+
+	slog.Info("Telegram editForumTopic ok", "chat_id", chatID, "thread_id", threadID, "name", name)
+
+	return nil
+}
+
+// CloseForumTopic makes a topic read-only without deleting history.
+func (b *Bot) CloseForumTopic(ctx context.Context, chatID int64, threadID int) error {
+	if err := b.api.CloseForumTopic(ctx, &telego.CloseForumTopicParams{
+		ChatID:          tu.ID(chatID),
+		MessageThreadID: threadID,
+	}); err != nil {
+		slog.Error("Telegram closeForumTopic failed", "chat_id", chatID, "thread_id", threadID, "err", err)
+		return fmt.Errorf("close forum topic: %w", err)
+	}
+
+	slog.Info("Telegram closeForumTopic ok", "chat_id", chatID, "thread_id", threadID)
+
+	return nil
+}
+
+// DeleteForumTopic permanently removes a topic and all its messages.
+func (b *Bot) DeleteForumTopic(ctx context.Context, chatID int64, threadID int) error {
+	if err := b.api.DeleteForumTopic(ctx, &telego.DeleteForumTopicParams{
+		ChatID:          tu.ID(chatID),
+		MessageThreadID: threadID,
+	}); err != nil {
+		slog.Error("Telegram deleteForumTopic failed", "chat_id", chatID, "thread_id", threadID, "err", err)
+		return fmt.Errorf("delete forum topic: %w", err)
+	}
+
+	slog.Info("Telegram deleteForumTopic ok", "chat_id", chatID, "thread_id", threadID)
+
+	return nil
+}
+
+// PermissionTarget identifies the single chat (and optional supergroup forum
+// topic) that should receive a permission prompt. The daemon's permission
+// handler picks this via pickPermissionTarget; ThreadID=0 means a plain DM
+// or non-forum chat. ChatID=0 disables sending (treated as no-op).
+type PermissionTarget struct {
+	ChatID   int64
+	ThreadID int
+}
+
+// SendPermissionPrompt posts a single inline-keyboard permission prompt to
+// target. Called by the daemon after picking the recipient (single-user DM
+// in non-forum mode; topic-scoped supergroup message once forum routing is
+// wired). The prefix is prepended verbatim (e.g. "@s1: ") so the recipient
+// can tell which session asked; pass "" to disable.
+//
+// A zero ChatID is logged and skipped, not an error — callers in degraded
+// states (empty allowlist, no forum target available) can call this
+// unconditionally without guarding.
+func (b *Bot) SendPermissionPrompt(ctx context.Context, target PermissionTarget, prefix, requestID, toolName string) {
+	if target.ChatID == 0 {
+		slog.Warn("SendPermissionPrompt skipped: zero target chat", "request_id", requestID, "tool", toolName)
+		return
+	}
+
 	text := prefix + "🔐 Permission: " + toolName
 	keyboard := tu.InlineKeyboard(
 		tu.InlineKeyboardRow(
@@ -1228,15 +1348,13 @@ func (b *Bot) BroadcastPermissionRequest(ctx context.Context, prefix, requestID,
 		),
 	)
 
-	for _, dm := range st.AllowFrom {
-		id, err := parseChatID(dm)
-		if err != nil {
-			continue
-		}
+	p := tu.Message(tu.ID(target.ChatID), text).WithReplyMarkup(keyboard)
+	if target.ThreadID > 0 {
+		p = p.WithMessageThreadID(target.ThreadID)
+	}
 
-		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(id), text).WithReplyMarkup(keyboard)); err != nil {
-			slog.Error("permission_request send failed", "chat_id", dm, "err", err)
-		}
+	if _, err := b.api.SendMessage(ctx, p); err != nil {
+		slog.Error("permission_request send failed", "chat_id", target.ChatID, "thread_id", target.ThreadID, "err", err)
 	}
 }
 
