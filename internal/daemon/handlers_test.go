@@ -219,9 +219,12 @@ func TestHandleSendFileGatedAndRecorded(t *testing.T) {
 	assert.Equal(t, "shim-a", owner.ID)
 }
 
-func TestHandleEditMessageGated(t *testing.T) {
-	h, fb, _, _ := newHandlersFixture(t)
+func TestHandleEditMessage_ownedSucceeds(t *testing.T) {
+	h, fb, r, _ := newHandlersFixture(t)
 	fb.editedMessage.retID = 9
+
+	// Edit requires prior ownership of the (chat, message_id) pair.
+	r.RecordOutbound("shim-a", "123", 5)
 
 	_, rpcErr := h.HandleEditMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
 		"chat_id": "123", "message_id": 5, "text": "edited",
@@ -229,6 +232,43 @@ func TestHandleEditMessageGated(t *testing.T) {
 	require.Nil(t, rpcErr)
 	assert.Equal(t, 5, fb.editedMessage.messageID)
 	assert.Equal(t, "@s1: edited", fb.editedMessage.text, "edit also gets prefix")
+}
+
+func TestHandleEditMessage_blockedByGate(t *testing.T) {
+	h, fb, r, _ := newHandlersFixture(t)
+	// Even pre-existing ownership must not bypass the chat allowlist gate.
+	r.RecordOutbound("shim-a", "999", 5)
+
+	_, rpcErr := h.HandleEditMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "999", "message_id": 5, "text": "x",
+	}))
+	require.NotNil(t, rpcErr)
+	assert.Equal(t, ipc.CodeNotAllowlisted, rpcErr.Code)
+	assert.Zero(t, fb.editedMessage.messageID, "gate-blocked edit must not reach bot")
+}
+
+func TestHandleEditMessage_deniesCrossShimEdit(t *testing.T) {
+	h, fb, r, _ := newHandlersFixture(t)
+	r.Register(&Shim{ID: "shim-b", Notify: func(string, any) error { return nil }})
+	r.RecordOutbound("shim-b", "123", 5)
+
+	_, rpcErr := h.HandleEditMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "message_id": 5, "text": "tampered",
+	}))
+	require.NotNil(t, rpcErr)
+	assert.Equal(t, ipc.CodeNotAllowlisted, rpcErr.Code)
+	assert.Zero(t, fb.editedMessage.messageID, "denied edit must not reach bot")
+}
+
+func TestHandleEditMessage_deniesUnknownMessage(t *testing.T) {
+	h, fb, _, _ := newHandlersFixture(t)
+
+	_, rpcErr := h.HandleEditMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "message_id": 999, "text": "edited",
+	}))
+	require.NotNil(t, rpcErr)
+	assert.Equal(t, ipc.CodeNotAllowlisted, rpcErr.Code)
+	assert.Zero(t, fb.editedMessage.messageID, "edit of an unknown message_id must not reach bot")
 }
 
 func TestHandleReactGated(t *testing.T) {

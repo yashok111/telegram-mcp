@@ -198,6 +198,21 @@ func (h *Handlers) HandleEditMessage(ctx context.Context, c *ipc.Conn, params js
 		return nil, rpcErr
 	}
 
+	// Ownership check: only the shim that originally sent (chat, message)
+	// may edit it. Any shim can learn message_ids via the routing path
+	// (replies, snapshots), so the gate alone is not enough — without this,
+	// shim A could overwrite shim B's text on the user's screen.
+	callerID := h.shimID(c)
+	if owner, ok := h.router.OwnerOfMessage(p.ChatID, p.MessageID); !ok || owner != callerID {
+		slog.Warn("edit denied: caller is not the message owner",
+			"shim_id", callerID, "chat_id", p.ChatID, "message_id", p.MessageID,
+			"owner", owner, "known", ok)
+
+		data, _ := json.Marshal(map[string]any{"chat_id": p.ChatID, "message_id": p.MessageID})
+
+		return nil, &ipc.Error{Code: ipc.CodeNotAllowlisted, Message: "edit denied: message not owned by caller", Data: data}
+	}
+
 	text := h.textPrefixFor(c) + p.Text
 
 	id, err := h.bot.EditMessage(ctx, p.ChatID, p.MessageID, text, p.ParseMode)
@@ -237,6 +252,11 @@ func (h *Handlers) HandleReact(ctx context.Context, _ *ipc.Conn, params json.Raw
 	return map[string]any{}, nil
 }
 
+// HandleDownloadFile intentionally does not call gate(chatID): the MCP
+// download_attachment tool takes only file_id (no chat_id), and file_ids are
+// cryptographically tied to the bot — they can only be obtained by an
+// inbound notification that already passed the gate at delivery time. If
+// download_attachment ever takes a chat_id, gate it here too.
 func (h *Handlers) HandleDownloadFile(ctx context.Context, _ *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
 	var p struct {
 		FileID string `json:"file_id"`

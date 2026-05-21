@@ -44,7 +44,7 @@ func Match(rules []PermissionRule, tool, path string) *PermissionRule {
 
 	for i := range rules {
 		r := &rules[i]
-		if r.ExpiresAt > 0 && r.ExpiresAt < now {
+		if r.ExpiresAt > 0 && r.ExpiresAt <= now {
 			continue
 		}
 
@@ -148,7 +148,7 @@ func PruneRules(st *State) bool {
 	changed := false
 
 	for _, r := range st.Rules {
-		if r.ExpiresAt > 0 && r.ExpiresAt < now {
+		if r.ExpiresAt > 0 && r.ExpiresAt <= now {
 			changed = true
 			continue
 		}

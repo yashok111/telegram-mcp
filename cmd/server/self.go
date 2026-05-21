@@ -263,7 +263,7 @@ func readProcPPID(pid int) (int, error) {
 			continue
 		}
 
-		return strconv.Atoi(strings.TrimSpace(strings.TrimRight(rest, "\n")))
+		return strconv.Atoi(strings.TrimSpace(rest))
 	}
 
 	return 0, fmt.Errorf("ppid not found for pid %d", pid)

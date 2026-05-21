@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -332,11 +334,21 @@ func resolveIdleTimeout() time.Duration {
 		return defaultDaemonIdleTimeout
 	}
 
-	secs, err := strconv.Atoi(strings.TrimSpace(raw))
+	secs, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
 		slog.Warn("invalid TELEGRAM_DAEMON_IDLE_EXIT, using default", "value", raw, "default", defaultDaemonIdleTimeout)
 
 		return defaultDaemonIdleTimeout
+	}
+
+	// time.Duration is int64 nanoseconds; cap to avoid overflow on huge
+	// values (e.g. user pastes max int64). The cap (~292 years) is well
+	// beyond any reasonable idle window.
+	const maxSecs = int64(math.MaxInt64) / int64(time.Second)
+	if secs > maxSecs {
+		slog.Warn("TELEGRAM_DAEMON_IDLE_EXIT too large, capping", "value", raw, "max_secs", maxSecs)
+
+		secs = maxSecs
 	}
 
 	return time.Duration(secs) * time.Second
@@ -365,13 +377,9 @@ func bootstrapStateDir() (string, error) {
 	return dir, nil
 }
 
-// loadConfig pulls TELEGRAM_BOT_TOKEN from .env first (if real env hasn't set
-// it) and returns the resolved token. Errors if neither source provides one.
+// loadConfig returns the resolved TELEGRAM_BOT_TOKEN. The .env file is read
+// once at startup in main(); we only consult the process environment here.
 func loadConfig(stateDir string) (string, error) {
-	if err := loadDotEnv(filepath.Join(stateDir, ".env")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		slog.Warn(".env load failed", "err", err)
-	}
-
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
 		return "", fmt.Errorf("TELEGRAM_BOT_TOKEN required (set in %s/.env)", stateDir)
@@ -387,7 +395,9 @@ func loadDotEnv(path string) error {
 		return err
 	}
 
-	_ = os.Chmod(path, 0o600)
+	if err := os.Chmod(path, 0o600); err != nil {
+		slog.Warn(".env chmod 0600 failed", "path", path, "err", err)
+	}
 
 	for line := range strings.Lines(string(raw)) {
 		k, v, ok := strings.Cut(strings.TrimRight(line, "\n"), "=")
@@ -510,6 +520,37 @@ func loadSpawnConfig() daemonpkg.SpawnConfig {
 	return cfg
 }
 
+// marketplaceManifestMaxBytes caps how much of a marketplace.json we'll read
+// into memory. Real manifests are a few KB; anything larger is either corrupt
+// or a hostile attempt to OOM the daemon at startup.
+const marketplaceManifestMaxBytes = 1 << 20 // 1 MiB
+
+// readBoundedFile reads at most maxBytes from path. Returns an error if the
+// file is unreadable. If the file exceeds maxBytes, the result is truncated
+// and a warning is logged so an operator debugging a stuck startup can see
+// the manifest was rejected (the caller's JSON parse will then fail).
+func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	// Read maxBytes+1 so we can tell "exactly maxBytes" apart from "exceeds".
+	b, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+
+	if int64(len(b)) > maxBytes {
+		slog.Warn("manifest exceeds size cap, truncating", "path", path, "max_bytes", maxBytes)
+
+		return b[:maxBytes], nil
+	}
+
+	return b, nil
+}
+
 // resolveSpawnPluginSpec scans `~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json`
 // for a marketplace that publishes the `telegram` plugin AND has a corresponding
 // installed-plugin dir at `~/.claude/plugins/data/telegram-<channel>`. Returns
@@ -537,7 +578,7 @@ func resolveSpawnPluginSpec() string {
 	var cands []candidate
 
 	for _, p := range matches {
-		b, err := os.ReadFile(p)
+		b, err := readBoundedFile(p, marketplaceManifestMaxBytes)
 		if err != nil {
 			continue
 		}
@@ -553,6 +594,15 @@ func resolveSpawnPluginSpec() string {
 			continue
 		}
 
+		// Reject manifest names that could break out of the data dir via
+		// path separators or ".." segments. Real channel names are short
+		// identifiers (e.g. "local-yakov", "stable").
+		if strings.ContainsAny(m.Name, `/\`) || strings.Contains(m.Name, "..") {
+			slog.Warn("marketplace name rejected (path-unsafe)", "path", p, "name", m.Name)
+
+			continue
+		}
+
 		if !slices.ContainsFunc(m.Plugins, func(pl struct {
 			Name string `json:"name"`
 		},
@@ -564,8 +614,11 @@ func resolveSpawnPluginSpec() string {
 
 		dataDir := filepath.Join(home, ".claude", "plugins", "data", "telegram-"+m.Name)
 
-		info, err := os.Stat(dataDir)
-		if err != nil {
+		// Lstat (not Stat) so a crafted marketplace.json with m.Name like
+		// "../../etc" can't follow a symlink to probe arbitrary paths under
+		// the daemon's UID. We require the data dir to be a real directory.
+		info, err := os.Lstat(dataDir)
+		if err != nil || !info.IsDir() {
 			continue
 		}
 

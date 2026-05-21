@@ -93,6 +93,22 @@ func TestResolveIdleTimeout_trimsWhitespace(t *testing.T) {
 	assert.Equal(t, 120*time.Second, resolveIdleTimeout())
 }
 
+func TestResolveIdleTimeout_overflowCapped(t *testing.T) {
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "9223372036854775807")
+
+	got := resolveIdleTimeout()
+	assert.Positive(t, int64(got), "overflowed value must not become negative or zero")
+}
+
+func TestResolveIdleTimeout_largeSecondsDontOverflow(t *testing.T) {
+	// Without ParseInt+cap, secs * time.Second wraps to negative on a
+	// 64-bit overflow. With the cap, the result stays positive.
+	t.Setenv("TELEGRAM_DAEMON_IDLE_EXIT", "999999999999")
+
+	got := resolveIdleTimeout()
+	assert.Positive(t, int64(got))
+}
+
 func TestResolveStateDir_envOverride(t *testing.T) {
 	t.Setenv("TELEGRAM_STATE_DIR", "/explicit/path")
 	assert.Equal(t, "/explicit/path", resolveStateDir())
@@ -148,6 +164,9 @@ func TestLoadConfig_tokenFromDotEnv(t *testing.T) {
 
 	t.Cleanup(func() { _ = os.Unsetenv("TELEGRAM_BOT_TOKEN") })
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("TELEGRAM_BOT_TOKEN=fromfile\n"), 0o600))
+	// main() loads .env before dispatching to loadConfig; reproduce that
+	// here so loadConfig finds the token in the process environment.
+	require.NoError(t, loadDotEnv(filepath.Join(dir, ".env")))
 	tok, err := loadConfig(dir)
 	require.NoError(t, err)
 	assert.Equal(t, "fromfile", tok)

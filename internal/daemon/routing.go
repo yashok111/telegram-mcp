@@ -287,6 +287,23 @@ func (r *Router) routeByReplyLocked(chatID string, replyToMsgID int) (*Shim, boo
 	return s, true
 }
 
+// OwnerOfMessage returns the shim_id that originally sent (chatID, msgID), if
+// the (chat, message) pair is still in the per-chat replyRing. Used by
+// HandleEditMessage to prevent one shim editing another shim's messages: any
+// connected shim has visibility into outbound message IDs via the routing
+// path, so we must verify the caller actually authored the message.
+func (r *Router) OwnerOfMessage(chatID string, msgID int) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	ring, ok := r.replyOwners[chatID]
+	if !ok {
+		return "", false
+	}
+
+	return ring.lookup(msgID)
+}
+
 // Snapshot returns a by-value list of connected shims, newest-first by ConnectedAt.
 // Safe to hand to bot code without leaking router-internal state.
 func (r *Router) Snapshot() []ShimInfo {

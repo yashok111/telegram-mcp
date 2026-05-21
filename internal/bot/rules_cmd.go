@@ -102,7 +102,7 @@ func renderRules(rules []access.PermissionRule) string {
 		}
 
 		fmt.Fprintf(&sb, "• %s — %s %s \\[%s\\] — %s\n",
-			MdCode(r.ID), r.Action, r.Tool, path, EscapeMarkdownV2(exp))
+			MdCode(r.ID), r.Action, EscapeMarkdownV2(r.Tool), path, EscapeMarkdownV2(exp))
 	}
 
 	return sb.String()

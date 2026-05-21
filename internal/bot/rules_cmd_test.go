@@ -71,6 +71,18 @@ func TestRenderRules_onlyExpiredRules_emptyMessage(t *testing.T) {
 	assert.Contains(t, out, "No permission rules")
 }
 
+func TestRenderRules_toolNameEscaped(t *testing.T) {
+	// A tool name containing a MarkdownV2 metacharacter (e.g. parens from a
+	// future tool like "Notebook(edit)") must be escaped — unescaped, Telegram
+	// rejects the whole message with parse_mode=MarkdownV2.
+	rules := []access.PermissionRule{
+		{ID: "r1", Tool: "Notebook(edit)", Action: access.RuleApprove},
+	}
+	out := renderRules(rules)
+	assert.Contains(t, out, "Notebook\\(edit\\)")
+	assert.NotContains(t, out, "Notebook(edit)")
+}
+
 func TestRenderRules_multiplerules_listed(t *testing.T) {
 	rules := []access.PermissionRule{
 		{ID: "r1", Tool: "Bash", Action: access.RuleApprove},
