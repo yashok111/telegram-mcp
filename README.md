@@ -28,6 +28,11 @@ Single Go binary. No node/bun runtime. Dies with its parent via
 - **Multi-session routing** — every Claude Code session attaches as a shim
   with its own `@s1`/`@s2`/… alias. Address one or all via
   `@s2 do X` / `@all status`, or reply to a specific message to thread.
+- **Forum-topic mode** — point the bot at a supergroup with topics enabled
+  (`TELEGRAM_FORUM_CHAT_ID`) and the daemon allocates one topic per session
+  keyed by workdir/label, routes inbound from each topic to its owning
+  shim, and auto-injects `message_thread_id` on outbound. Replaces "which
+  alias is talking?" with one tab per project.
 - **Permission approvals** — when Claude Code asks to run a Bash/Edit/Read
   tool, an inline-button card lands in your DM: `✅ Allow`, `❌ Deny`,
   `⏳ Allow 1h`, `♾ Always`, `🚫 Always deny`. Rules are remembered with TTL.
@@ -66,11 +71,14 @@ Single Go binary. No node/bun runtime. Dies with its parent via
   by the first shim that needs it, or run permanently under systemd.
 
 A single Telegram message can be routed by:
-1. **Reply-to** — Telegram's reply UI threads the message to whichever shim
+1. **Forum topic** — when forum mode is on, a message inside a topic owned
+   by a shim routes to that shim exclusively (mentions/reply-to inside the
+   topic are ignored — the topic *is* the address).
+2. **Reply-to** — Telegram's reply UI threads the message to whichever shim
    sent the original.
-2. **Mention** — `@s2`, `@all`, or `@<label>` if the shim was labeled.
-3. **Chat affinity** — last shim that talked in the chat wins (with TTL).
-4. **LRU fallback** — most-recently-connected shim.
+3. **Mention** — `@s2`, `@all`, or `@<label>` if the shim was labeled.
+4. **Chat affinity** — last shim that talked in the chat wins (with TTL).
+5. **LRU fallback** — most-recently-connected shim.
 
 ---
 
@@ -143,6 +151,68 @@ managed pairing flow.
 
 ---
 
+## Forum-topic mode (optional)
+
+Instead of every Claude Code session sharing the bot's single DM, point
+the bot at a **supergroup with topics enabled** and get one topic per
+session — one tab per project, persistent across `/exit`/restart.
+
+### Setup
+
+1. In Telegram: **New Group** → add the bot → group settings → enable
+   **Topics**.
+2. Add the bot as **Administrator** with **Manage Topics** permission.
+3. Get the chat id (any inbound from the group is logged in `daemon.log`
+   as `chat_id=-100…`).
+4. Add the chat id to `~/.claude/channels/telegram/.env`:
+
+   ```bash
+   echo 'TELEGRAM_FORUM_CHAT_ID=-1002…' >> ~/.claude/channels/telegram/.env
+   ```
+
+5. Restart the daemon. Every new `claude-tg` session triggers
+   `createForumTopic` on hello, names it `@s<N> — <workdir-basename>`, and
+   binds the shim.
+
+### Behavior
+
+- **Outbound** — every `reply` / `react` / `edit_message` from a bound
+  shim auto-fills `message_thread_id`. Replies land in the shim's topic.
+- **Inbound inside a topic** — routed to that topic's owning shim
+  exclusively. `@all`, mentions, and reply-to are ignored — the topic
+  itself is the address.
+- **Inbound in General** (`thread_id=0`) — routed by mention / reply /
+  LRU exactly as before. `@all` still broadcasts.
+- **Permission prompts** — for shims with a topic, the prompt card lands
+  in the topic next to the tool output that triggered it (not in DM).
+
+### Persistence and reuse
+
+Topics are **kept** when you `/exit`. The shim's lock drops; the topic
+mapping in `access.json` stays. Next CC session in the same workdir (or
+with the same `--label`) re-attaches to the existing topic, history
+intact. Reuse key priority:
+
+1. `label:<L>` if `/label` was set on the shim.
+2. `workdir:<path>` when workdir ≠ `$HOME` (random shell sessions from
+   `$HOME` get fresh topics, not a shared bucket).
+3. Otherwise a fresh topic.
+
+Topics are only deleted via explicit `/topic close`. The daemon queues
+them; a background sweep calls `deleteForumTopic` after
+`TELEGRAM_TOPIC_PURGE_AFTER` (default 14 days).
+
+### `/topic` commands
+
+| Command              | Where          | Effect                                                    |
+| -------------------- | -------------- | --------------------------------------------------------- |
+| `/topic`             | inside a topic | Show owner alias / label / workdir / connected timestamp. |
+| `/topic close`       | inside a topic | Kill the owning shim, close the topic, queue for purge.   |
+| `/topic rename <n>`  | inside a topic | Rename via `editForumTopic` (128-rune cap, pre-flighted). |
+| `/topics list`       | DM             | Render every known topic + lock state (admin-only).       |
+
+---
+
 ## MCP tools exposed to Claude Code
 
 | Tool                  | Purpose                                                 |
@@ -211,7 +281,7 @@ State directory: `~/.claude/channels/telegram/` (override with
 | File           | Purpose                                              |
 | -------------- | ---------------------------------------------------- |
 | `.env`         | `TELEGRAM_BOT_TOKEN=...` (chmod 0600).               |
-| `access.json`  | Allowlist, pairing state, group policy, UX prefs.   |
+| `access.json`  | Allowlist, pairing state, group policy, UX prefs. With forum mode: `forum_chat_id`, `topics_by_thread`, `topics_by_reuse_key`, `closed_topics`. |
 | `bot.pid`     | Daemon's PID (comm-checked).                         |
 | `daemon.sock`  | IPC socket (0600).                                   |
 | `daemon.pid`   | Daemon's claim PID.                                  |
@@ -228,6 +298,8 @@ Knobs (env vars, all optional):
 | `TELEGRAM_ACCESS_MODE`            | `dynamic`              | `static` freezes `access.json` at boot. |
 | `TELEGRAM_DAEMON_IDLE_EXIT`       | `604800` (7 days)      | Idle exit seconds. `0` or negative disables. |
 | `TELEGRAM_PREFIX_ALIAS`           | `1`                    | Inject `@sN:` source-alias prefix.       |
+| `TELEGRAM_FORUM_CHAT_ID`          | —                      | Supergroup id (`-100…`). Set to enable forum-topic mode. |
+| `TELEGRAM_TOPIC_PURGE_AFTER`      | `336h` (14d)           | Wait before background sweep deletes a `/topic close`d topic. |
 | `TELEGRAM_BG_MAX_PARALLEL`        | `3`                    | Concurrent `/bg` tasks per host.         |
 | `TELEGRAM_BG_TIMEOUT`             | `30m`                  | Hard cap per `/bg` task.                 |
 | `TELEGRAM_BG_DEFAULT_WORKDIR`     | `$HOME`                | Fallback for `/bg --in`.                 |
@@ -354,7 +426,7 @@ internal/shim/    per-CC-session process, IPC client
 ```
 
 **Testing:** `goleak` in every package's `TestMain`. ~84% project LOC
-coverage across 788 tests. No `t.Parallel()` — tests share httptest servers
+coverage across 1056 tests. No `t.Parallel()` — tests share httptest servers
 and env vars. New code without a test gets pushback unless it's wiring in
 `cmd/server`.
 
