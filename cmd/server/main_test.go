@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/yakov/telegram-mcp/internal/access"
 )
 
 func TestLoadDotEnv_setsMissingVars(t *testing.T) {
@@ -107,6 +109,57 @@ func TestResolveIdleTimeout_largeSecondsDontOverflow(t *testing.T) {
 
 	got := resolveIdleTimeout()
 	assert.Positive(t, int64(got))
+}
+
+func TestApplyForumChatID_envUpdatesAccessJSON(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+
+	t.Setenv("TELEGRAM_FORUM_CHAT_ID", "-100123456")
+	require.NoError(t, applyForumChatID(store))
+
+	st := store.Load()
+	assert.EqualValues(t, -100123456, st.ForumChatID)
+}
+
+func TestApplyForumChatID_unsetLeavesPersistedValueUntouched(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.ForumChatID = -100999
+		return true
+	}))
+
+	_ = os.Unsetenv("TELEGRAM_FORUM_CHAT_ID")
+	require.NoError(t, applyForumChatID(store))
+
+	assert.EqualValues(t, -100999, store.Load().ForumChatID, "missing env preserves prior persisted value")
+}
+
+func TestApplyForumChatID_emptyDisables(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.ForumChatID = -100999
+		return true
+	}))
+
+	t.Setenv("TELEGRAM_FORUM_CHAT_ID", "")
+	require.NoError(t, applyForumChatID(store))
+	assert.Zero(t, store.Load().ForumChatID)
+}
+
+func TestApplyForumChatID_unparseableKeepsExistingValue(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.ForumChatID = -100777
+		return true
+	}))
+
+	t.Setenv("TELEGRAM_FORUM_CHAT_ID", "not-a-number")
+	require.NoError(t, applyForumChatID(store))
+	assert.EqualValues(t, -100777, store.Load().ForumChatID)
 }
 
 func TestResolveStateDir_envOverride(t *testing.T) {

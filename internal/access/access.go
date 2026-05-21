@@ -53,6 +53,28 @@ type GroupPolicy struct {
 	AllowFrom      []string `json:"allowFrom"`
 }
 
+// TopicMeta carries per-topic metadata: which shim (if any) currently has
+// it locked, plus the reuse-key components for /topics list rendering.
+// ThreadID is duplicated as the map key so callers iterating the map have
+// the full struct without an extra lookup.
+type TopicMeta struct {
+	ThreadID   int    `json:"thread_id"`
+	Workdir    string `json:"workdir,omitempty"`
+	Label      string `json:"label,omitempty"`
+	LastShimID string `json:"last_shim_id,omitempty"`
+	// LockedBy is the currently-attached shim_id; "" means the topic is
+	// available for reuse on the next hello with a matching reuse_key.
+	LockedBy string `json:"locked_by,omitempty"`
+}
+
+// ClosedTopic tracks topics scheduled for deletion. Background sweep removes
+// the underlying Telegram topic + map entries when ClosedAt + purge TTL has
+// elapsed.
+type ClosedTopic struct {
+	ThreadID int   `json:"thread_id"`
+	ClosedAt int64 `json:"closed_at"`
+}
+
 type State struct {
 	DMPolicy        DMPolicy               `json:"dmPolicy"`
 	AllowFrom       []string               `json:"allowFrom"`
@@ -65,6 +87,20 @@ type State struct {
 	ChunkMode       ChunkMode              `json:"chunkMode,omitempty"`
 	Rules           []PermissionRule       `json:"rules,omitempty"`
 	EffortByChat    map[string]string      `json:"effortByChat,omitempty"`
+	// ForumChatID, when non-zero, enables forum-topics routing: every shim
+	// gets a dedicated topic in this supergroup. Zero = feature off.
+	ForumChatID int64 `json:"forum_chat_id,omitempty"`
+	// TopicsByReuseKey maps a composite key (`label:<x>`, `workdir:<path>`)
+	// to the thread_id allocated for that key. Multiple keys may point at
+	// the same thread (label + workdir for the same shim).
+	TopicsByReuseKey map[string]int `json:"topics_by_reuse_key,omitempty"`
+	// TopicsByThread holds per-topic metadata indexed by thread_id. The map
+	// key is the stringified thread_id (JSON object keys must be strings);
+	// internal accessors convert via strconv.
+	TopicsByThread map[string]TopicMeta `json:"topics_by_thread,omitempty"`
+	// ClosedTopics queues topics for delayed deletion by the daemon's
+	// sweep; entry order is closure order.
+	ClosedTopics []ClosedTopic `json:"closed_topics,omitempty"`
 }
 
 // DefaultAckReaction is the emoji set on inbound messages when a fresh
@@ -174,6 +210,18 @@ func cloneState(src *State) State {
 
 	if src.EffortByChat != nil {
 		out.EffortByChat = maps.Clone(src.EffortByChat)
+	}
+
+	if src.TopicsByReuseKey != nil {
+		out.TopicsByReuseKey = maps.Clone(src.TopicsByReuseKey)
+	}
+
+	if src.TopicsByThread != nil {
+		out.TopicsByThread = maps.Clone(src.TopicsByThread)
+	}
+
+	if src.ClosedTopics != nil {
+		out.ClosedTopics = slices.Clone(src.ClosedTopics)
 	}
 
 	if src.Groups != nil {
