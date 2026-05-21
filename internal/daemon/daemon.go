@@ -25,10 +25,12 @@ type Daemon struct {
 	SocketPath string
 	PidPath    string
 
-	Store  *access.Store
-	Bot    botSurface
-	Router *Router
-	Typing *TypingTracker // nil disables typing-refresh goroutine
+	Store      *access.Store
+	Bot        botSurface
+	Router     *Router
+	Typing     *TypingTracker // nil disables typing-refresh goroutine
+	Forum      *Forum         // nil disables forum-topic allocation; required only when ForumChatID is configured
+	TopicSweep *TopicSweep    // nil disables periodic closed-topic deletion
 
 	IdleTimeout time.Duration // 0 disables
 	InboxTTL    time.Duration // 0 disables inbox sweep
@@ -70,6 +72,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return
 		}
 
+		if d.Forum != nil {
+			d.Forum.ReleaseLock(id)
+		}
+
 		d.Router.Drop(id)
 		slog.Info("shim disconnected", "shim_id", id)
 	})
@@ -103,8 +109,27 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.Router.Register(shim)
 		m["alias"] = shim.Alias
 
+		// Forum topic allocation runs after Register so resolveReuseKey
+		// sees the freshly-allocated alias on the Shim (topic name uses
+		// it). Failure falls through to DM-mode rather than aborting the
+		// hello — the shim still works, just without topic routing.
+		if d.Forum != nil && d.Forum.Enabled() {
+			tid, err := d.Forum.AllocateOrReuse(hctx, shim)
+			if err != nil {
+				slog.Warn("forum topic allocation failed — falling back to DM-mode",
+					"shim_id", id, "err", err)
+			} else if tid > 0 {
+				// BindTopic updates the Shim and Router.topicOwners under
+				// the same lock so the next inbound's topic-arm sees the
+				// owner immediately.
+				d.Router.BindTopic(id, tid)
+				m["topic_id"] = tid
+			}
+		}
+
 		slog.Info("shim connected", "shim_id", id, "alias", shim.Alias,
-			"label", labelStr, "workdir", wdStr, "cc_session_id", ccStr, "spawn_id", spawnStr)
+			"label", labelStr, "workdir", wdStr, "cc_session_id", ccStr, "spawn_id", spawnStr,
+			"topic_id", shim.TopicID)
 
 		return m, nil
 	})
@@ -130,6 +155,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	idleWG.Go(func() {
 		cleanup.Run(d.dctx)
 	})
+
+	if d.TopicSweep != nil {
+		idleWG.Go(func() {
+			d.TopicSweep.Run(d.dctx)
+		})
+	}
 
 	if ic := NewInboxCleanup(d.Store, d.InboxTTL, time.Hour); ic != nil {
 		idleWG.Go(func() {

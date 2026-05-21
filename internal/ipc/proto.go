@@ -53,6 +53,10 @@ const (
 	NotifyInbound                       = "notifications/inbound"
 	NotifyPermissionResolved            = "notifications/permission/resolved"
 	NotifyLabelChanged                  = "notifications/label/changed"
+	// NotifyShutdown asks the shim to exit gracefully — daemon fires it
+	// when /topic close kills a non-spawned shim. Shim cancels its run
+	// context, drains the notifier worker, and exits with status 0.
+	NotifyShutdown = "notifications/shutdown"
 )
 
 // Custom error codes (JSON-RPC reserves -32000..-32099 for application errors).
