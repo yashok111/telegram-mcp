@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -457,6 +458,107 @@ func TestLookupPermission_roundTrip(t *testing.T) {
 
 	_, ok = srv.LookupPermission("missing")
 	assert.False(t, ok)
+}
+
+func TestHandlePermissionRequest_broadcastCtxCancelAborts(t *testing.T) {
+	srv, _, _ := newServerWithAllowlist(t, "123")
+
+	// Replace the fake bot with one that blocks until its ctx is cancelled,
+	// simulating a daemon that never replies.
+	bb := &blockingBot{cancelled: make(chan struct{})}
+	srv.AttachBot(bb)
+
+	srv.handlePermissionRequest(t.Context(), "blk", "Bash", "", `{}`)
+
+	// Now cancel the server's broadcast context; the goroutine must exit
+	// rather than wait out the full broadcastTimeout.
+	srv.broadcastCtxCancel()
+
+	done := make(chan struct{})
+	go func() {
+		srv.broadcastWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcast goroutine did not exit within 2s after ctx cancel")
+	}
+
+	select {
+	case <-bb.cancelled:
+	default:
+		t.Fatal("blockingBot did not observe ctx cancellation")
+	}
+}
+
+type blockingBot struct {
+	cancelled chan struct{}
+}
+
+func (b *blockingBot) SendMessage(_ context.Context, _, _ string, _ bot.SendOpts) (int, error) {
+	return 0, nil
+}
+func (b *blockingBot) SendFile(_ context.Context, _, _ string, _ bot.SendOpts) (int, error) {
+	return 0, nil
+}
+func (b *blockingBot) EditMessage(_ context.Context, _ string, _ int, _, _ string) (int, error) {
+	return 0, nil
+}
+func (b *blockingBot) React(_ context.Context, _ string, _ int, _ string) error  { return nil }
+func (b *blockingBot) DownloadFile(_ context.Context, _ string) (string, error)  { return "", nil }
+func (b *blockingBot) BroadcastPermissionRequest(ctx context.Context, _, _ string) {
+	<-ctx.Done()
+	close(b.cancelled)
+}
+
+func TestHandlePermissionRequest_dropsAboveCap(t *testing.T) {
+	srv, _, _ := newServerWithAllowlist(t, "123")
+
+	srv.permMu.Lock()
+	for i := range maxPending {
+		srv.pending[fmt.Sprintf("seed-%d", i)] = pendingEntry{createdAt: time.Now()}
+	}
+	srv.permMu.Unlock()
+
+	// New request_id past the cap is dropped.
+	srv.handlePermissionRequest(t.Context(), "overflow", "Bash", "desc", `{"command":"ls"}`)
+
+	srv.permMu.Lock()
+	_, exists := srv.pending["overflow"]
+	srv.permMu.Unlock()
+	assert.False(t, exists, "request beyond cap must be dropped")
+
+	// Existing entries are still updatable in-place.
+	srv.handlePermissionRequest(t.Context(), "seed-0", "BashUpdated", "desc", `{}`)
+
+	srv.permMu.Lock()
+	e, ok := srv.pending["seed-0"]
+	srv.permMu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, "BashUpdated", e.details.ToolName)
+}
+
+func TestHandlePermissionRequest_preservesCreatedAtOnUpdate(t *testing.T) {
+	srv, _, _ := newServerWithAllowlist(t, "123")
+
+	original := time.Now().Add(-30 * time.Minute)
+	srv.permMu.Lock()
+	srv.pending["abc"] = pendingEntry{
+		details:   bot.PermissionDetails{ToolName: "Bash"},
+		createdAt: original,
+	}
+	srv.permMu.Unlock()
+
+	srv.handlePermissionRequest(t.Context(), "abc", "BashV2", "new-desc", `{}`)
+
+	srv.permMu.Lock()
+	got := srv.pending["abc"]
+	srv.permMu.Unlock()
+	assert.Equal(t, original.UnixNano(), got.createdAt.UnixNano(),
+		"createdAt must not reset on update — otherwise hammering same id prevents eviction")
+	assert.Equal(t, "BashV2", got.details.ToolName)
 }
 
 func TestResolvePermission_clearsPending(t *testing.T) {

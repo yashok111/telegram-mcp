@@ -626,6 +626,8 @@ func (b *Bot) fetchFile(ctx context.Context, fileID, uniqueHint string) (string,
 	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusOK {
+		// Drain so the underlying connection can be reused from the pool.
+		_, _ = io.Copy(io.Discard, res.Body)
 		return "", fmt.Errorf("download failed: HTTP %d", res.StatusCode)
 	}
 
@@ -1011,6 +1013,22 @@ func (b *Bot) approvalLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			b.checkApprovals(ctx)
+			b.purgeExpiredPendingLabels()
+		}
+	}
+}
+
+// purgeExpiredPendingLabels drops timed-out label-picker stashes. Without
+// this, chats that opened a label picker and walked away leave entries in
+// pendingLabel until the next /label invocation cleans them out.
+func (b *Bot) purgeExpiredPendingLabels() {
+	b.pendingLabelMu.Lock()
+	defer b.pendingLabelMu.Unlock()
+
+	now := time.Now()
+	for cid, pl := range b.pendingLabel {
+		if now.After(pl.expiresAt) {
+			delete(b.pendingLabel, cid)
 		}
 	}
 }

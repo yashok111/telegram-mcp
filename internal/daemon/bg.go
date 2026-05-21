@@ -184,6 +184,11 @@ func (r *BgRunner) reserveSlot(userID string) (string, error) {
 
 	r.perUser[userID] = append(keep, now)
 
+	// Opportunistic GC: drop other users whose stamps have all aged out. Without
+	// this, the map keys themselves leak forever even though the stamp slices
+	// stay bounded. Bounded by current map size, runs once per reserveSlot.
+	gcPerUserLocked(r.perUser, userID, cutoff)
+
 	buf := make([]byte, 3)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("read random: %w", err)
@@ -350,6 +355,9 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 	stderrDone := make(chan struct{})
 
 	go func() {
+		// proc.Wait() closes the parent's read end of the pipe per exec.Cmd
+		// docs ("most callers need not close it themselves"); the goroutine
+		// just drains until EOF/error and exits.
 		defer close(stderrDone)
 
 		buf := make([]byte, 4096)

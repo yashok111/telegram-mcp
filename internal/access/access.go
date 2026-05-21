@@ -331,6 +331,12 @@ func (s *Store) ApprovedDir() string {
 	return filepath.Join(s.dir, "approved")
 }
 
+// Dir returns the channel state directory (where access.json and its
+// siblings — daemon.log, daemon.pid, daemon.sock, sessions/, inbox/ — live).
+func (s *Store) Dir() string {
+	return s.dir
+}
+
 // InboxDir holds downloaded attachments and photos.
 func (s *Store) InboxDir() string {
 	return filepath.Join(s.dir, "inbox")

@@ -105,12 +105,17 @@ func main() {
 }
 
 func runDaemon(stateDir string) error {
+	var logger *daemonpkg.Logger
+
 	if daemonpkg.ShouldRedirect() {
-		restore, err := daemonpkg.RedirectStderrTo(filepath.Join(stateDir, "daemon.log"))
+		maxBytes := resolveLogMaxBytes()
+
+		l, err := daemonpkg.OpenLog(filepath.Join(stateDir, "daemon.log"), maxBytes)
 		if err != nil {
 			slog.Warn("stderr redirect failed", "err", err)
 		} else {
-			defer restore()
+			logger = l
+			defer logger.Close()
 
 			setupSlog()
 		}
@@ -172,15 +177,9 @@ func runDaemon(stateDir string) error {
 
 	idleTimeout := resolveIdleTimeout()
 
-	inboxTTL := 7 * 24 * time.Hour
-
-	if v := os.Getenv("TELEGRAM_INBOX_TTL"); v != "" {
-		if parsed, err := time.ParseDuration(v); err == nil {
-			inboxTTL = parsed
-		} else {
-			slog.Warn("invalid TELEGRAM_INBOX_TTL, using default", "value", v, "default", inboxTTL)
-		}
-	}
+	inboxTTL := resolveDurationEnv("TELEGRAM_INBOX_TTL", 7*24*time.Hour)
+	corruptTTL := resolveDurationEnv("TELEGRAM_CORRUPT_TTL", 7*24*time.Hour)
+	sessionsTTL := resolveDurationEnv("TELEGRAM_SESSIONS_TTL", time.Hour)
 
 	d := &daemonpkg.Daemon{
 		StateDir:    stateDir,
@@ -192,6 +191,8 @@ func runDaemon(stateDir string) error {
 		Typing:      typing,
 		IdleTimeout: idleTimeout,
 		InboxTTL:    inboxTTL,
+		CorruptTTL:  corruptTTL,
+		SessionsTTL: sessionsTTL,
 	}
 
 	sigs := make(chan os.Signal, 1)
@@ -226,6 +227,14 @@ func runDaemon(stateDir string) error {
 			slog.Error("daemon exited", "err", err)
 		}
 	}()
+
+	if logger != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Run(ctx, daemonpkg.DefaultLogRotateCheck)
+		}()
+	}
 
 	shutDone := make(chan struct{})
 
@@ -352,6 +361,48 @@ func resolveIdleTimeout() time.Duration {
 	}
 
 	return time.Duration(secs) * time.Second
+}
+
+// resolveDurationEnv parses a duration from env (e.g. "24h"). Unset, empty,
+// or unparseable falls back to def. Negative parses through unchanged so
+// callers can disable a sweep with a negative value if they need to.
+func resolveDurationEnv(name string, def time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		slog.Warn("invalid duration env, using default", "name", name, "value", v, "default", def)
+		return def
+	}
+
+	return d
+}
+
+// resolveLogMaxBytes parses TELEGRAM_LOG_MAX_BYTES into a rotation threshold.
+// `=0` (or any non-positive) disables rotation. Unset or unparseable falls back
+// to daemonpkg.DefaultLogMaxBytes. Negative-but-parseable values disable too
+// (mirrors the daemon-idle-exit convention).
+func resolveLogMaxBytes() int64 {
+	raw, ok := os.LookupEnv("TELEGRAM_LOG_MAX_BYTES")
+	if !ok {
+		return daemonpkg.DefaultLogMaxBytes
+	}
+
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		slog.Warn("invalid TELEGRAM_LOG_MAX_BYTES, using default", "value", raw, "default", daemonpkg.DefaultLogMaxBytes)
+
+		return daemonpkg.DefaultLogMaxBytes
+	}
+
+	if n <= 0 {
+		return 0
+	}
+
+	return n
 }
 
 // resolveStateDir returns the channel state directory: TELEGRAM_STATE_DIR if

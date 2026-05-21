@@ -38,16 +38,16 @@ func Split(text string, limit int, mode Mode) []string {
 	for len(rest) > limit {
 		cut := limit
 		if mode == Newline {
-			para := strings.LastIndex(rest[:limit], "\n\n")
-			line := strings.LastIndex(rest[:limit], "\n")
+			window := rest[:limit]
 
-			space := strings.LastIndex(rest[:limit], " ")
-			switch {
-			case para > limit/2:
+			// Try boundaries in descending preference. Short-circuit so we
+			// don't scan the same prefix three times when the first hit
+			// already qualifies.
+			if para := strings.LastIndex(window, "\n\n"); para > limit/2 {
 				cut = para
-			case line > limit/2:
+			} else if line := strings.LastIndex(window, "\n"); line > limit/2 {
 				cut = line
-			case space > 0:
+			} else if space := strings.LastIndex(window, " "); space > 0 {
 				cut = space
 			}
 		}

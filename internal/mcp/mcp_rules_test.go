@@ -48,6 +48,7 @@ func TestPermissionRequest_noRuleMatch_broadcasts(t *testing.T) {
 	require.NoError(t, store.Save(st))
 
 	srv.handlePermissionRequest(t.Context(), "req003", "Bash", "shell", `{"command":"ls"}`)
+	srv.broadcastWG.Wait()
 
 	assert.Equal(t, []string{"req003"}, fb.broadcastIDs, "broadcast must fire when no rule matches")
 
@@ -67,6 +68,7 @@ func TestPermissionRequest_expiredRule_broadcasts(t *testing.T) {
 	require.NoError(t, store.Save(st))
 
 	srv.handlePermissionRequest(t.Context(), "req004", "Read", "read", `{"file_path":"/tmp/x"}`)
+	srv.broadcastWG.Wait()
 
 	assert.Equal(t, []string{"req004"}, fb.broadcastIDs, "expired rules should not short-circuit broadcast")
 }
