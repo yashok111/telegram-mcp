@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"sync"
@@ -182,6 +183,27 @@ func TestSpawnRunner_ReserveSlotRateLimitsPerUser(t *testing.T) {
 	require.ErrorIs(t, err, ErrSpawnRateLimited)
 	_, err = r.reserveSlot("u2")
 	require.NoError(t, err)
+}
+
+func TestSpawnRunner_PerUserMapDropsStaleKeys(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{MaxParallel: 99, RatePerHourPerUser: 99})
+
+	stale := time.Now().Add(-2 * time.Hour)
+	r.mu.Lock()
+	for i := range 5 {
+		r.perUser[fmt.Sprintf("u_stale_%d", i)] = []time.Time{stale}
+	}
+	r.mu.Unlock()
+
+	_, err := r.reserveSlot("u_fresh")
+	require.NoError(t, err)
+
+	r.mu.Lock()
+	for i := range 5 {
+		_, present := r.perUser[fmt.Sprintf("u_stale_%d", i)]
+		assert.False(t, present, "stale user %d should have been GC'd", i)
+	}
+	r.mu.Unlock()
 }
 
 func TestSpawnRunner_SpawnPassesWorkdirArgsAndEnvWithSpawnID(t *testing.T) {

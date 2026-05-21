@@ -47,6 +47,12 @@ const (
 	// stale entries.
 	pendingSweepInterval = 10 * time.Minute
 
+	// maxPending caps in-flight permission_request entries. A malfunctioning
+	// or hostile MCP client could otherwise flood the map between sweeps and
+	// exhaust memory. New requests above the cap are dropped with a warn —
+	// CC retries on next prompt cycle.
+	maxPending = 10_000
+
 	// sourcePrefixReserve is the byte budget held back from every chunk so the
 	// daemon can prepend a `@sN: ` source-alias marker without overflowing
 	// Telegram's 4096-byte cap. Worst-case alias is `s999` plus `@`, `:`, space
@@ -77,6 +83,19 @@ type Server struct {
 	permMu  sync.Mutex
 	pending map[string]pendingEntry
 
+	// broadcastWG tracks fire-and-forget broadcast goroutines spawned from
+	// handlePermissionRequest so ServeStdio can drain them on shutdown
+	// (goleak-clean). The broadcast itself is async so a slow daemon IPC
+	// cannot stall the MCP notification dispatcher.
+	broadcastWG sync.WaitGroup
+
+	// broadcastCtx is the parent context inherited by every async broadcast
+	// goroutine. Cancelled when ServeStdio exits so in-flight broadcasts
+	// abort instead of running out their full timeout.
+	//nolint:containedctx // server-scoped cancellation for fire-and-forget broadcasts.
+	broadcastCtx       context.Context
+	broadcastCtxCancel context.CancelFunc
+
 	// Init state observed via MCP hooks for diagnostics.
 	sessionsRegistered atomic.Int32
 	sessionsInited     atomic.Int32
@@ -84,6 +103,11 @@ type Server struct {
 	inboxOnce sync.Once
 	inboxErr  error
 }
+
+// broadcastTimeout caps how long an async broadcast goroutine may sit in
+// the daemon IPC call before giving up. The pending entry stays so a later
+// resolution still works; only the operator notification dropped.
+const broadcastTimeout = 30 * time.Second
 
 // ensureInboxDir creates the inbox directory exactly once per process.
 // handleDownload was calling os.MkdirAll on every tool invocation — cheap but
@@ -97,9 +121,12 @@ func (s *Server) ensureInboxDir() error {
 }
 
 func New(store *access.Store) (*Server, error) {
+	bctx, bcancel := context.WithCancel(context.Background())
 	s := &Server{
-		store:   store,
-		pending: map[string]pendingEntry{},
+		store:              store,
+		pending:            map[string]pendingEntry{},
+		broadcastCtx:       bctx,
+		broadcastCtxCancel: bcancel,
 	}
 
 	hooks := &mcpserver.Hooks{}
@@ -170,7 +197,14 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 		s.pendingCleanup(ctx, pendingSweepInterval)
 	}()
 
-	defer func() { <-sweepDone }()
+	defer func() {
+		<-sweepDone
+		// Cancel broadcastCtx so in-flight async broadcasts (spawned in
+		// handlePermissionRequest) abort their IPC call instead of waiting
+		// out the full timeout. Wait drains them so goleak stays clean.
+		s.broadcastCtxCancel()
+		s.broadcastWG.Wait()
+	}()
 
 	return stdio.Listen(ctx, os.Stdin, os.Stdout)
 }
@@ -304,13 +338,30 @@ func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolNam
 	}
 
 	s.permMu.Lock()
+	existing, exists := s.pending[requestID]
+
+	if !exists && len(s.pending) >= maxPending {
+		s.permMu.Unlock()
+		slog.Warn("permission_request dropped: pending registry at cap",
+			"request_id", requestID, "tool", toolName, "cap", maxPending)
+
+		return
+	}
+
+	// Preserve createdAt on update so a hostile or buggy client can't reset
+	// the eviction clock by hammering the same request_id repeatedly.
+	createdAt := time.Now()
+	if exists {
+		createdAt = existing.createdAt
+	}
+
 	s.pending[requestID] = pendingEntry{
 		details: bot.PermissionDetails{
 			ToolName:     toolName,
 			Description:  description,
 			InputPreview: inputPreview,
 		},
-		createdAt: time.Now(),
+		createdAt: createdAt,
 	}
 	s.permMu.Unlock()
 
@@ -332,7 +383,16 @@ func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolNam
 	}
 
 	if b := s.Bot(); b != nil {
-		b.BroadcastPermissionRequest(ctx, requestID, toolName)
+		s.broadcastWG.Add(1)
+
+		go func() {
+			defer s.broadcastWG.Done()
+
+			bctx, cancel := context.WithTimeout(s.broadcastCtx, broadcastTimeout)
+			defer cancel()
+
+			b.BroadcastPermissionRequest(bctx, requestID, toolName)
+		}()
 	} else {
 		slog.Warn("permission_request not broadcast: bot not attached", "request_id", requestID)
 	}

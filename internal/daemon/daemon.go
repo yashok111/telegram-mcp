@@ -32,6 +32,8 @@ type Daemon struct {
 
 	IdleTimeout time.Duration // 0 disables
 	InboxTTL    time.Duration // 0 disables inbox sweep
+	CorruptTTL  time.Duration // 0 disables access.json.corrupt-* sweep
+	SessionsTTL time.Duration // 0 disables sessions/<cc_pid>.json orphan sweep
 
 	//nolint:containedctx // dctx is an internal cancel signal scoped to Run(); IdleExit needs it.
 	dctx    context.Context
@@ -132,6 +134,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if ic := NewInboxCleanup(d.Store, d.InboxTTL, time.Hour); ic != nil {
 		idleWG.Go(func() {
 			ic.Run(d.dctx)
+		})
+	}
+
+	if cs := NewCorruptSweep(d.Store, d.CorruptTTL, time.Hour); cs != nil {
+		idleWG.Go(func() {
+			cs.Run(d.dctx)
+		})
+	}
+
+	if ss := NewSessionsSweep(d.Store, d.SessionsTTL, time.Hour); ss != nil {
+		idleWG.Go(func() {
+			ss.Run(d.dctx)
 		})
 	}
 

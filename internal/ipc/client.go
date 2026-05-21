@@ -37,6 +37,12 @@ type Client struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+
+	// ctx is cancelled by Close so notify handlers can observe disconnect
+	// instead of running detached on context.Background().
+	//nolint:containedctx // intentionally owned by the connection lifetime.
+	ctx       context.Context
+	ctxCancel context.CancelFunc
 }
 
 func Dial(socketPath string) (*Client, error) {
@@ -45,13 +51,17 @@ func Dial(socketPath string) (*Client, error) {
 		return nil, fmt.Errorf("dial %s: %w", socketPath, err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	c := &Client{
-		conn:     conn,
-		fr:       NewFrameReader(conn),
-		fw:       NewFrameWriter(conn),
-		pending:  map[uint64]chan *Response{},
-		handlers: map[string]NotifyHandler{},
-		closed:   make(chan struct{}),
+		conn:      conn,
+		fr:        NewFrameReader(conn),
+		fw:        NewFrameWriter(conn),
+		pending:   map[uint64]chan *Response{},
+		handlers:  map[string]NotifyHandler{},
+		closed:    make(chan struct{}),
+		ctx:       ctx,
+		ctxCancel: cancel,
 	}
 
 	go c.readLoop()
@@ -65,6 +75,10 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		_ = c.conn.Close()
 		close(c.closed)
+
+		if c.ctxCancel != nil {
+			c.ctxCancel()
+		}
 
 		c.mu.Lock()
 		for id, ch := range c.pending {
@@ -209,7 +223,12 @@ func (c *Client) dispatch(frame []byte) {
 			return
 		}
 
-		h(context.Background(), probe.Params)
+		ctx := c.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		h(ctx, probe.Params)
 	}
 }
 

@@ -6,6 +6,7 @@ package shim
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -160,10 +161,16 @@ func (a *BotAdapter) BroadcastPermissionRequest(ctx context.Context, requestID, 
 	}
 
 	c := a.Client()
-	_ = c.Call(ctx, ipc.MethodBotBroadcastPermissionRequest, map[string]any{
+	if err := c.Call(ctx, ipc.MethodBotBroadcastPermissionRequest, map[string]any{
 		"request_id": requestID, "tool_name": toolName,
 		"description": desc, "input_preview": preview,
-	}, nil)
+	}, nil); err != nil {
+		// Surface the failure so operators can correlate hung permission prompts
+		// (no reply arrives) with the original IPC error. The MCP request stays
+		// in the pending map until the TTL sweep.
+		slog.Warn("broadcast permission request failed",
+			"request_id", requestID, "tool", toolName, "err", err)
+	}
 }
 
 func mapErr(err error) error {

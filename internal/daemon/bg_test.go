@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"slices"
@@ -57,6 +58,33 @@ func TestBgRunner_ReleaseSlotFreesParallelSlot(t *testing.T) {
 	r.releaseSlot(id, BgStatusDone)
 	_, err = r.reserveSlot("u1")
 	require.NoError(t, err)
+}
+
+func TestBgRunner_PerUserMapDropsStaleKeys(t *testing.T) {
+	r := NewBgRunner(BgConfig{MaxParallel: 99, RatePerHourPerUser: 99})
+
+	// Seed 5 users with stale timestamps (>1h ago).
+	stale := time.Now().Add(-2 * time.Hour)
+	r.mu.Lock()
+	for i := range 5 {
+		uid := fmt.Sprintf("u_stale_%d", i)
+		r.perUser[uid] = []time.Time{stale}
+	}
+	r.mu.Unlock()
+
+	// One fresh user's reserveSlot triggers gc.
+	_, err := r.reserveSlot("u_fresh")
+	require.NoError(t, err)
+
+	r.mu.Lock()
+	for i := range 5 {
+		uid := fmt.Sprintf("u_stale_%d", i)
+		_, present := r.perUser[uid]
+		assert.False(t, present, "%s should have been GC'd", uid)
+	}
+	_, presentFresh := r.perUser["u_fresh"]
+	assert.True(t, presentFresh)
+	r.mu.Unlock()
 }
 
 func TestBgRunner_TaskIDsAreUnique(t *testing.T) {

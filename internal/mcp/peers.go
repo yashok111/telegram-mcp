@@ -54,15 +54,15 @@ func (s *Server) handleTelegramPeers(ctx context.Context, _ mcptypes.CallToolReq
 		return mcptypes.NewToolResultError(fmt.Sprintf("peers fetch failed: %v", err)), nil
 	}
 
-	out := make([]map[string]any, len(peers))
+	out := make([]peerWire, len(peers))
 	for i, pr := range peers {
-		out[i] = map[string]any{
-			"alias":          pr.Alias,
-			"shim_id_prefix": pr.ShimIDPrefix,
-			"workdir":        pr.Workdir,
-			"label":          pr.Label,
-			"idle_for":       humanizeDuration(pr.IdleSeconds),
-			"self":           pr.Self,
+		out[i] = peerWire{
+			Alias:        pr.Alias,
+			ShimIDPrefix: pr.ShimIDPrefix,
+			Workdir:      pr.Workdir,
+			Label:        pr.Label,
+			IdleFor:      humanizeDuration(pr.IdleSeconds),
+			Self:         pr.Self,
 		}
 	}
 
@@ -74,6 +74,18 @@ func (s *Server) handleTelegramPeers(ctx context.Context, _ mcptypes.CallToolReq
 	slog.Info("tool telegram_peers ok", "peer_count", len(peers))
 
 	return mcptypes.NewToolResultText(string(body)), nil
+}
+
+// peerWire is the JSON shape returned by the telegram_peers tool. Defining it
+// as a typed struct avoids the per-peer map[string]any allocation that an
+// agent calling the tool in a loop would compound.
+type peerWire struct {
+	Alias        string `json:"alias"`
+	ShimIDPrefix string `json:"shim_id_prefix"`
+	Workdir      string `json:"workdir"`
+	Label        string `json:"label"`
+	IdleFor      string `json:"idle_for"`
+	Self         bool   `json:"self"`
 }
 
 // humanizeDuration formats whole-second counts as "1h2m" / "5m" / "30s".

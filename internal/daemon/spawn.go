@@ -397,6 +397,10 @@ func (r *SpawnRunner) reserveSlot(userID string) (string, error) {
 
 	r.perUser[userID] = append(keep, now)
 
+	// Opportunistic GC: drop other users whose stamps have all aged out. See
+	// peruser_gc.go for rationale.
+	gcPerUserLocked(r.perUser, userID, cutoff)
+
 	// 4 bytes → 32-bit space. 3 was the original budget but two spawns landing
 	// on the same id within one daemon lifetime is a real risk at 24 bits
 	// (~16k spawns has 50% birthday collision).
@@ -545,6 +549,8 @@ func (r *SpawnRunner) runSpawn(ctx context.Context, cancel context.CancelFunc, i
 
 		select {
 		case <-waitDone:
+			// Process exited within the SIGTERM grace window.
+			_ = proc.Close()
 		case <-time.After(5 * time.Second):
 			_ = proc.Signal(syscall.SIGKILL)
 			// Close the pty so the drain goroutine in pty.Start sees EOF and
@@ -558,8 +564,6 @@ func (r *SpawnRunner) runSpawn(ctx context.Context, cancel context.CancelFunc, i
 				slog.Warn("spawn process stuck after SIGKILL", "spawn_id", id, "pid", proc.Pid())
 			}
 		}
-
-		_ = proc.Close()
 
 		r.releaseSlot(id, SpawnStatusCancelled)
 		slog.Info("spawn cancelled", "spawn_id", id)
