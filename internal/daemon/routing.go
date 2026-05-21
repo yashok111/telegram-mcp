@@ -186,6 +186,11 @@ func (r *Router) Register(s *Shim) {
 // already registered. Called by the daemon after Forum.AllocateOrReuse
 // returns a non-zero thread_id (Register happens first so resolveReuseKey
 // can see the freshly-allocated alias).
+//
+// If threadID is already owned by a different shim, the prior owner's
+// TopicID is cleared so its eventual Drop doesn't delete the new owner's
+// entry — without that guard, the old shim's Drop unwinds via s.TopicID
+// and wipes out the freshly-bound topicOwners[threadID] mapping.
 func (r *Router) BindTopic(shimID string, threadID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -197,6 +202,15 @@ func (r *Router) BindTopic(shimID string, threadID int) {
 	s, ok := r.shims[shimID]
 	if !ok {
 		return
+	}
+
+	if prevOwner, exists := r.topicOwners[threadID]; exists && prevOwner != shimID {
+		slog.Warn("BindTopic: reassigning topic from prior owner",
+			"thread_id", threadID, "prev_shim", prevOwner, "new_shim", shimID)
+
+		if prevShim, ok := r.shims[prevOwner]; ok {
+			prevShim.TopicID = 0
+		}
 	}
 
 	s.TopicID = threadID
@@ -618,9 +632,11 @@ func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID, threadI
 
 				return []*Shim{s}
 			}
-			// Stale owner — fall through. Drop should have cleaned this, log
-			// for visibility and avoid silent misrouting.
-			slog.Warn("RouteInbound topic owner gone", "thread_id", threadID, "stale_owner", owner)
+			// Stale owner — Drop should have cleaned this. Belt-and-braces:
+			// delete the entry so the warn doesn't repeat on every inbound.
+			slog.Warn("RouteInbound topic owner gone — clearing stale entry",
+				"thread_id", threadID, "stale_owner", owner)
+			delete(r.topicOwners, threadID)
 		}
 	}
 

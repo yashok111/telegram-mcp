@@ -174,7 +174,13 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 
 		return true
 	}); err != nil {
-		return 0, fmt.Errorf("forum: register save: %w", err)
+		// CreateForumTopic already succeeded — topic exists in Telegram but
+		// is no longer tracked in access.json, so the sweep can't reach it.
+		// Log thread_id at error level so the operator can manually delete
+		// (or re-link by editing access.json) instead of orphaning silently.
+		slog.Error("forum: orphan topic — created in Telegram but state save failed",
+			"thread_id", tid, "forum_chat_id", forumChat, "shim_id", shim.ID, "name", name, "err", err)
+		return 0, fmt.Errorf("forum: register save (orphan thread_id=%d): %w", tid, err)
 	}
 
 	slog.Info("topic created", "shim_id", shim.ID, "thread_id", tid, "name", name, "reuse_key", reuseKey)

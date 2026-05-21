@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,6 +272,31 @@ func TestHandleTopicRename_callsEditForumTopic(t *testing.T) {
 	require.Len(t, calls, 1)
 	assert.Equal(t, "new name", calls[0].params["name"])
 	assert.EqualValues(t, 9, calls[0].params["message_thread_id"])
+}
+
+func TestHandleTopicRename_tooLong_rejectsBeforeAPI(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy:    access.PolicyAllowlist,
+		AllowFrom:   []string{"42"},
+		Groups:      map[string]access.GroupPolicy{},
+		Pending:     map[string]access.Pending{},
+		ForumChatID: -100777,
+	})
+
+	longName := strings.Repeat("x", 129)
+	msg := telego.Message{
+		Chat:            telego.Chat{ID: -100777, Type: "supergroup"},
+		From:            &telego.User{ID: 42},
+		MessageThreadID: 9,
+		Text:            "/topic rename " + longName,
+	}
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+
+	assert.Empty(t, api.recordedCalls("editForumTopic"),
+		"pre-flight rejection must skip the API call")
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "too long")
 }
 
 func TestHandleTopicRename_missingName_showsUsage(t *testing.T) {

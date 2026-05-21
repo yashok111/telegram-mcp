@@ -8,12 +8,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 )
+
+// maxTopicNameRunes mirrors Telegram Bot API's editForumTopic 128-char
+// limit. Pre-flight rejection gives a friendlier error than letting the
+// API call fail with NAME_TOO_LONG (which surfaces as raw text via
+// sendPlain).
+const maxTopicNameRunes = 128
 
 // TopicCloser is the high-level operation the bot delegates to when the user
 // issues `/topic close` inside a forum topic. Implemented by the daemon (it
@@ -155,6 +162,13 @@ func (b *Bot) handleTopicInfo(ctx context.Context, msg *telego.Message) {
 func (b *Bot) handleTopicRename(ctx context.Context, msg *telego.Message, newName string) {
 	if newName == "" {
 		b.sendPlain(ctx, msg.Chat.ID, msg.MessageThreadID, "Usage: /topic rename <new name>")
+		return
+	}
+
+	if utf8.RuneCountInString(newName) > maxTopicNameRunes {
+		b.sendPlain(ctx, msg.Chat.ID, msg.MessageThreadID,
+			fmt.Sprintf("Topic name too long: %d chars (max %d).",
+				utf8.RuneCountInString(newName), maxTopicNameRunes))
 		return
 	}
 

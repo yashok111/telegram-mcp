@@ -208,6 +208,49 @@ func TestRouter_BindTopic_unknownShimIsNoop(t *testing.T) {
 	assert.Empty(t, got, "no shim → no fallback")
 }
 
+func TestRouter_BindTopic_reassignClearsPriorShimTopicID(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a)
+	r.Register(b)
+	r.BindTopic("a", 42)
+	r.BindTopic("b", 42) // hijack: same threadID, different shim
+
+	// New owner is b.
+	got := r.RouteInboundMulti("chat-1", "", 0, 42)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "topic owner is the latest bind")
+
+	// Now Drop a — the prior-owner cleanup must not wipe b's entry.
+	r.Drop("a")
+
+	got = r.RouteInboundMulti("chat-1", "", 0, 42)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b", got[0].ID, "a.TopicID was cleared on hijack, so its Drop did not delete topicOwners[42]")
+}
+
+func TestRouteInboundMulti_staleTopicOwner_isDeletedOnRoute(t *testing.T) {
+	r := NewRouter()
+	a := &Shim{ID: "a"}
+	r.Register(a)
+
+	// Inject a stale topicOwners entry pointing at a non-existent shim,
+	// simulating a Drop path that missed cleanup (e.g., the hijack bug
+	// before BindTopic gained the prior-owner guard).
+	r.mu.Lock()
+	r.topicOwners[99] = "ghost"
+	r.mu.Unlock()
+
+	_ = r.RouteInboundMulti("chat-1", "", 0, 99)
+
+	r.mu.RLock()
+	_, present := r.topicOwners[99]
+	r.mu.RUnlock()
+	assert.False(t, present, "stale entry must be cleaned on first route lookup")
+}
+
 func TestRouter_Drop_clearsTopicOwner(t *testing.T) {
 	r := NewRouter()
 	a := &Shim{ID: "a"}

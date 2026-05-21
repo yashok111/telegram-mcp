@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -149,6 +150,34 @@ func TestTopicCloser_closeForumTopicFailureBubblesUp(t *testing.T) {
 
 	err := c.CloseTopic(context.Background(), 42)
 	require.Error(t, err)
+}
+
+func TestTopicCloser_storeMutateFailure_returnsError(t *testing.T) {
+	// Setup a real store, then chmod its dir read-only so the post-close
+	// Mutate's saveLocked fails on WriteFile. CloseForumTopic still
+	// succeeds (fake bot) — exercising the "closed in TG but queue save
+	// failed" branch.
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Save(access.State{
+		DMPolicy:    access.PolicyAllowlist,
+		AllowFrom:   []string{"123"},
+		Groups:      map[string]access.GroupPolicy{},
+		Pending:     map[string]access.Pending{},
+		ForumChatID: -100123,
+	}))
+
+	bot := &fakeCloseBot{}
+	c := NewTopicCloser(NewRouter(), store, bot, &fakeSpawnRunner{})
+
+	require.NoError(t, os.Chmod(dir, 0o500), "drop write perm on store dir")
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := c.CloseTopic(context.Background(), 42)
+	require.Error(t, err, "Mutate failure must surface to caller")
+	assert.Contains(t, err.Error(), "topic closed in Telegram",
+		"error message must indicate the partial-success state")
+	assert.Equal(t, []int{42}, bot.closed, "Telegram-side close still happened")
 }
 
 func TestTopicCloser_spawnCancelFailure_continuesClose(t *testing.T) {

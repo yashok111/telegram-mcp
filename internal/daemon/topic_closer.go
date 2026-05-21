@@ -30,10 +30,6 @@ type TopicCloser struct {
 	store       *access.Store
 	bot         topicCloseBot
 	spawnRunner topicSpawnRunner
-	// shutdownWait caps how long CloseTopic blocks waiting for a non-spawned
-	// shim to disconnect after NotifyShutdown. Zero falls back to a sane
-	// default so production callers don't need to set it.
-	shutdownWait time.Duration
 }
 
 // NewTopicCloser constructs a closer bound to the daemon's collaborators.
@@ -41,11 +37,10 @@ type TopicCloser struct {
 // non-spawned shutdown still works.
 func NewTopicCloser(r *Router, store *access.Store, b topicCloseBot, spawn topicSpawnRunner) *TopicCloser {
 	return &TopicCloser{
-		router:       r,
-		store:        store,
-		bot:          b,
-		spawnRunner:  spawn,
-		shutdownWait: 3 * time.Second,
+		router:      r,
+		store:       store,
+		bot:         b,
+		spawnRunner: spawn,
 	}
 }
 
@@ -96,7 +91,14 @@ func (c *TopicCloser) CloseTopic(ctx context.Context, threadID int) error {
 
 		return true
 	}); err != nil {
-		slog.Warn("topic close: ClosedTopics save failed", "thread_id", threadID, "err", err)
+		// Topic is closed in Telegram but the purge queue entry was lost.
+		// Without queueing, the sweep never deletes it → permanent drift.
+		// Surface the error so the operator sees the failure and can retry
+		// (CloseForumTopic is idempotent on Telegram's side).
+		slog.Error("topic close: ClosedTopics save failed — topic closed in Telegram but not queued for purge",
+			"thread_id", threadID, "err", err)
+
+		return fmt.Errorf("close topic %d: queue save (topic closed in Telegram): %w", threadID, err)
 	}
 
 	return nil
