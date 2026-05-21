@@ -149,11 +149,11 @@ func New(store *access.Store) (*Server, error) {
 		mcpserver.WithExperimental(map[string]any{
 			"claude/channel": map[string]any{},
 			// Declaring claude/channel/permission asserts we authenticate the
-			// replier — which we do: BroadcastPermissionRequest iterates
-			// access.State.AllowFrom and only sends inline-button prompts to
-			// allowlisted DMs; callback queries from anyone else are rejected
-			// at the bot's handleCallback gate. A server that cannot
-			// authenticate the responder must not declare this capability.
+			// replier — which we do: the daemon's pickPermissionTarget resolves
+			// a single chat from access.State.AllowFrom and bot.SendPermissionPrompt
+			// posts the inline-button prompt there; callback queries from anyone
+			// else are rejected at the bot's handleCallback gate. A server that
+			// cannot authenticate the responder must not declare this capability.
 			"claude/channel/permission": map[string]any{},
 		}),
 		mcpserver.WithRecovery(),

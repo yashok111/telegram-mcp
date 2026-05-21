@@ -52,6 +52,12 @@ type Shim struct {
 
 	adapter *BotAdapter
 	worker  *notifierWorker
+
+	// runCancel cancels the per-Run sub-context. Set by Run() before any
+	// IPC notification handlers can fire, so RequestShutdown is safe to
+	// call from off-thread (notifier worker, signal handler, tests).
+	runMu     sync.Mutex
+	runCancel context.CancelFunc
 }
 
 // Stop drains the notifier worker. Called from Run's defer in production;
@@ -59,6 +65,21 @@ type Shim struct {
 // or via t.Cleanup so goleak sees a clean goroutine set.
 func (s *Shim) Stop() {
 	s.worker.Stop()
+}
+
+// RequestShutdown cancels the active Run() so the MCP serve loop unwinds
+// and the process exits cleanly. Used by the daemon's NotifyShutdown
+// handler (fired during /topic close for non-spawned shims). No-op if
+// Run hasn't started yet or has already returned.
+func (s *Shim) RequestShutdown() {
+	s.runMu.Lock()
+	cancel := s.runCancel
+	s.runMu.Unlock()
+
+	if cancel != nil {
+		slog.Info("shim shutdown requested by daemon")
+		cancel()
+	}
 }
 
 func (s *Shim) ShimID() (string, bool) {
@@ -158,6 +179,7 @@ func (s *Shim) Wire(ctx context.Context) error {
 
 	AttachNotifier(s.Client, s.MCP, s.worker)
 	AttachLabelHandler(s.Client, s, s.worker)
+	AttachShutdownHandler(s.Client, s, s.worker)
 
 	if s.HelloPID == 0 {
 		s.HelloPID = os.Getpid()
@@ -180,6 +202,7 @@ func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
 		ShimID        string `json:"shim_id"`
 		DaemonVersion string `json:"daemon_version"`
 		Alias         string `json:"alias"`
+		TopicID       int    `json:"topic_id"`
 	}
 
 	wd, err := os.Getwd()
@@ -208,6 +231,14 @@ func (s *Shim) hello(ctx context.Context, c IPCClient, ccPID int) error {
 
 	startedAt := s.startedAt
 	s.idMu.Unlock()
+
+	// Forward the topic assignment to the BotAdapter so every outbound
+	// SendMessage/SendFile injects message_thread_id by default. Zero
+	// clears any prior binding — daemon reassigns on each hello, so the
+	// shim must reflect that even across reconnect.
+	if s.adapter != nil {
+		s.adapter.SetTopicID(hello.TopicID)
+	}
 
 	if ccPID > 0 && s.StateDir != "" {
 		info := SessionInfo{
@@ -263,6 +294,16 @@ func (s *Shim) Run(ctx context.Context) error {
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	s.runMu.Lock()
+	s.runCancel = cancel
+	s.runMu.Unlock()
+
+	defer func() {
+		s.runMu.Lock()
+		s.runCancel = nil
+		s.runMu.Unlock()
+	}()
 
 	serve := s.ServeStdio
 	if serve == nil {
@@ -362,6 +403,7 @@ func (s *Shim) rewire(ctx context.Context, newClient IPCClient) error {
 
 	AttachNotifier(newClient, s.MCP, s.worker)
 	AttachLabelHandler(newClient, s, s.worker)
+	AttachShutdownHandler(newClient, s, s.worker)
 	s.adapter.SwapClient(newClient)
 	s.setClient(newClient)
 

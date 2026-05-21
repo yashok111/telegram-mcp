@@ -181,6 +181,14 @@ func runDaemon(stateDir string) error {
 	corruptTTL := resolveDurationEnv("TELEGRAM_CORRUPT_TTL", 7*24*time.Hour)
 	sessionsTTL := resolveDurationEnv("TELEGRAM_SESSIONS_TTL", time.Hour)
 
+	if err := applyForumChatID(store); err != nil {
+		slog.Warn("forum chat id env apply failed", "err", err)
+	}
+
+	tgBot.SetTopicCloser(daemonpkg.NewTopicCloser(router, store, tgBot, spawnRunner))
+
+	topicPurgeAfter := resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 14*24*time.Hour)
+
 	d := &daemonpkg.Daemon{
 		StateDir:    stateDir,
 		SocketPath:  filepath.Join(stateDir, "daemon.sock"),
@@ -189,6 +197,8 @@ func runDaemon(stateDir string) error {
 		Bot:         tgBot,
 		Router:      router,
 		Typing:      typing,
+		Forum:       daemonpkg.NewForum(store, tgBot),
+		TopicSweep:  daemonpkg.NewTopicSweep(store, tgBot, topicPurgeAfter, time.Hour),
 		IdleTimeout: idleTimeout,
 		InboxTTL:    inboxTTL,
 		CorruptTTL:  corruptTTL,
@@ -379,6 +389,63 @@ func resolveDurationEnv(name string, def time.Duration) time.Duration {
 	}
 
 	return d
+}
+
+// applyForumChatID reads TELEGRAM_FORUM_CHAT_ID at daemon startup and merges
+// it into access.State so the forum feature is config-driven without a
+// custom edit to access.json. Empty env leaves the persisted value alone
+// (re-using whatever the operator wrote previously). `=0` explicitly
+// disables forum routing.
+//
+// Returns nil when nothing needed to change.
+func applyForumChatID(store *access.Store) error {
+	raw, ok := os.LookupEnv("TELEGRAM_FORUM_CHAT_ID")
+	if !ok {
+		return nil
+	}
+
+	raw = strings.TrimSpace(raw)
+
+	var want int64
+	if raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			slog.Warn("invalid TELEGRAM_FORUM_CHAT_ID, leaving access.json value untouched", "value", raw, "err", err)
+			return nil
+		}
+
+		want = parsed
+	}
+
+	return store.Mutate(func(st *access.State) bool {
+		changed := false
+
+		if st.ForumChatID != want {
+			slog.Info("forum_chat_id updated from env", "old", st.ForumChatID, "new", want)
+			st.ForumChatID = want
+			changed = true
+		}
+
+		// Auto-add the forum chat to Groups so gate() lets inbound messages
+		// through without requiring the operator to send a pairing message
+		// in the supergroup. Default policy is permissive (no mention/from
+		// requirement) — the bot's allowlist on AllowFrom + topic-command
+		// gate (topicCommandGate) is the load-bearing access check.
+		if want != 0 {
+			key := strconv.FormatInt(want, 10)
+			if st.Groups == nil {
+				st.Groups = map[string]access.GroupPolicy{}
+			}
+
+			if _, present := st.Groups[key]; !present {
+				slog.Info("forum chat auto-added to access.Groups", "chat_id", want)
+				st.Groups[key] = access.GroupPolicy{}
+				changed = true
+			}
+		}
+
+		return changed
+	})
 }
 
 // resolveLogMaxBytes parses TELEGRAM_LOG_MAX_BYTES into a rotation threshold.
@@ -804,6 +871,7 @@ func adaptShimInfo(s daemonpkg.ShimInfo) bot.ShimInfo {
 		Workdir:      s.Workdir,
 		CCSessionID:  s.CCSessionID,
 		SpawnID:      s.SpawnID,
+		TopicID:      s.TopicID,
 		ConnectedAt:  s.ConnectedAt,
 		LastOutbound: s.LastOutbound,
 		PinnedChats:  s.PinnedChats,

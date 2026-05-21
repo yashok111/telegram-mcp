@@ -11,6 +11,7 @@ type ShimInfo struct {
 	Workdir      string
 	CCSessionID  string
 	SpawnID      string
+	TopicID      int
 	ConnectedAt  time.Time
 	LastOutbound time.Time
 	PinnedChats  []string

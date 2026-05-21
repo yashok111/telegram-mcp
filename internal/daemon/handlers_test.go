@@ -40,8 +40,9 @@ type fakeBot struct {
 	downloadResult string
 	downloadErr    error
 
-	broadcastSeen   []string // request_ids
-	broadcastPrefix []string // prefix per broadcast
+	broadcastSeen    []string                // request_ids
+	broadcastPrefix  []string                // prefix per broadcast
+	broadcastTargets []bot.PermissionTarget  // resolved target per call
 
 	chatActions []struct{ chatID, action string }
 }
@@ -84,9 +85,10 @@ func (b *fakeBot) DownloadFile(_ context.Context, _ string) (string, error) {
 	return b.downloadResult, b.downloadErr
 }
 
-func (b *fakeBot) BroadcastPermissionRequest(_ context.Context, prefix, reqID, _ string) {
+func (b *fakeBot) SendPermissionPrompt(_ context.Context, target bot.PermissionTarget, prefix, reqID, _ string) {
 	b.broadcastSeen = append(b.broadcastSeen, reqID)
 	b.broadcastPrefix = append(b.broadcastPrefix, prefix)
+	b.broadcastTargets = append(b.broadcastTargets, target)
 }
 
 func newHandlersFixture(t *testing.T) (*Handlers, *fakeBot, *Router, *access.Store) {
@@ -180,6 +182,28 @@ func TestHandleSendMessageRecordsOwnershipOnSuccess(t *testing.T) {
 	owner, ok := r.RouteInbound("123")
 	require.True(t, ok)
 	assert.Equal(t, "shim-a", owner.ID)
+}
+
+func TestHandleSendMessage_propagatesMessageThreadID(t *testing.T) {
+	h, fb, _, _ := newHandlersFixture(t)
+	fb.sentMessage.retID = 1
+
+	_, rpcErr := h.HandleSendMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "text": "hi", "message_thread_id": 42,
+	}))
+	require.Nil(t, rpcErr)
+	assert.Equal(t, 42, fb.sentMessage.opts.MessageThreadID)
+}
+
+func TestHandleSendFile_propagatesMessageThreadID(t *testing.T) {
+	h, fb, _, _ := newHandlersFixture(t)
+	fb.sentFile.retID = 1
+
+	_, rpcErr := h.HandleSendFile(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "path": "/tmp/x.png", "message_thread_id": 17,
+	}))
+	require.Nil(t, rpcErr)
+	assert.Equal(t, 17, fb.sentFile.opts.MessageThreadID)
 }
 
 func TestHandleSendMessageBlockedByGate(t *testing.T) {
@@ -328,6 +352,89 @@ func TestHandleBroadcastPermissionRegistersAndForwards(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Bash", d.ToolName)
 	assert.Equal(t, "ls -la", d.InputPreview)
+}
+
+func TestHandleBroadcastPermission_pickTargetAllowFromHead(t *testing.T) {
+	h, fb, _, _ := newHandlersFixture(t)
+
+	_, rpcErr := h.HandleBroadcastPermission(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"request_id": "abcde", "tool_name": "Bash",
+	}))
+	require.Nil(t, rpcErr)
+	require.Len(t, fb.broadcastTargets, 1)
+	assert.EqualValues(t, 123, fb.broadcastTargets[0].ChatID, "target picks parsed AllowFrom[0]")
+	assert.Zero(t, fb.broadcastTargets[0].ThreadID, "no forum routing in this wave")
+}
+
+func TestPickPermissionTarget_forumModePrefersTopic(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Save(access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"123"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+		ForumChatID: -100777,
+	}))
+
+	fb := &fakeBot{}
+	r := NewRouter()
+	r.Register(&Shim{ID: "shim-a", Notify: func(string, any) error { return nil }})
+	r.BindTopic("shim-a", 42)
+
+	h := NewHandlers(store, fb, r, nil)
+	_, rpcErr := h.HandleBroadcastPermission(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"request_id": "abcde", "tool_name": "Bash",
+	}))
+	require.Nil(t, rpcErr)
+	require.Len(t, fb.broadcastTargets, 1)
+
+	tgt := fb.broadcastTargets[0]
+	assert.EqualValues(t, -100777, tgt.ChatID, "forum chat picked over AllowFrom")
+	assert.Equal(t, 42, tgt.ThreadID)
+}
+
+func TestPickPermissionTarget_forumModeFallsBackToDM_whenShimHasNoTopic(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Save(access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"123"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+		ForumChatID: -100777,
+	}))
+
+	fb := &fakeBot{}
+	r := NewRouter()
+	// No BindTopic call — shim is in forum mode but never got a topic.
+	r.Register(&Shim{ID: "shim-a", Notify: func(string, any) error { return nil }})
+
+	h := NewHandlers(store, fb, r, nil)
+	_, rpcErr := h.HandleBroadcastPermission(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"request_id": "abcde", "tool_name": "Bash",
+	}))
+	require.Nil(t, rpcErr)
+	require.Len(t, fb.broadcastTargets, 1)
+	assert.EqualValues(t, 123, fb.broadcastTargets[0].ChatID, "no topic → fall back to AllowFrom DM")
+	assert.Zero(t, fb.broadcastTargets[0].ThreadID)
+}
+
+func TestHandleBroadcastPermission_emptyAllowlistYieldsZeroTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Save(access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{},
+		Groups: map[string]access.GroupPolicy{"-100200": {}}, Pending: map[string]access.Pending{},
+	}))
+
+	fb := &fakeBot{}
+	r := NewRouter()
+	r.Register(&Shim{ID: "shim-x", Notify: func(string, any) error { return nil }})
+
+	h := NewHandlers(store, fb, r, nil)
+	_, rpcErr := h.HandleBroadcastPermission(context.Background(), conn("shim-x"), raw(t, map[string]any{
+		"request_id": "xyzab", "tool_name": "Bash",
+	}))
+	require.Nil(t, rpcErr, "registration succeeds even with empty allowlist")
+	require.Len(t, fb.broadcastTargets, 1)
+	assert.Zero(t, fb.broadcastTargets[0].ChatID, "empty allowlist → zero target; bot side no-ops")
 }
 
 func TestHandleBroadcastPermissionCollisionRejected(t *testing.T) {

@@ -80,6 +80,43 @@ func TestBotAdapterSendMessage(t *testing.T) {
 	assert.JSONEq(t, `{"chat_id":"123","text":"hi","reply_to":4,"parse_mode":"MarkdownV2"}`, string(fc.calledParams))
 }
 
+func TestBotAdapterSendMessage_forwardsMessageThreadID(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":1}`)}
+	a := NewBotAdapter(fc, nil)
+
+	_, err := a.SendMessage(context.Background(), "1", "hi", bot.SendOpts{MessageThreadID: 7})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(fc.calledParams, &got))
+	assert.EqualValues(t, 7, got["message_thread_id"])
+}
+
+func TestBotAdapterSendMessage_omitsZeroMessageThreadID(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":1}`)}
+	a := NewBotAdapter(fc, nil)
+
+	_, err := a.SendMessage(context.Background(), "1", "hi", bot.SendOpts{})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(fc.calledParams, &got))
+	_, present := got["message_thread_id"]
+	assert.False(t, present, "zero MessageThreadID should not appear in IPC params")
+}
+
+func TestBotAdapterSendFile_forwardsMessageThreadID(t *testing.T) {
+	fc := &fakeClient{returnResult: json.RawMessage(`{"message_id":1}`)}
+	a := NewBotAdapter(fc, nil)
+
+	_, err := a.SendFile(context.Background(), "1", "/tmp/x.png", bot.SendOpts{MessageThreadID: 12})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(fc.calledParams, &got))
+	assert.EqualValues(t, 12, got["message_thread_id"])
+}
+
 func TestBotAdapterSendMessageNotAllowlisted(t *testing.T) {
 	data, _ := json.Marshal(map[string]string{"chat_id": "9"})
 	fc := &fakeClient{returnErr: &ipc.Error{Code: ipc.CodeNotAllowlisted, Message: "no", Data: data}}

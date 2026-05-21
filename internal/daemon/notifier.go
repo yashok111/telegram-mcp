@@ -35,10 +35,11 @@ func NewNotifier(r *Router, store *access.Store, typing *TypingTracker) *Notifie
 func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 	chatID := meta["chat_id"]
 	replyToMsgID, _ := strconv.Atoi(meta["reply_to_message_id"])
+	threadID, _ := strconv.Atoi(meta["message_thread_id"])
 
-	targets := n.router.RouteInboundMulti(chatID, content, replyToMsgID)
+	targets := n.router.RouteInboundMulti(chatID, content, replyToMsgID, threadID)
 	if len(targets) == 0 {
-		slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "user", meta["user"])
+		slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "thread_id", threadID, "user", meta["user"])
 		return
 	}
 

@@ -58,7 +58,8 @@ func (b *recordingBot) EditMessage(_ context.Context, _ string, _ int, text, _ s
 func (b *recordingBot) React(_ context.Context, _ string, _ int, _ string) error     { return nil }
 func (b *recordingBot) SendChatAction(_ context.Context, _, _ string) error          { return nil }
 func (b *recordingBot) DownloadFile(_ context.Context, _ string) (string, error)     { return "", nil }
-func (b *recordingBot) BroadcastPermissionRequest(_ context.Context, _, _, _ string) {}
+func (b *recordingBot) SendPermissionPrompt(_ context.Context, _ bot.PermissionTarget, _, _, _ string) {
+}
 
 func (b *recordingBot) sent() []string {
 	b.mu.Lock()

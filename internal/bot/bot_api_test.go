@@ -135,8 +135,19 @@ func (m *mockAPI) respond(w http.ResponseWriter, method string, params map[strin
 			"date":       time.Now().Unix(),
 			"chat":       map[string]any{"id": 1, "type": "private"},
 		}))
-	case "setMessageReaction", "answerCallbackQuery", "sendChatAction", "setMyCommands":
+	case "setMessageReaction", "answerCallbackQuery", "sendChatAction", "setMyCommands",
+		"editForumTopic", "closeForumTopic", "deleteForumTopic":
 		writeJSON(w, ok(true))
+	case "createForumTopic":
+		m.mu.Lock()
+		m.nextMessageID++
+		threadID := m.nextMessageID
+		m.mu.Unlock()
+		writeJSON(w, ok(map[string]any{
+			"message_thread_id": threadID,
+			"name":              params["name"],
+			"icon_color":        params["icon_color"],
+		}))
 	case "getFile":
 		writeJSON(w, ok(map[string]any{
 			"file_id":        params["file_id"],
@@ -299,6 +310,33 @@ func TestSendMessage_withReplyToAndParseMode(t *testing.T) {
 	assert.Contains(t, payloadString(calls[0].params), `"message_id":5`)
 }
 
+func TestSendMessage_appliesMessageThreadID(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	_, err := b.SendMessage(t.Context(), "42", "hi", SendOpts{MessageThreadID: 7})
+	require.NoError(t, err)
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, 7, calls[0].params["message_thread_id"])
+}
+
+func TestSendMessage_zeroThreadID_omitted(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	_, err := b.SendMessage(t.Context(), "42", "hi", SendOpts{})
+	require.NoError(t, err)
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	_, present := calls[0].params["message_thread_id"]
+	assert.False(t, present, "zero MessageThreadID should be omitted from outbound params")
+}
+
 func TestSendMessage_invalidChatID_errors(t *testing.T) {
 	b, _, _ := newTestBot(t, access.State{})
 	_, err := b.SendMessage(t.Context(), "not-a-number", "x", SendOpts{})
@@ -332,6 +370,32 @@ func TestSendFile_documentExtensionRoutesToSendDocument(t *testing.T) {
 	_, err := b.SendFile(t.Context(), "42", p, SendOpts{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, api.recordedCalls("sendDocument"))
+}
+
+func TestSendFile_appliesMessageThreadID_photo(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	p := filepath.Join(dir, "pic.png")
+	require.NoError(t, os.WriteFile(p, []byte("img"), 0o644))
+
+	_, err := b.SendFile(t.Context(), "42", p, SendOpts{MessageThreadID: 9})
+	require.NoError(t, err)
+
+	calls := api.recordedCalls("sendPhoto")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, "9", calls[0].params["message_thread_id"])
+}
+
+func TestSendFile_appliesMessageThreadID_document(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	p := filepath.Join(dir, "data.bin")
+	require.NoError(t, os.WriteFile(p, []byte("bin"), 0o644))
+
+	_, err := b.SendFile(t.Context(), "42", p, SendOpts{MessageThreadID: 11})
+	require.NoError(t, err)
+
+	calls := api.recordedCalls("sendDocument")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, "11", calls[0].params["message_thread_id"])
 }
 
 func TestSendFile_missingFile_errors(t *testing.T) {
@@ -467,43 +531,118 @@ func TestCheckApprovals_noDir_silentNoop(t *testing.T) {
 	assert.Empty(t, api.recordedCalls("sendMessage"))
 }
 
-// ===== BroadcastPermissionRequest =====
+// ===== SendPermissionPrompt =====
 
-func TestBroadcastPermissionRequest(t *testing.T) {
-	b, api, _ := newTestBot(t, access.State{
-		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42", "99"},
-		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
-	})
-	b.BroadcastPermissionRequest(t.Context(), "", "abcde", "Bash")
-
-	calls := api.recordedCalls("sendMessage")
-	require.Len(t, calls, 2)
-
-	for _, c := range calls {
-		assert.Contains(t, c.params["text"], "Permission: Bash")
-		assert.Contains(t, payloadString(c.params), "perm:allow:abcde")
-	}
-}
-
-func TestBroadcastPermissionRequest_withPrefix(t *testing.T) {
+func TestSendPermissionPrompt_sendsOneMessage(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{
 		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	b.BroadcastPermissionRequest(t.Context(), "@s1: ", "abcde", "Bash")
+	b.SendPermissionPrompt(t.Context(), PermissionTarget{ChatID: 42}, "", "abcde", "Bash")
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "Permission: Bash")
+	assert.Contains(t, payloadString(calls[0].params), "perm:allow:abcde")
+}
+
+func TestSendPermissionPrompt_withPrefix(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	b.SendPermissionPrompt(t.Context(), PermissionTarget{ChatID: 42}, "@s1: ", "abcde", "Bash")
 
 	calls := api.recordedCalls("sendMessage")
 	require.Len(t, calls, 1)
 	assert.Equal(t, "@s1: 🔐 Permission: Bash", calls[0].params["text"])
 }
 
-func TestBroadcastPermissionRequest_skipsBadChatID(t *testing.T) {
+func TestSendPermissionPrompt_appliesThreadID(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{
-		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42", "not-a-number"},
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
 		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
 	})
-	b.BroadcastPermissionRequest(t.Context(), "", "abcde", "Bash")
-	assert.Len(t, api.recordedCalls("sendMessage"), 1)
+	b.SendPermissionPrompt(t.Context(), PermissionTarget{ChatID: 42, ThreadID: 7}, "", "abcde", "Bash")
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, 7, calls[0].params["message_thread_id"])
+}
+
+func TestSendPermissionPrompt_zeroChatID_noop(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy: access.PolicyAllowlist, AllowFrom: []string{"42"},
+		Groups: map[string]access.GroupPolicy{}, Pending: map[string]access.Pending{},
+	})
+	b.SendPermissionPrompt(t.Context(), PermissionTarget{}, "", "abcde", "Bash")
+	assert.Empty(t, api.recordedCalls("sendMessage"), "zero ChatID target should not send")
+}
+
+// ===== Forum topic admin API =====
+
+func TestCreateForumTopic_returnsThreadID(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+
+	threadID, err := b.CreateForumTopic(t.Context(), -100123, "main", 0)
+	require.NoError(t, err)
+	assert.Positive(t, threadID)
+
+	calls := api.recordedCalls("createForumTopic")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "main", calls[0].params["name"])
+	_, present := calls[0].params["icon_color"]
+	assert.False(t, present, "zero iconColor must omit the field")
+}
+
+func TestCreateForumTopic_setsIconColorWhenNonZero(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+
+	_, err := b.CreateForumTopic(t.Context(), -100123, "main", 7322096)
+	require.NoError(t, err)
+
+	calls := api.recordedCalls("createForumTopic")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, 7322096, calls[0].params["icon_color"])
+}
+
+func TestCreateForumTopic_apiError(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["createForumTopic"] = "Forbidden: can_manage_topics revoked"
+
+	_, err := b.CreateForumTopic(t.Context(), -100123, "x", 0)
+	require.Error(t, err)
+}
+
+func TestEditForumTopic_passesNameAndThreadID(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+
+	require.NoError(t, b.EditForumTopic(t.Context(), -100123, 42, "renamed"))
+
+	calls := api.recordedCalls("editForumTopic")
+	require.Len(t, calls, 1)
+	assert.Equal(t, "renamed", calls[0].params["name"])
+	assert.EqualValues(t, 42, calls[0].params["message_thread_id"])
+}
+
+func TestCloseForumTopic_passesThreadID(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+
+	require.NoError(t, b.CloseForumTopic(t.Context(), -100123, 42))
+
+	calls := api.recordedCalls("closeForumTopic")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, 42, calls[0].params["message_thread_id"])
+}
+
+func TestDeleteForumTopic_passesThreadID(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+
+	require.NoError(t, b.DeleteForumTopic(t.Context(), -100123, 42))
+
+	calls := api.recordedCalls("deleteForumTopic")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, 42, calls[0].params["message_thread_id"])
 }
 
 func TestSendFile_caption(t *testing.T) {

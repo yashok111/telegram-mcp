@@ -215,6 +215,27 @@ type LabelUpdater interface {
 	UpdateLabel(label string)
 }
 
+// Shutdowner is satisfied by Shim — separate interface so AttachShutdownHandler
+// can be exercised without spinning up a real Shim in tests.
+type Shutdowner interface {
+	RequestShutdown()
+}
+
+// AttachShutdownHandler registers the daemon→shim shutdown notification.
+// The actual cancellation runs on the worker queue (not the IPC read loop)
+// so the notification ack returns promptly and shutdown sequencing happens
+// after the current notification batch drains.
+func AttachShutdownHandler(c IPCClient, s Shutdowner, w *notifierWorker) {
+	if s == nil {
+		return
+	}
+
+	c.OnNotify(ipc.NotifyShutdown, func(_ context.Context, _ json.RawMessage) {
+		slog.Info("shim received shutdown notification")
+		w.submit("shutdown", s.RequestShutdown)
+	})
+}
+
 // AttachLabelHandler registers the daemon→shim label-change notification handler.
 // nil updater disables the handler (test-only path). UpdateLabel runs on the
 // worker (off the IPC read loop) because it writes the sessionfile to disk.
