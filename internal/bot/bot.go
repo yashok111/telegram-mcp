@@ -1354,13 +1354,30 @@ func (b *Bot) EditForumTopic(ctx context.Context, chatID int64, threadID int, na
 		MessageThreadID: threadID,
 		Name:            name,
 	}); err != nil {
+		if isTopicNotModified(err) {
+			slog.Debug("Telegram editForumTopic: title already current (idempotent)",
+				"chat_id", chatID, "thread_id", threadID, "name", name)
+
+			return nil
+		}
+
 		slog.Error("Telegram editForumTopic failed", "chat_id", chatID, "thread_id", threadID, "name", name, "err", err)
+
 		return fmt.Errorf("edit forum topic: %w", err)
 	}
 
 	slog.Info("Telegram editForumTopic ok", "chat_id", chatID, "thread_id", threadID, "name", name)
 
 	return nil
+}
+
+// isTopicNotModified reports whether err is Telegram's 400 TOPIC_NOT_MODIFIED,
+// which editForumTopic returns when the requested title already equals the
+// current one. There is no telego sentinel for this code, so we match on the
+// API description carried in the error string — that text is Telegram's
+// stable contract for the condition.
+func isTopicNotModified(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "TOPIC_NOT_MODIFIED")
 }
 
 // CloseForumTopic makes a topic read-only without deleting history.

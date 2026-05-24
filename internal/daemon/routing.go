@@ -562,6 +562,19 @@ func (r *Router) ResolveShim(target string) (*Shim, error) {
 	return found, nil
 }
 
+// IsConnected reports whether a shim with the given id is currently
+// registered. Forum uses it to tell a live topic-lock holder from a stale
+// one (an id left on disk by a holder that disconnected, or by a prior
+// daemon that died before its OnDisconnect could release the lock).
+func (r *Router) IsConnected(shimID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	_, ok := r.shims[shimID]
+
+	return ok
+}
+
 // ShimByTopic returns the shim that currently owns the given forum thread,
 // nil/false when no one does. Used by TopicCloser to find which shim a
 // `/topic close` should shutdown.
