@@ -643,6 +643,19 @@ func TestEditForumTopic_passesNameAndThreadID(t *testing.T) {
 	assert.EqualValues(t, 42, calls[0].params["message_thread_id"])
 }
 
+// TestEditForumTopic_topicNotModified_isIdempotentSuccess asserts that
+// Telegram's 400 TOPIC_NOT_MODIFIED — returned when the requested title
+// already matches the current one — is treated as success, not failure. The
+// caller's desired state already holds, so re-pushing the same name is a
+// no-op, not an error worth surfacing or logging at WARN.
+func TestEditForumTopic_topicNotModified_isIdempotentSuccess(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["editForumTopic"] = "Bad Request: TOPIC_NOT_MODIFIED"
+
+	err := b.EditForumTopic(t.Context(), -100123, 42, "same-name")
+	require.NoError(t, err, "TOPIC_NOT_MODIFIED means the title already matches — idempotent success")
+}
+
 func TestCloseForumTopic_passesThreadID(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{})
 

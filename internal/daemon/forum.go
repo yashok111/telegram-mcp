@@ -24,18 +24,28 @@ type forumBot interface {
 type Forum struct {
 	store *access.Store
 	bot   forumBot
+	// isLive reports whether a shim_id is currently connected. A topic lock
+	// records the ephemeral shim_id of its holder; that id is minted fresh on
+	// every hello (crypto/rand) and regenerated on every reconnect, so a lock
+	// persisted to access.json goes stale the moment the daemon restarts —
+	// the holder reconnects under a new id while the old id rots on disk.
+	// Consulting live connections lets reuse seize a stale lock instead of
+	// orphaning a duplicate topic. nil means "assume held" (no seizing).
+	isLive func(shimID string) bool
 	// home is the workdir treated as the "default" pwd. Sessions started
 	// from $HOME or with empty workdir get a fresh topic rather than
 	// schclassing into a shared bucket.
 	home string
 }
 
-// NewForum constructs a Forum bound to a single Store + forumBot pair.
-// $HOME resolution is at constructor time — if HOME changes mid-process
-// (not expected outside tests), restart the daemon.
-func NewForum(store *access.Store, b forumBot) *Forum {
+// NewForum constructs a Forum bound to a single Store + forumBot pair. isLive
+// reports whether a shim_id is still connected; pass Router.IsConnected so
+// reuse can distinguish a live lock holder from a stale one left by a crashed
+// or restarted daemon. $HOME resolution is at constructor time — if HOME
+// changes mid-process (not expected outside tests), restart the daemon.
+func NewForum(store *access.Store, b forumBot, isLive func(shimID string) bool) *Forum {
 	home, _ := os.UserHomeDir()
-	return &Forum{store: store, bot: b, home: home}
+	return &Forum{store: store, bot: b, isLive: isLive, home: home}
 }
 
 // Enabled reports whether forum routing is active (ForumChatID configured).
@@ -107,11 +117,19 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 			return true
 		}
 
-		if meta.LockedBy != "" && meta.LockedBy != shim.ID {
-			slog.Warn("topic locked by another shim — creating fresh",
-				"reuse_key", reuseKey, "locked_by", meta.LockedBy, "shim_id", shim.ID, "thread_id", tid)
+		if heldByOther := meta.LockedBy != "" && meta.LockedBy != shim.ID; heldByOther {
+			if f.connected(meta.LockedBy) {
+				slog.Warn("topic locked by another live shim — creating fresh",
+					"reuse_key", reuseKey, "locked_by", meta.LockedBy, "shim_id", shim.ID, "thread_id", tid)
 
-			return false
+				return false
+			}
+
+			// Holder is gone (clean disconnect missed, or a prior daemon died
+			// before ReleaseLock). The lock is stale — seize it and reuse the
+			// topic rather than orphaning a duplicate on every restart.
+			slog.Info("seizing stale topic lock from disconnected shim",
+				"reuse_key", reuseKey, "stale_locked_by", meta.LockedBy, "shim_id", shim.ID, "thread_id", tid)
 		}
 
 		meta.LockedBy = shim.ID
@@ -193,6 +211,12 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 	slog.Info("topic created", "shim_id", shim.ID, "thread_id", tid, "name", name, "reuse_key", reuseKey)
 
 	return tid, nil
+}
+
+// connected reports whether shimID is a currently-attached shim. A nil isLive
+// (not wired) conservatively answers true so locks are never seized.
+func (f *Forum) connected(shimID string) bool {
+	return f.isLive != nil && f.isLive(shimID)
 }
 
 // resyncName re-pushes the topic title when a reused topic's stored name has

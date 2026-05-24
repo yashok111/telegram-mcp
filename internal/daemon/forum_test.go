@@ -87,7 +87,10 @@ func newForumFixture(t *testing.T, forumChatID int64) (*Forum, *access.Store, *f
 	require.NoError(t, store.Save(st))
 
 	fb := newFakeForumBot()
-	f := NewForum(store, fb)
+	// Default liveness: treat every lock holder as still connected, so reuse
+	// keeps the historical "locked → fresh" behavior unless a test opts a
+	// shim_id out of the live set to exercise stale-lock seizing.
+	f := NewForum(store, fb, func(string) bool { return true })
 	// Force a non-HOME workdir comparison by overriding home — tests pass
 	// explicit workdirs and verify whether reuse triggers.
 	f.home = "/test/home"
@@ -218,7 +221,9 @@ func TestForum_resyncFailure_stillReturnsThread(t *testing.T) {
 
 	f.ReleaseLock("shim-old")
 
-	fb.failEdit = errors.New("Bad Request: TOPIC_NOT_MODIFIED")
+	// A genuinely-propagating edit failure (TOPIC_NOT_MODIFIED is swallowed as
+	// idempotent success in bot.EditForumTopic, so it never reaches here).
+	fb.failEdit = errors.New("Bad Request: message thread not found")
 
 	second, err := f.AllocateOrReuse(context.Background(), &Shim{
 		ID: "shim-new", Alias: "s2", Label: "foo", Workdir: "/projects/foo",
@@ -258,21 +263,53 @@ func TestForum_skipsReuse_forHomeWorkdir(t *testing.T) {
 	assert.Len(t, fb.createName, 3, "$HOME workdir → fresh topic every time")
 }
 
-func TestForum_collisionWhenLockHeld_createsFresh(t *testing.T) {
-	f, _, fb := newForumFixture(t, -100123)
+func TestForum_collisionWhenLockHeldByLiveShim_createsFresh(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123) // default fixture: every holder live
 
 	first, err := f.AllocateOrReuse(context.Background(), &Shim{
 		ID: "shim-a", Alias: "s1", Workdir: "/projects/foo",
 	})
 	require.NoError(t, err)
 
-	// shim-a still locked; concurrent shim with same key arrives.
+	// shim-a still locked AND still connected; concurrent shim with same key
+	// arrives. The live lock is not seized → fresh topic.
 	second, err := f.AllocateOrReuse(context.Background(), &Shim{
 		ID: "shim-b", Alias: "s2", Workdir: "/projects/foo",
 	})
 	require.NoError(t, err)
-	assert.NotEqual(t, first, second, "lock collision → fresh topic")
+	assert.NotEqual(t, first, second, "live lock collision → fresh topic")
 	assert.Len(t, fb.createName, 2)
+}
+
+// TestForum_seizesStaleLock_fromDisconnectedShim is the core regression test
+// for the duplicate-topic-on-restart bug. A shim locks a workdir topic, then
+// its daemon dies without releasing the lock (SIGKILL/OOM → OnDisconnect never
+// runs). On restart the shim reconnects under a fresh, random shim_id while
+// the old id rots in access.json. The reattaching shim must detect the holder
+// is no longer connected, seize the stale lock, and REUSE the existing topic
+// instead of creating a duplicate.
+func TestForum_seizesStaleLock_fromDisconnectedShim(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+
+	first, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-dead", Alias: "s1", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	require.Len(t, fb.createName, 1)
+
+	// Lock still held by shim-dead on disk, but it is not among the connected
+	// shims (its daemon crashed before ReleaseLock).
+	f.isLive = func(id string) bool { return id != "shim-dead" }
+
+	second, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-new", Alias: "s2", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, first, second, "stale lock seized → existing thread reused, not duplicated")
+	assert.Len(t, fb.createName, 1, "no fresh topic created when seizing a stale lock")
+	assert.Equal(t, "shim-new", store.Load().TopicsByThread[strconv.Itoa(second)].LockedBy,
+		"lock transferred to the reattaching shim")
 }
 
 func TestForum_ReleaseLock_clearsLockedBy(t *testing.T) {

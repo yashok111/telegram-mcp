@@ -246,7 +246,7 @@ func runDaemon(stateDir string) error {
 		Bot:          tgBot,
 		Router:       router,
 		Typing:       typing,
-		Forum:        daemonpkg.NewForum(store, tgBot),
+		Forum:        daemonpkg.NewForum(store, tgBot, router.IsConnected),
 		TopicSweep:   daemonpkg.NewTopicSweep(store, tgBot, topicPurgeAfter, time.Hour),
 		ShimLogs:     shimLogs,
 		ShimsSweep:   daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
