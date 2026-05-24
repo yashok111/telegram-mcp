@@ -31,6 +31,10 @@ type fakeForumBot struct {
 	// failCreate, when non-nil, makes CreateForumTopic return the error
 	// without recording the call.
 	failCreate error
+
+	// failEdit, when non-nil, makes EditForumTopic return the error without
+	// recording the call.
+	failEdit error
 }
 
 func newFakeForumBot() *fakeForumBot {
@@ -55,6 +59,10 @@ func (f *fakeForumBot) CreateForumTopic(_ context.Context, _ int64, name string,
 }
 
 func (f *fakeForumBot) EditForumTopic(_ context.Context, _ int64, threadID int, name string) error {
+	if f.failEdit != nil {
+		return f.failEdit
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -145,6 +153,80 @@ func TestForum_reusesByLabel_whenLockFree(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first, second, "same label → same thread_id")
 	assert.Len(t, fb.createName, 1, "no fresh topic created on reuse")
+	assert.Len(t, fb.editName, 1, "alias s1→s2 on reuse → name resynced")
+}
+
+// TestForum_reuseResyncsTopicName covers the alias-migration bug: a topic
+// name is frozen at CreateForumTopic. When the creating shim disconnects and
+// the topic is reused by a shim carrying a different alias, the name must be
+// re-pushed via EditForumTopic so the topic list stays distinguishable.
+func TestForum_reuseResyncsTopicName(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+
+	first, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-old", Alias: "s1", Label: "foo", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	require.Len(t, fb.createName, 1, "topic created")
+	assert.Equal(t, "@s1 — foo", fb.createName[0])
+
+	f.ReleaseLock("shim-old")
+
+	second, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-new", Alias: "s2", Label: "foo", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, first, second, "reuse keeps the thread")
+	assert.Len(t, fb.createName, 1, "no fresh topic on reuse")
+
+	require.Len(t, fb.editName, 1, "diverged alias → one EditForumTopic")
+	assert.Equal(t, "@s2 — foo", fb.editName[0], "name resynced to new alias")
+	assert.Equal(t, second, fb.editThreadID[0], "edit targets the reused thread")
+	assert.Equal(t, "@s2 — foo", store.Load().TopicsByThread[strconv.Itoa(second)].Name,
+		"resynced name persisted")
+}
+
+// TestForum_reuseSameAlias_noResync guards against a spurious API call when
+// the reattaching shim carries the same alias as the stored name.
+func TestForum_reuseSameAlias_noResync(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123)
+
+	_, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-a", Alias: "s1", Label: "foo", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+
+	f.ReleaseLock("shim-a")
+
+	_, err = f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-a2", Alias: "s1", Label: "foo", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, fb.editName, "same alias → no EditForumTopic")
+}
+
+// TestForum_resyncFailure_stillReturnsThread asserts a cosmetic resync
+// failure does not drop the shim to DM-mode: AllocateOrReuse returns the
+// reused thread with no error even when EditForumTopic fails.
+func TestForum_resyncFailure_stillReturnsThread(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+
+	first, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-old", Alias: "s1", Label: "foo", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+
+	f.ReleaseLock("shim-old")
+
+	fb.failEdit = errors.New("Bad Request: TOPIC_NOT_MODIFIED")
+
+	second, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-new", Alias: "s2", Label: "foo", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err, "cosmetic resync failure must not abort the attach")
+	assert.Equal(t, first, second, "reused thread still returned")
+	assert.Equal(t, "@s1 — foo", store.Load().TopicsByThread[strconv.Itoa(second)].Name,
+		"stored name unchanged when edit fails — next reuse retries")
 }
 
 func TestForum_reusesByWorkdir_whenNotHome(t *testing.T) {

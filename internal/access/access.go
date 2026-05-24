@@ -58,9 +58,13 @@ type GroupPolicy struct {
 // ThreadID is duplicated as the map key so callers iterating the map have
 // the full struct without an extra lookup.
 type TopicMeta struct {
-	ThreadID   int    `json:"thread_id"`
-	Workdir    string `json:"workdir,omitempty"`
-	Label      string `json:"label,omitempty"`
+	ThreadID int    `json:"thread_id"`
+	Workdir  string `json:"workdir,omitempty"`
+	Label    string `json:"label,omitempty"`
+	// Name is the last topic title pushed to Telegram. Stored so reuse by a
+	// shim with a different alias can detect divergence and re-push via
+	// EditForumTopic — the title is otherwise frozen at CreateForumTopic.
+	Name       string `json:"name,omitempty"`
 	LastShimID string `json:"last_shim_id,omitempty"`
 	// LockedBy is the currently-attached shim_id; "" means the topic is
 	// available for reuse on the next hello with a matching reuse_key.
