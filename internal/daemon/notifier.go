@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
 
@@ -13,9 +14,10 @@ import (
 // the right shim over IPC. The bot package doesn't import daemon — it sees
 // only bot.Notifier.
 type Notifier struct {
-	router *Router
-	store  *access.Store
-	typing *TypingTracker
+	router  *Router
+	store   *access.Store
+	typing  *TypingTracker
+	mutator *AdminMutator
 }
 
 // NewNotifier wires the router used to fan out inbound messages plus, optionally,
@@ -101,6 +103,22 @@ func (n *Notifier) LookupPermission(requestID string) (bot.PermissionDetails, bo
 		Description:  d.Description,
 		InputPreview: d.InputPreview,
 	}, true
+}
+
+// SetMutator wires the admin mutation engine so owner ✅/❌ taps resolve over
+// the bot → Notifier seam (bot must not import daemon). nil → ResolveMutation
+// reports the feature is off. Set in cmd/server before Poll, same as the bot's
+// notifier wiring.
+func (n *Notifier) SetMutator(m *AdminMutator) { n.mutator = m }
+
+// ResolveMutation implements bot.Notifier: routes an owner confirm tap to the
+// AdminMutator. The bot already gate-authenticated the tapper.
+func (n *Notifier) ResolveMutation(ctx context.Context, pendingID string, approve bool) (bool, string) {
+	if n.mutator == nil {
+		return false, "admin mutations are not enabled on this daemon"
+	}
+
+	return n.mutator.Resolve(ctx, pendingID, approve)
 }
 
 func (n *Notifier) ResolvePermission(requestID, behavior string) {

@@ -38,7 +38,7 @@ func (f *fakeCloseBot) CloseForumTopic(_ context.Context, _ int64, threadID int)
 }
 
 type fakeSpawnRunner struct {
-	mu       sync.Mutex
+	mu        sync.Mutex
 	cancelled []string
 	failErr   error
 }
@@ -124,14 +124,17 @@ func TestTopicCloser_spawnedShim_cancelsViaSpawnRunner(t *testing.T) {
 func TestTopicCloser_nonSpawnedShim_sendsShutdownNotify(t *testing.T) {
 	c, router, _, _, spawn := newCloserFixture(t)
 
-	var notifyCount atomic.Int32
-	var notifyMethod atomic.Value
+	var (
+		notifyCount  atomic.Int32
+		notifyMethod atomic.Value
+	)
 
 	router.Register(&Shim{
 		ID: "shim-a",
 		Notify: func(method string, _ any) error {
 			notifyCount.Add(1)
 			notifyMethod.Store(method)
+
 			return nil
 		},
 	})

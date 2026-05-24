@@ -258,7 +258,9 @@ func TestForum_ReleaseLock_unknownShimIsNoop(t *testing.T) {
 	require.NoError(t, err)
 
 	before := store.Load().TopicsByThread
+
 	f.ReleaseLock("nonexistent")
+
 	after := store.Load().TopicsByThread
 	assert.Equal(t, before, after, "unknown shim release is no-op")
 }

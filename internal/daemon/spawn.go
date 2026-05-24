@@ -188,6 +188,7 @@ type SpawnRunner struct {
 	tasks      map[string]*spawnTask
 	perUser    map[string][]time.Time
 	idleLookup IdleLookup
+	sink       EventSink
 }
 
 var (
@@ -253,6 +254,26 @@ func (r *SpawnRunner) SetIdleLookup(fn IdleLookup) {
 	r.mu.Lock()
 	r.idleLookup = fn
 	r.mu.Unlock()
+}
+
+// SetEventSink wires the anomaly-event sink (nil disables emission). Safe to
+// call concurrently with the sweep/spawn goroutines.
+func (r *SpawnRunner) SetEventSink(s EventSink) {
+	r.mu.Lock()
+	r.sink = s
+	r.mu.Unlock()
+}
+
+// emit sends e if a sink is wired. Reads r.sink under the lock (the sweep and
+// runSpawn goroutines call this); EventSink.Emit is itself non-blocking.
+func (r *SpawnRunner) emit(e Event) {
+	r.mu.Lock()
+	sink := r.sink
+	r.mu.Unlock()
+
+	if sink != nil {
+		sink.Emit(e)
+	}
 }
 
 // Run is the idle-timeout sweeper. Every minute it cancels any spawn whose
@@ -328,6 +349,7 @@ func (r *SpawnRunner) sweepIdle(now time.Time) {
 	for _, v := range victims {
 		slog.Info("spawn idle-timeout exceeded; cancelling",
 			"spawn_id", v.id, "idle", v.idle.Round(time.Second), "orphan", v.orphan)
+		r.emit(Event{Type: "spawn_idle_killed", Severity: "info", Subject: v.id, Detail: fmt.Sprintf("idle=%s orphan=%v", v.idle.Round(time.Second), v.orphan)})
 		v.cancel()
 	}
 }
@@ -515,18 +537,29 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 	return id, nil
 }
 
-// filterEnv returns a copy of env with any entry whose key matches the prefix
-// removed. Used to drop pre-existing TELEGRAM_SPAWN_ID before stamping a new
-// one, so a nested daemon can't leak a stale id to its child.
-func filterEnv(env []string, prefix string) []string {
+// filterEnv returns a copy of env with any entry whose key matches one of the
+// prefixes removed. Used to drop a pre-existing TELEGRAM_SPAWN_ID /
+// MAX_THINKING_TOKENS / TELEGRAM_ADMIN_TOKEN before stamping a fresh value, so a
+// nested daemon can't leak a stale value to its child.
+func filterEnv(env []string, prefixes ...string) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
-		if !startsWith(e, prefix) {
+		if !hasAnyPrefix(e, prefixes) {
 			out = append(out, e)
 		}
 	}
 
 	return out
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if startsWith(s, p) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func startsWith(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
@@ -573,6 +606,8 @@ func (r *SpawnRunner) runSpawn(ctx context.Context, cancel context.CancelFunc, i
 		status := SpawnStatusDone
 		if err != nil {
 			status = SpawnStatusFailed
+
+			r.emit(Event{Type: "spawn_crashed", Severity: "warning", Subject: id, Detail: fmt.Sprintf("pid=%d exited non-zero: %v", proc.Pid(), err)})
 		}
 
 		r.releaseSlot(id, status)

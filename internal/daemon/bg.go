@@ -62,6 +62,7 @@ type BgRunner struct {
 	mu      sync.Mutex
 	tasks   map[string]*bgTask
 	perUser map[string][]time.Time
+	sink    EventSink
 }
 
 var (
@@ -208,6 +209,24 @@ func (r *BgRunner) reserveSlot(userID string) (string, error) {
 	return id, nil
 }
 
+// SetEventSink wires the anomaly-event sink (nil disables emission).
+func (r *BgRunner) SetEventSink(s EventSink) {
+	r.mu.Lock()
+	r.sink = s
+	r.mu.Unlock()
+}
+
+// emit sends e if a sink is wired (reads under lock; Emit is non-blocking).
+func (r *BgRunner) emit(e Event) {
+	r.mu.Lock()
+	sink := r.sink
+	r.mu.Unlock()
+
+	if sink != nil {
+		sink.Emit(e)
+	}
+}
+
 func (r *BgRunner) releaseSlot(id string, finalStatus BgTaskStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -346,6 +365,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 	proc, err := r.cmd.Start(ctx, workdir, r.cfg.ClaudeBin, args, env)
 	if err != nil {
 		r.editFinal(ctx, req.ChatID, progressMsgID, id, fmt.Sprintf("❌ Task %s failed to start: %v", id, err), 0)
+		r.emit(Event{Type: "bg_failed", Severity: "warning", Subject: id, Detail: fmt.Sprintf("failed to start: %v", err)})
 		r.releaseSlot(id, BgStatusFailed)
 
 		return
@@ -400,9 +420,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 
 			<-stderrDone
 
-			text := fmt.Sprintf("🛑 Task %s cancelled · ran %s", id, time.Since(state.startedAt).Round(time.Second))
-			r.editFinal(ctx, req.ChatID, progressMsgID, id, text, 0)
-			r.releaseSlot(id, BgStatusCancelled)
+			r.finalizeCancelled(ctx, req.ChatID, progressMsgID, id, state.startedAt)
 
 			return
 		case derr := <-doneCh:
@@ -410,7 +428,8 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 				_ = proc.Wait()
 
 				<-stderrDone
-				r.finalizeFailure(ctx, req.ChatID, progressMsgID, id, derr, stderrTail.String())
+
+				r.finalizeStreamFailure(ctx, req.ChatID, progressMsgID, id, state.startedAt, derr, stderrTail.String())
 
 				return
 			}
@@ -420,7 +439,8 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 				_ = proc.Wait()
 
 				<-stderrDone
-				r.finalizeFailure(ctx, req.ChatID, progressMsgID, id, errors.New("stream ended without result"), stderrTail.String())
+
+				r.finalizeStreamFailure(ctx, req.ChatID, progressMsgID, id, state.startedAt, errors.New("stream ended without result"), stderrTail.String())
 
 				return
 			}
@@ -529,7 +549,32 @@ func (r *BgRunner) finalizeFailure(ctx context.Context, chatID string, msgID int
 		}
 	}
 
+	r.emit(Event{Type: "bg_failed", Severity: "warning", Subject: id, Detail: err.Error()})
 	r.releaseSlot(id, BgStatusFailed)
+}
+
+// finalizeCancelled finalizes a task that ended because ctx was cancelled
+// (timeout or /bg cancel). It does NOT emit bg_failed — cancellation is an
+// expected terminal state, not an anomaly. Shared by the ctx.Done() branch and
+// the doneCh branch's ctx-cancelled guard (the stream can error *because* the
+// process was killed, and select may pick doneCh over ctx.Done in that race).
+func (r *BgRunner) finalizeCancelled(ctx context.Context, chatID string, msgID int, id string, startedAt time.Time) {
+	text := fmt.Sprintf("🛑 Task %s cancelled · ran %s", id, time.Since(startedAt).Round(time.Second))
+	r.editFinal(ctx, chatID, msgID, id, text, 0)
+	r.releaseSlot(id, BgStatusCancelled)
+}
+
+// finalizeStreamFailure routes a terminal stream outcome (error, or no result
+// event) to the cancelled or failed path depending on whether ctx was
+// cancelled. A cancellation never emits bg_failed. Extracted from runTask so it
+// stays under the cyclomatic-complexity cap.
+func (r *BgRunner) finalizeStreamFailure(ctx context.Context, chatID string, msgID int, id string, startedAt time.Time, err error, stderrTail string) {
+	if ctx.Err() != nil {
+		r.finalizeCancelled(ctx, chatID, msgID, id, startedAt)
+		return
+	}
+
+	r.finalizeFailure(ctx, chatID, msgID, id, err, stderrTail)
 }
 
 // stderrRing is a bounded byte buffer that drops the oldest data on overflow.

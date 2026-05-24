@@ -506,8 +506,8 @@ func (b *blockingBot) SendFile(_ context.Context, _, _ string, _ bot.SendOpts) (
 func (b *blockingBot) EditMessage(_ context.Context, _ string, _ int, _, _ string) (int, error) {
 	return 0, nil
 }
-func (b *blockingBot) React(_ context.Context, _ string, _ int, _ string) error  { return nil }
-func (b *blockingBot) DownloadFile(_ context.Context, _ string) (string, error)  { return "", nil }
+func (b *blockingBot) React(_ context.Context, _ string, _ int, _ string) error { return nil }
+func (b *blockingBot) DownloadFile(_ context.Context, _ string) (string, error) { return "", nil }
 func (b *blockingBot) BroadcastPermissionRequest(ctx context.Context, _, _ string) {
 	<-ctx.Done()
 	close(b.cancelled)

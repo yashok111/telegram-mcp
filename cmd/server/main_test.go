@@ -10,9 +10,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m,
+		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*HostClient).connsCleaner"),
+		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*Client).mCleaner"),
+		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*TCPDialer).tcpAddrsClean"),
+		goleak.IgnoreAnyFunction("github.com/mymmrac/telego.(*Bot).doLongPolling"),
+	)
+}
 
 func TestLoadDotEnv_setsMissingVars(t *testing.T) {
 	dir := t.TempDir()
@@ -131,6 +141,7 @@ func TestApplyForumChatID_unsetLeavesPersistedValueUntouched(t *testing.T) {
 	}))
 
 	_ = os.Unsetenv("TELEGRAM_FORUM_CHAT_ID")
+
 	require.NoError(t, applyForumChatID(store))
 
 	assert.EqualValues(t, -100999, store.Load().ForumChatID, "missing env preserves prior persisted value")

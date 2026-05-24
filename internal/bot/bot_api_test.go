@@ -247,6 +247,15 @@ type noopNotifier struct {
 	mu        sync.Mutex
 	delivered []deliveredCall
 	resolved  []resolvedCall
+	mutations []mutationCall
+
+	mutateApplied bool
+	mutateDetail  string
+}
+
+type mutationCall struct {
+	pendingID string
+	approve   bool
 }
 
 type deliveredCall struct {
@@ -278,6 +287,15 @@ func (n *noopNotifier) ResolvePermission(requestID, behavior string) {
 	defer n.mu.Unlock()
 
 	n.resolved = append(n.resolved, resolvedCall{requestID, behavior})
+}
+
+func (n *noopNotifier) ResolveMutation(_ context.Context, pendingID string, approve bool) (bool, string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.mutations = append(n.mutations, mutationCall{pendingID, approve})
+
+	return n.mutateApplied, n.mutateDetail
 }
 
 // ===== outbound API methods =====

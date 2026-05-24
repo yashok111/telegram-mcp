@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -36,21 +38,31 @@ type fakeBot struct {
 		retID     int
 		retErr    error
 	}
+	sentCalls []struct{ chatID, text string } // every SendMessage in order (sentMessage keeps only the last)
+
 	reactedErr     error
 	downloadResult string
 	downloadErr    error
 
-	broadcastSeen    []string                // request_ids
-	broadcastPrefix  []string                // prefix per broadcast
-	broadcastTargets []bot.PermissionTarget  // resolved target per call
+	broadcastSeen    []string               // request_ids
+	broadcastPrefix  []string               // prefix per broadcast
+	broadcastTargets []bot.PermissionTarget // resolved target per call
 
 	chatActions []struct{ chatID, action string }
+
+	mutationConfirms []struct {
+		target             bot.PermissionTarget
+		pendingID, summary string
+	}
+	confirmRetID  int
+	confirmRetErr error
 }
 
 func (b *fakeBot) SendMessage(_ context.Context, chatID, text string, opts bot.SendOpts) (int, error) {
 	b.sentMessage.chatID = chatID
 	b.sentMessage.text = text
 	b.sentMessage.opts = opts
+	b.sentCalls = append(b.sentCalls, struct{ chatID, text string }{chatID, text})
 
 	return b.sentMessage.retID, b.sentMessage.retErr
 }
@@ -89,6 +101,15 @@ func (b *fakeBot) SendPermissionPrompt(_ context.Context, target bot.PermissionT
 	b.broadcastSeen = append(b.broadcastSeen, reqID)
 	b.broadcastPrefix = append(b.broadcastPrefix, prefix)
 	b.broadcastTargets = append(b.broadcastTargets, target)
+}
+
+func (b *fakeBot) BroadcastMutationConfirm(_ context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error) {
+	b.mutationConfirms = append(b.mutationConfirms, struct {
+		target             bot.PermissionTarget
+		pendingID, summary string
+	}{target, pendingID, summary})
+
+	return b.confirmRetID, b.confirmRetErr
 }
 
 func newHandlersFixture(t *testing.T) (*Handlers, *fakeBot, *Router, *access.Store) {
@@ -533,6 +554,141 @@ func TestHandlePeersIdleSecondsFromLastOutbound(t *testing.T) {
 	require.Len(t, peers, 1)
 	assert.LessOrEqual(t, peers[0].IdleSeconds, 1, "just recorded outbound — idle ~0s")
 }
+
+func TestHandleHelloRoleAdminRejectedWithoutToken(t *testing.T) {
+	h, _, r, _ := newHandlersFixture(t)
+	h.SetAdminToken("secret-xyz")
+
+	c := &ipc.Conn{}
+
+	res, rpcErr := h.HandleHello(context.Background(), c, raw(t, map[string]any{
+		"shim_pid": 4242,
+		"role":     "admin",
+	}))
+	require.Nil(t, rpcErr)
+
+	m, _ := res.(map[string]any)
+	id, _ := m["shim_id"].(string)
+	require.NotEmpty(t, id)
+
+	storedRole, _ := c.Meta.Load(metaRole)
+	assert.Empty(t, storedRole, "rogue admin claim must downgrade to user role")
+
+	r.Register(&Shim{ID: id, Notify: func(string, any) error { return nil }})
+
+	_, ok := r.ResolveAlias(AdminAlias)
+	assert.False(t, ok, "rogue shim must not bind AdminAlias")
+}
+
+func TestHandleHelloRoleAdminRejectedWithWrongToken(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+	h.SetAdminToken("secret-xyz")
+
+	c := &ipc.Conn{}
+
+	_, rpcErr := h.HandleHello(context.Background(), c, raw(t, map[string]any{
+		"shim_pid":    4242,
+		"role":        "admin",
+		"admin_token": "wrong",
+	}))
+	require.Nil(t, rpcErr)
+
+	storedRole, _ := c.Meta.Load(metaRole)
+	assert.Empty(t, storedRole, "wrong token must downgrade to user role")
+}
+
+func TestHandleHelloRoleAdminAcceptedWithCorrectToken(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+	h.SetAdminToken("secret-xyz")
+
+	c := &ipc.Conn{}
+
+	_, rpcErr := h.HandleHello(context.Background(), c, raw(t, map[string]any{
+		"shim_pid":    4242,
+		"role":        "admin",
+		"admin_token": "secret-xyz",
+	}))
+	require.Nil(t, rpcErr)
+
+	storedRole, _ := c.Meta.Load(metaRole)
+	assert.Equal(t, "admin", storedRole, "correct token must keep role=admin")
+}
+
+func TestHandleHelloRoleAdminDisabledWhenTokenUnset(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+
+	c := &ipc.Conn{}
+
+	_, rpcErr := h.HandleHello(context.Background(), c, raw(t, map[string]any{
+		"shim_pid":    4242,
+		"role":        "admin",
+		"admin_token": "any-value",
+	}))
+	require.Nil(t, rpcErr)
+
+	storedRole, _ := c.Meta.Load(metaRole)
+	assert.Empty(t, storedRole, "no token configured means no role=admin can be claimed")
+}
+
+func TestHandleHelloOpensShimLogBeforeReturn(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+
+	logsDir := t.TempDir()
+	sink, err := NewShimLogs(logsDir, 0)
+	require.NoError(t, err)
+	t.Cleanup(sink.CloseAll)
+	h.SetShimLogs(sink)
+
+	c := &ipc.Conn{}
+
+	res, rpcErr := h.HandleHello(context.Background(), c, raw(t, map[string]any{
+		"shim_pid": 7777,
+		"label":    "early-log",
+	}))
+	require.Nil(t, rpcErr)
+
+	m, ok := res.(map[string]any)
+	require.True(t, ok)
+
+	id, _ := m["shim_id"].(string)
+	require.NotEmpty(t, id)
+
+	require.True(t, sink.IsOpen(id), "shim log file must open before HandleHello returns")
+
+	sink.Write(id, []byte(`{"probe":1}`+"\n"))
+
+	raw, err := os.ReadFile(filepath.Join(logsDir, id+".log"))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"probe":1`, "open handle must be writable")
+}
+
+func TestGateDeniedEmitsUnauthorizedDMEvent(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+	sink := &recordingSink{}
+	h.SetEventSink(sink)
+
+	rpcErr := h.gate("999")
+	require.NotNil(t, rpcErr)
+	assert.Equal(t, ipc.CodeNotAllowlisted, rpcErr.Code)
+	assert.Equal(t, 1, sink.typeCount("unauthorized_dm"))
+}
+
+func TestGateAllowedDoesNotEmitEvent(t *testing.T) {
+	h, _, _, _ := newHandlersFixture(t)
+	sink := &recordingSink{}
+	h.SetEventSink(sink)
+
+	rpcErr := h.gate("123")
+	assert.Nil(t, rpcErr)
+	assert.Equal(t, 0, sink.typeCount("unauthorized_dm"))
+}
+
+// TestGoodbyeNotifyStampsMetaFlag — skipped at unit level.
+// ipc.Server.notifyHandlers is unexported; Register takes *ipc.Server (not an
+// interface), so the registered closure cannot be extracted or intercepted in
+// this package's tests without either a live unix socket or an export_test.go
+// shim that the task scope doesn't allow. Covered by Wave 3 integration test
+// (admin_ipc_test.go) which drives a full daemon round-trip over the socket.
 
 func TestHandleHelloRecordsWorkdirAndSession(t *testing.T) {
 	h, _, _, _ := newHandlersFixture(t)
