@@ -77,6 +77,7 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 		forumChat int64
 		reuseKey  string
 		haveKey   bool
+		oldName   string
 	)
 
 	if err := f.store.Mutate(func(st *access.State) bool {
@@ -117,6 +118,7 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 		meta.LastShimID = shim.ID
 		st.TopicsByThread[tidStr] = meta
 		threadID = tid
+		oldName = meta.Name
 
 		return true
 	}); err != nil {
@@ -128,7 +130,9 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 	}
 
 	if threadID != 0 {
+		f.resyncName(ctx, forumChat, threadID, oldName, shim)
 		slog.Info("topic reused", "shim_id", shim.ID, "thread_id", threadID, "reuse_key", reuseKey)
+
 		return threadID, nil
 	}
 
@@ -154,6 +158,7 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 			ThreadID:   tid,
 			Workdir:    shim.Workdir,
 			Label:      shim.Label,
+			Name:       name,
 			LastShimID: shim.ID,
 			LockedBy:   shim.ID,
 		}
@@ -188,6 +193,50 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 	slog.Info("topic created", "shim_id", shim.ID, "thread_id", tid, "name", name, "reuse_key", reuseKey)
 
 	return tid, nil
+}
+
+// resyncName re-pushes the topic title when a reused topic's stored name has
+// diverged from the reattaching shim's — typically an alias migration after
+// the original owner disconnected, which otherwise leaves two topics showing
+// an identical frozen title. Cosmetic: a failed edit or save is logged but
+// never propagated, so a stale title can't drop the shim to DM-mode. The
+// stored name is updated only after EditForumTopic succeeds, so a failed push
+// retries on the next reuse.
+func (f *Forum) resyncName(ctx context.Context, forumChat int64, threadID int, oldName string, shim *Shim) {
+	newName := buildTopicName(shim)
+	if newName == oldName {
+		return
+	}
+
+	if err := f.bot.EditForumTopic(ctx, forumChat, threadID, newName); err != nil {
+		slog.Warn("topic name resync failed — keeping stale title",
+			"shim_id", shim.ID, "thread_id", threadID, "name", newName, "err", err)
+
+		return
+	}
+
+	slog.Info("topic name resynced",
+		"shim_id", shim.ID, "thread_id", threadID, "old_name", oldName, "new_name", newName)
+
+	if err := f.store.Mutate(func(st *access.State) bool {
+		tidStr := strconv.Itoa(threadID)
+
+		meta, ok := st.TopicsByThread[tidStr]
+		if !ok {
+			slog.Warn("topic name resync: thread entry gone before persist",
+				"shim_id", shim.ID, "thread_id", threadID, "name", newName)
+
+			return false
+		}
+
+		meta.Name = newName
+		st.TopicsByThread[tidStr] = meta
+
+		return true
+	}); err != nil {
+		slog.Error("topic name resync: state save failed",
+			"shim_id", shim.ID, "thread_id", threadID, "name", newName, "err", err)
+	}
 }
 
 // ReleaseLock clears LockedBy on every topic owned by shimID so the next
