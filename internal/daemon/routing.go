@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,10 @@ type Shim struct {
 	Workdir     string
 	CCSessionID string
 	SpawnID     string
+	// Role is "admin" for the singleton admin-agent shim, "" (default) for
+	// user shims. Routing treats admin specially: DMs without explicit
+	// addressing fall through to it before LRU.
+	Role string
 	// TopicID is the forum thread_id allocated for this shim when
 	// access.State.ForumChatID is configured; zero means DM/non-forum mode.
 	TopicID     int
@@ -164,7 +169,7 @@ func (r *Router) Register(s *Shim) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	alias := r.allocAlias()
+	alias := r.allocAliasForRole(s.Role)
 	s.Alias = alias
 	r.aliases[alias] = s.ID
 	r.shimAlias[s.ID] = alias
@@ -182,45 +187,31 @@ func (r *Router) Register(s *Shim) {
 	}
 }
 
-// BindTopic associates a forum thread_id with shimID after the shim is
-// already registered. Called by the daemon after Forum.AllocateOrReuse
-// returns a non-zero thread_id (Register happens first so resolveReuseKey
-// can see the freshly-allocated alias).
+// allocAliasForRole returns the role-appropriate alias for a freshly-connected
+// shim. Role "admin" claims AdminAlias, evicting any prior holder (last hello
+// wins so a respawned admin-agent can resume routing without operator action).
+// All other roles fall through to the numeric allocAlias scheme. Caller holds
+// r.mu (write).
 //
-// If threadID is already owned by a different shim, the prior owner's
-// TopicID is cleared so its eventual Drop doesn't delete the new owner's
-// entry — without that guard, the old shim's Drop unwinds via s.TopicID
-// and wipes out the freshly-bound topicOwners[threadID] mapping.
-func (r *Router) BindTopic(shimID string, threadID int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if threadID <= 0 {
-		return
+// Eviction is full: dropPriorAdminLocked clears the old admin's entries in
+// every Router map. A surface-only delete (just shimAlias) would leave the
+// prior admin in r.shims/r.lru and break lraPick + Snapshot consistency.
+func (r *Router) allocAliasForRole(role string) string {
+	if role != "admin" {
+		return r.allocAlias()
 	}
 
-	s, ok := r.shims[shimID]
-	if !ok {
-		return
+	if priorID, exists := r.aliases[AdminAlias]; exists {
+		slog.Warn("AdminAlias reassigned — evicting prior holder", "prior_shim_id", priorID)
+		r.dropLocked(priorID)
 	}
 
-	if prevOwner, exists := r.topicOwners[threadID]; exists && prevOwner != shimID {
-		slog.Warn("BindTopic: reassigning topic from prior owner",
-			"thread_id", threadID, "prev_shim", prevOwner, "new_shim", shimID)
-
-		if prevShim, ok := r.shims[prevOwner]; ok {
-			prevShim.TopicID = 0
-		}
-	}
-
-	s.TopicID = threadID
-	r.topicOwners[threadID] = shimID
+	return AdminAlias
 }
 
-func (r *Router) Drop(id string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+// dropLocked is the under-the-lock equivalent of Drop. Used internally where
+// the caller already holds r.mu (write).
+func (r *Router) dropLocked(id string) {
 	if alias, ok := r.shimAlias[id]; ok {
 		delete(r.aliases, alias)
 		delete(r.shimAlias, id)
@@ -266,6 +257,48 @@ func (r *Router) Drop(id string) {
 			delete(r.replyOwners, chat)
 		}
 	}
+}
+
+// BindTopic associates a forum thread_id with shimID after the shim is
+// already registered. Called by the daemon after Forum.AllocateOrReuse
+// returns a non-zero thread_id (Register happens first so resolveReuseKey
+// can see the freshly-allocated alias).
+//
+// If threadID is already owned by a different shim, the prior owner's
+// TopicID is cleared so its eventual Drop doesn't delete the new owner's
+// entry — without that guard, the old shim's Drop unwinds via s.TopicID
+// and wipes out the freshly-bound topicOwners[threadID] mapping.
+func (r *Router) BindTopic(shimID string, threadID int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if threadID <= 0 {
+		return
+	}
+
+	s, ok := r.shims[shimID]
+	if !ok {
+		return
+	}
+
+	if prevOwner, exists := r.topicOwners[threadID]; exists && prevOwner != shimID {
+		slog.Warn("BindTopic: reassigning topic from prior owner",
+			"thread_id", threadID, "prev_shim", prevOwner, "new_shim", shimID)
+
+		if prevShim, ok := r.shims[prevOwner]; ok {
+			prevShim.TopicID = 0
+		}
+	}
+
+	s.TopicID = threadID
+	r.topicOwners[threadID] = shimID
+}
+
+func (r *Router) Drop(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.dropLocked(id)
 }
 
 // RecordOutbound updates chat ownership (last-writer-wins) and, when messageID
@@ -387,6 +420,7 @@ func (r *Router) Snapshot() []ShimInfo {
 			ConnectedAt:  s.ConnectedAt,
 			LastOutbound: r.lastOutbound[s.ID],
 			PinnedChats:  pinsByShim[s.ID],
+			Role:         s.Role,
 		})
 	}
 
@@ -488,6 +522,46 @@ func (r *Router) ResolveShimByPrefix(prefix string) (*Shim, error) {
 	return found, nil
 }
 
+// ResolveShim resolves an admin-supplied target to a single connected shim,
+// trying an exact alias match first (e.g. "s2", "admin") then a unique shim_id
+// prefix. Alias wins over a shim_id that merely starts with the same text.
+// Empty target, no match → ErrShimNotFound; multiple prefix matches →
+// ErrAmbiguousShimPrefix. Used by the admin mutate tools (label/pin/evict).
+func (r *Router) ResolveShim(target string) (*Shim, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if target == "" {
+		return nil, ErrShimNotFound
+	}
+
+	if id, ok := r.aliases[target]; ok {
+		if s, ok := r.shims[id]; ok {
+			return s, nil
+		}
+	}
+
+	// Prefix scan inlined rather than delegating to ResolveShimByPrefix: that
+	// method takes its own RLock, and sync.RWMutex is not reentrant.
+	var found *Shim
+
+	for id, s := range r.shims {
+		if strings.HasPrefix(id, target) {
+			if found != nil {
+				return nil, ErrAmbiguousShimPrefix
+			}
+
+			found = s
+		}
+	}
+
+	if found == nil {
+		return nil, ErrShimNotFound
+	}
+
+	return found, nil
+}
+
 // ShimByTopic returns the shim that currently owns the given forum thread,
 // nil/false when no one does. Used by TopicCloser to find which shim a
 // `/topic close` should shutdown.
@@ -516,8 +590,13 @@ func (r *Router) RouteInbound(chatID string) (*Shim, bool) {
 	return r.routeInboundLocked(chatID)
 }
 
-// routeInboundLocked is the pin→owner→LRA→LRU resolver. Caller holds r.mu
-// (write lock — pin expiry may mutate r.pins).
+// routeInboundLocked is the pin→owner→DM-admin→LRA→LRU resolver. Caller
+// holds r.mu (write lock — pin expiry may mutate r.pins).
+//
+// DM-admin fallback fires only in private chats (positive chatID) so groups
+// keep their mention-only / LRU semantics. The admin-agent acts as the catch
+// for an operator's unaddressed DM message instead of going to whichever
+// user shim happens to be LRU.
 func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 	if p, ok := r.pins[chatID]; ok {
 		if time.Now().After(p.expiresAt) {
@@ -539,10 +618,20 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 			return s, true
 		}
 
-		slog.Warn("RouteInbound owner gone", "chat_id", chatID, "stale_owner", owner)
+		slog.Warn("RouteInbound owner gone, clearing stale pin", "chat_id", chatID, "stale_owner", owner)
+		delete(r.chatOwners, chatID)
 	}
 
-	if len(r.shims) >= 2 {
+	if isDMChatID(chatID) {
+		if admin, ok := r.adminShimLocked(); ok {
+			slog.Info("RouteInbound DM-admin fallback", "chat_id", chatID, "shim_id", admin.ID)
+			r.recordAssignmentLocked(admin.ID)
+
+			return admin, true
+		}
+	}
+
+	if userCount := r.countUserShimsLocked(); userCount >= 2 {
 		if s, ok := r.lraPickLocked(); ok {
 			slog.Info("RouteInbound LRA", "chat_id", chatID, "shim_id", s.ID)
 			r.recordAssignmentLocked(s.ID)
@@ -551,18 +640,61 @@ func (r *Router) routeInboundLocked(chatID string) (*Shim, bool) {
 		}
 	}
 
-	if len(r.lru) == 0 {
-		slog.Warn("RouteInbound no shims", "chat_id", chatID)
+	for _, id := range r.lru {
+		s, ok := r.shims[id]
+		if !ok || s.Role == "admin" {
+			continue
+		}
+
+		slog.Info("RouteInbound LRU fallback", "chat_id", chatID, "shim_id", s.ID)
+		r.recordAssignmentLocked(s.ID)
+
+		return s, true
+	}
+
+	slog.Warn("RouteInbound no user shims", "chat_id", chatID, "admin_present", r.aliases[AdminAlias] != "")
+
+	return nil, false
+}
+
+// countUserShimsLocked returns the number of non-admin shims. Caller holds
+// r.mu.
+func (r *Router) countUserShimsLocked() int {
+	var n int
+
+	for _, s := range r.shims {
+		if s.Role != "admin" {
+			n++
+		}
+	}
+
+	return n
+}
+
+// adminShimLocked returns the shim currently bound to AdminAlias. Caller
+// holds r.mu.
+func (r *Router) adminShimLocked() (*Shim, bool) {
+	id, ok := r.aliases[AdminAlias]
+	if !ok {
 		return nil, false
 	}
 
-	s, ok := r.shims[r.lru[0]]
-	if ok {
-		slog.Info("RouteInbound LRU fallback", "chat_id", chatID, "shim_id", s.ID, "lru", r.lru)
-		r.recordAssignmentLocked(s.ID)
-	}
+	s, ok := r.shims[id]
 
 	return s, ok
+}
+
+// isDMChatID reports whether chatID identifies a Telegram private chat. Bot
+// API encodes private chats as positive int64, groups and channels as
+// negative. Unparseable input is treated as non-DM (safer default — a malformed
+// id should not magically reach the admin agent).
+func isDMChatID(chatID string) bool {
+	n, err := strconv.ParseInt(strings.TrimSpace(chatID), 10, 64)
+	if err != nil {
+		return false
+	}
+
+	return n > 0
 }
 
 // recordAssignmentLocked stamps lastAssigned for the picked shim so the LRA
@@ -571,10 +703,11 @@ func (r *Router) recordAssignmentLocked(shimID string) {
 	r.lastAssigned[shimID] = time.Now()
 }
 
-// lraPickLocked picks the connected shim with the smallest
+// lraPickLocked picks the connected non-admin shim with the smallest
 // max(lastOutbound, lastAssigned) timestamp. Ties broken lexicographically
-// by shim ID. Returns (nil, false) when no shims are connected.
-// Caller holds r.mu.
+// by shim ID. Admin is excluded so an unaddressed group message never
+// rotates onto it (admin participates in groups via @admin mention only).
+// Returns (nil, false) when no user shims are connected. Caller holds r.mu.
 func (r *Router) lraPickLocked() (*Shim, bool) {
 	if len(r.shims) == 0 {
 		return nil, false
@@ -586,6 +719,10 @@ func (r *Router) lraPickLocked() (*Shim, bool) {
 	)
 
 	for id, s := range r.shims {
+		if s.Role == "admin" {
+			continue
+		}
+
 		t := r.lastOutbound[id]
 		if a := r.lastAssigned[id]; a.After(t) {
 			t = a
@@ -601,6 +738,10 @@ func (r *Router) lraPickLocked() (*Shim, bool) {
 
 		best = s
 		bestT = t
+	}
+
+	if best == nil {
+		return nil, false
 	}
 
 	return best, true
@@ -661,7 +802,8 @@ func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID, threadI
 
 // resolveMentionsLocked translates mention tokens into Shim pointers.
 //
-//	@all     → every connected shim (broadcast)
+//	@all     → every connected user shim (admin excluded — use @admin explicitly)
+//	@admin   → reserved-alias match for the admin-agent shim
 //	@<alias> → exact alias match; alias wins over a same-named label
 //	@<label> → case-insensitive Shim.Label match; multiple matches fan out
 //
@@ -673,9 +815,12 @@ func (r *Router) resolveMentionsLocked(chatID string, mentions []string) []*Shim
 	for _, m := range mentions {
 		if m == "all" {
 			for _, id := range r.lru {
-				if s, ok := r.shims[id]; ok {
-					out = addUnseenShim(seen, out, s)
+				s, ok := r.shims[id]
+				if !ok || s.Role == "admin" {
+					continue
 				}
+
+				out = addUnseenShim(seen, out, s)
 			}
 
 			continue
@@ -848,12 +993,43 @@ func (r *Router) LookupPermissionDetails(reqID string) (PermDetails, bool) {
 	return d, ok
 }
 
-// ConnectedCount is used by the idle-exit timer.
+// AdminNotify pushes a notification to the connected admin-agent shim. Returns
+// false when no admin is connected — the caller's event is still persisted by
+// the EventBus regardless. Lock is released before the Notify call (never hold
+// r.mu across IPC IO).
+func (r *Router) AdminNotify(method string, params any) bool {
+	var notify func(method string, params any) error
+
+	r.mu.RLock()
+
+	if s, ok := r.adminShimLocked(); ok {
+		notify = s.Notify
+	}
+
+	r.mu.RUnlock()
+
+	if notify == nil {
+		return false
+	}
+
+	if err := notify(method, params); err != nil {
+		slog.Warn("admin notify failed", "method", method, "err", err)
+
+		return false
+	}
+
+	return true
+}
+
+// ConnectedCount returns the number of connected user shims. The admin-agent
+// is excluded so the idle-exit timer fires after the last *user* session
+// leaves — the daemon supervisor restarts admin on every boot, so its
+// presence shouldn't keep the daemon alive forever.
 func (r *Router) ConnectedCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return len(r.shims)
+	return r.countUserShimsLocked()
 }
 
 func prepend(xs []string, x string) []string {

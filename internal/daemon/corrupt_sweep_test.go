@@ -66,6 +66,7 @@ func TestCorruptSweepRunExitsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
 	go func() {
 		cs.Run(ctx)
 		close(done)

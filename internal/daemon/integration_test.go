@@ -83,6 +83,21 @@ func (t *tgFake) chatActionCount() int {
 	return len(t.chatActions)
 }
 
+// sendBodyContains reports whether any recorded sendMessage body (re-marshalled
+// to JSON, so nested reply_markup/callback_data is included) contains substr.
+func (t *tgFake) sendBodyContains(substr string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, body := range t.sends {
+		if raw, err := json.Marshal(body); err == nil && strings.Contains(string(raw), substr) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (t *tgFake) reactionCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

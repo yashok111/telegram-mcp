@@ -113,6 +113,7 @@ func TestTopicSweep_deleteFailureRetainsInQueue(t *testing.T) {
 	b.failFirst = true
 
 	old := time.Now().Add(-10 * time.Second).Unix()
+
 	require.NoError(t, store.Mutate(func(st *access.State) bool {
 		st.ClosedTopics = []access.ClosedTopic{
 			{ThreadID: 42, ClosedAt: old},
@@ -190,6 +191,7 @@ func TestTopicSweep_Run_disabledOnNonPositiveDurations(t *testing.T) {
 	s := NewTopicSweep(store, &fakeSweepBot{}, 0, 10*time.Millisecond)
 
 	done := make(chan struct{})
+
 	go func() {
 		s.Run(context.Background())
 		close(done)

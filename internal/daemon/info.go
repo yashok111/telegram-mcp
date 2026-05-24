@@ -15,6 +15,7 @@ type ShimInfo struct {
 	ConnectedAt  time.Time
 	LastOutbound time.Time
 	PinnedChats  []string
+	Role         string
 }
 
 // IDPrefix returns the first 8 hex chars (or the full ID if shorter). Used as

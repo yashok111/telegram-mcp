@@ -35,6 +35,25 @@ func TestRouterRecordOutboundAndRouteInbound(t *testing.T) {
 	assert.Equal(t, "a", got.ID)
 }
 
+// TestRouteInboundClearsStaleOwner is a white-box defensive check: dropLocked
+// normally clears chatOwners, but if a stale owner entry ever survives (points
+// to an unregistered shim), RouteInbound must self-heal by deleting it instead
+// of re-warning on every subsequent inbound.
+func TestRouteInboundClearsStaleOwner(t *testing.T) {
+	r := NewRouter()
+	r.mu.Lock()
+	r.chatOwners["chat-x"] = "ghost" // owner not in r.shims
+	r.mu.Unlock()
+
+	_, ok := r.RouteInbound("chat-x")
+	assert.False(t, ok, "no live shims => no route")
+
+	r.mu.RLock()
+	_, stillThere := r.chatOwners["chat-x"]
+	r.mu.RUnlock()
+	assert.False(t, stillThere, "stale owner entry must be cleared")
+}
+
 func TestRouterLRATieBreakLex(t *testing.T) {
 	r := NewRouter()
 	a := &Shim{ID: "a"}

@@ -2,8 +2,16 @@ package daemon
 
 import "strconv"
 
+// AdminAlias is the reserved alias for the persistent admin-agent shim. The
+// admin-agent registers via hello with Role="admin"; allocAlias never returns
+// this string because user shims only get "sN" (n>0). Centralizing the
+// literal here keeps routing, mention resolution, and reservation guards
+// referring to the same identifier.
+const AdminAlias = "admin"
+
 // allocAlias returns the lowest unused positive integer alias of the form "sN".
-// Caller must hold r.mu (write).
+// Caller must hold r.mu (write). The "sN" scheme structurally cannot return
+// AdminAlias, so user shims and the admin shim live in disjoint namespaces.
 func (r *Router) allocAlias() string {
 	for n := 1; ; n++ {
 		alias := "s" + strconv.Itoa(n)

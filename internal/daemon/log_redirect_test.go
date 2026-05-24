@@ -75,9 +75,11 @@ func TestLoggerRotateReplacesPriorBackup(t *testing.T) {
 	defer l.Close()
 
 	_, _ = os.Stderr.WriteString("gen-1\n")
+
 	require.NoError(t, l.Rotate())
 
 	_, _ = os.Stderr.WriteString("gen-2\n")
+
 	require.NoError(t, l.Rotate())
 
 	// Only one .1 should exist (gen-2 replaced gen-1). No .2 should exist.
@@ -110,6 +112,7 @@ func TestMaybeRotateRespectsThreshold(t *testing.T) {
 	for i := range big {
 		big[i] = 'x'
 	}
+
 	_, _ = os.Stderr.Write(big)
 
 	rotated, err = l.MaybeRotate()
@@ -145,6 +148,7 @@ func TestRunExitsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
 	go func() {
 		l.Run(ctx, 50*time.Millisecond)
 		close(done)
@@ -182,10 +186,12 @@ func TestSlogWritesToRotatedFile(t *testing.T) {
 
 	l, err := OpenLog(path, 1024)
 	require.NoError(t, err)
+
 	defer l.Close()
 
 	// slog handler captured at the time setupSlog would have been called.
 	prev := slog.Default()
+
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
@@ -214,6 +220,7 @@ func TestRotateRestoresOnOpenFailure(t *testing.T) {
 
 	l, err := OpenLog(path, 1024)
 	require.NoError(t, err)
+
 	defer l.Close()
 
 	_, _ = os.Stderr.WriteString("data\n")
@@ -254,10 +261,10 @@ func TestRunNoopWhenMaxBytesZero(t *testing.T) {
 
 	defer l.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	done := make(chan struct{})
+
 	go func() {
 		l.Run(ctx, time.Hour) // long interval; should return immediately
 		close(done)

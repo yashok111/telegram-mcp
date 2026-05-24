@@ -169,6 +169,7 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 				slog.Warn("forum: reuse_key race — duplicate topic created",
 					"reuse_key", reuseKey, "winner_thread_id", tid, "orphan_thread_id", prev)
 			}
+
 			st.TopicsByReuseKey[reuseKey] = tid
 		}
 
@@ -180,6 +181,7 @@ func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
 		// (or re-link by editing access.json) instead of orphaning silently.
 		slog.Error("forum: orphan topic — created in Telegram but state save failed",
 			"thread_id", tid, "forum_chat_id", forumChat, "shim_id", shim.ID, "name", name, "err", err)
+
 		return 0, fmt.Errorf("forum: register save (orphan thread_id=%d): %w", tid, err)
 	}
 
@@ -199,6 +201,7 @@ func (f *Forum) ReleaseLock(shimID string) {
 		}
 
 		changed := false
+
 		for tidStr, meta := range st.TopicsByThread {
 			if meta.LockedBy != shimID {
 				continue

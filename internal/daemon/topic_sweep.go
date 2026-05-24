@@ -47,6 +47,7 @@ func (s *TopicSweep) Run(ctx context.Context) {
 	if s.tickInterval <= 0 || s.purgeAfter <= 0 {
 		slog.Info("topic sweep disabled (interval or purge_after <= 0)",
 			"interval", s.tickInterval, "purge_after", s.purgeAfter)
+
 		return
 	}
 
@@ -74,6 +75,7 @@ func (s *TopicSweep) sweep(ctx context.Context) {
 	cutoff := time.Now().Add(-s.purgeAfter).Unix()
 
 	var expired []access.ClosedTopic
+
 	for _, ct := range st.ClosedTopics {
 		if ct.ClosedAt <= cutoff {
 			expired = append(expired, ct)
@@ -91,6 +93,7 @@ func (s *TopicSweep) sweep(ctx context.Context) {
 		if err := s.bot.DeleteForumTopic(ctx, st.ForumChatID, ct.ThreadID); err != nil {
 			slog.Warn("topic sweep: delete failed (retain in queue for next tick)",
 				"thread_id", ct.ThreadID, "err", err)
+
 			continue
 		}
 

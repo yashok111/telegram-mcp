@@ -13,17 +13,17 @@ import (
 	"github.com/yakov/telegram-mcp/internal/access"
 )
 
-func writeSessionFile(t *testing.T, dir string, name string, shimPID int) string {
+func writeSessionFile(t *testing.T, dir, name string, shimPID int) string {
 	t.Helper()
 
 	full := filepath.Join(dir, name)
 	payload := map[string]any{
-		"alias":     "s1",
-		"shim_pid":  shimPID,
-		"cc_pid":    9999,
-		"workdir":   "/tmp",
-		"mode":      "shim",
-		"shim_id":   "deadbeef",
+		"alias":      "s1",
+		"shim_pid":   shimPID,
+		"cc_pid":     9999,
+		"workdir":    "/tmp",
+		"mode":       "shim",
+		"shim_id":    "deadbeef",
 		"started_at": time.Now(),
 	}
 
@@ -127,6 +127,7 @@ func TestSessionsSweepRunExitsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
 	go func() {
 		sw.Run(ctx)
 		close(done)

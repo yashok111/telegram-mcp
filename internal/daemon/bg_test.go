@@ -65,6 +65,7 @@ func TestBgRunner_PerUserMapDropsStaleKeys(t *testing.T) {
 
 	// Seed 5 users with stale timestamps (>1h ago).
 	stale := time.Now().Add(-2 * time.Hour)
+
 	r.mu.Lock()
 	for i := range 5 {
 		uid := fmt.Sprintf("u_stale_%d", i)
@@ -82,6 +83,7 @@ func TestBgRunner_PerUserMapDropsStaleKeys(t *testing.T) {
 		_, present := r.perUser[uid]
 		assert.False(t, present, "%s should have been GC'd", uid)
 	}
+
 	_, presentFresh := r.perUser["u_fresh"]
 	assert.True(t, presentFresh)
 	r.mu.Unlock()
@@ -199,6 +201,13 @@ func (b *lockedBot) SendPermissionPrompt(ctx context.Context, target bot.Permiss
 	defer b.mu.Unlock()
 
 	b.fb.SendPermissionPrompt(ctx, target, prefix, reqID, tool)
+}
+
+func (b *lockedBot) BroadcastMutationConfirm(ctx context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.fb.BroadcastMutationConfirm(ctx, target, pendingID, summary)
 }
 
 func (b *lockedBot) SendChatAction(ctx context.Context, chatID, action string) error {
@@ -583,6 +592,124 @@ func TestBgRunner_RunTaskZeroValuesPreserveCurrentBehavior(t *testing.T) {
 	}
 
 	assert.Empty(t, call.env, "env must be nil/empty when ThinkingTokens is 0")
+}
+
+func TestBgRunner_StartFailureEmitsBgFailed(t *testing.T) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return nil, errors.New("exec not found")
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(42, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            time.Second,
+	}, fb, cmder)
+
+	sink := &recordingSink{}
+	r.SetEventSink(sink)
+
+	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return sink.typeCount("bg_failed") == 1 }, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestBgRunner_StreamFailureEmitsBgFailed(t *testing.T) {
+	pr, pw := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	waitCh := make(chan error, 1)
+
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return &fakeProcess{
+			stdout: pr,
+			stderr: stderrR,
+			waitCh: waitCh,
+			signal: func(os.Signal) error { return nil },
+		}, nil
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(55, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            5 * time.Second,
+	}, fb, cmder)
+
+	sink := &recordingSink{}
+	r.SetEventSink(sink)
+
+	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	go func() {
+		defer pw.Close()
+		defer stderrW.Close()
+	}()
+
+	waitCh <- nil
+
+	require.Eventually(t, func() bool { return sink.typeCount("bg_failed") == 1 }, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestBgRunner_CancelDoesNotEmitBgFailed(t *testing.T) {
+	pr, pw := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	waitCh := make(chan error, 1)
+
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return &fakeProcess{
+			stdout: pr,
+			stderr: stderrR,
+			waitCh: waitCh,
+			signal: func(os.Signal) error { return nil },
+		}, nil
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(77, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            5 * time.Second,
+	}, fb, cmder)
+
+	sink := &recordingSink{}
+	r.SetEventSink(sink)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	// Cancel, then make the stream error out as a consequence of the kill. This
+	// reliably drives the doneCh branch with ctx already cancelled — the exact
+	// path that had no guard and emitted a false bg_failed before the fix.
+	require.NoError(t, r.Cancel(id))
+
+	go func() {
+		_ = pw.CloseWithError(errors.New("killed"))
+		_ = stderrW.Close()
+	}()
+
+	waitCh <- errors.New("signal: killed")
+
+	// Whichever select branch wins, a cancelled task must terminate WITHOUT
+	// emitting bg_failed (the false-anomaly the ctx.Err() guard prevents).
+	require.Eventually(t, func() bool {
+		for _, ti := range r.List() {
+			if ti.ID == id {
+				return false
+			}
+		}
+
+		return true
+	}, 2*time.Second, 20*time.Millisecond, "cancelled task must reach a terminal state")
+
+	assert.Equal(t, 0, sink.typeCount("bg_failed"), "cancelled task must not emit bg_failed")
 }
 
 func TestBgRunner_RunTaskDedupesThinkingTokensEnv(t *testing.T) {

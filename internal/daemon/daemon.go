@@ -31,6 +31,28 @@ type Daemon struct {
 	Typing     *TypingTracker // nil disables typing-refresh goroutine
 	Forum      *Forum         // nil disables forum-topic allocation; required only when ForumChatID is configured
 	TopicSweep *TopicSweep    // nil disables periodic closed-topic deletion
+	ShimLogs   *ShimLogs      // nil disables per-shim log files
+	ShimsSweep *ShimsSweep    // nil disables shims/*.log retention sweep
+
+	// EventBus persists anomaly events and pushes them to the admin-agent.
+	// nil disables event observability entirely.
+	EventBus *EventBus
+	// Sitrep fires the daily owner-digest trigger to the admin-agent on an
+	// interval. nil disables.
+	Sitrep *SitrepTicker
+
+	// SpawnRunner / BgRunner feed the admin.snapshot IPC method. nil omits
+	// that section of the snapshot. Set by cmd/server after the runners exist.
+	SpawnRunner spawnLister
+	BgRunner    bgLister
+
+	// AdminToken authenticates a hello carrying role="admin". Empty
+	// disables the admin-agent path entirely (no shim can claim AdminAlias).
+	AdminToken string
+
+	// AdminMutator backs the admin.mutate IPC method (Tier-2 auto-apply /
+	// Tier-3 owner-confirm). nil disables admin mutations entirely.
+	AdminMutator *AdminMutator
 
 	IdleTimeout time.Duration // 0 disables
 	InboxTTL    time.Duration // 0 disables inbox sweep
@@ -48,6 +70,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	defer func() { _ = os.Remove(d.PidPath) }()
+	defer func() {
+		if d.ShimLogs != nil {
+			d.ShimLogs.CloseAll()
+		}
+	}()
 
 	release, err := AcquirePollerLock(filepath.Dir(d.PidPath))
 	if err != nil {
@@ -59,6 +86,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	server := ipc.NewServer(d.SocketPath)
 
 	handlers := NewHandlers(d.Store, d.Bot, d.Router, d.Typing)
+	handlers.SetShimLogs(d.ShimLogs)
+	handlers.SetAdminToken(d.AdminToken)
+	handlers.SetRunners(d.SpawnRunner, d.BgRunner)
+	handlers.SetMutator(d.AdminMutator)
+
+	if d.EventBus != nil {
+		handlers.SetEventSink(d.EventBus)
+	}
+
 	handlers.Register(server)
 
 	server.OnDisconnect(func(c *ipc.Conn) {
@@ -77,7 +113,29 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 
 		d.Router.Drop(id)
-		slog.Info("shim disconnected", "shim_id", id)
+
+		if d.ShimLogs != nil {
+			d.ShimLogs.Close(id)
+		}
+
+		// A shim that exits cleanly sends goodbye first (HandleNotify stamps
+		// metaGoodbye). Absence of the flag means a likely crash — surface it as
+		// an anomaly. The admin-agent itself is excluded: its supervisor restarts
+		// it on every exit, so its disconnects are expected churn, not anomalies.
+		_, graceful := c.Meta.Load(metaGoodbye)
+		role, _ := c.Meta.Load(metaRole)
+		roleStr, _ := role.(string)
+
+		if d.EventBus != nil && !graceful && roleStr != "admin" {
+			d.EventBus.Emit(Event{
+				Type:     "shim_disconnected",
+				Severity: "warning",
+				Subject:  id,
+				Detail:   "shim disconnected without goodbye (possible crash)",
+			})
+		}
+
+		slog.Info("shim disconnected", "shim_id", id, "graceful", graceful)
 	})
 
 	server.Handle(ipc.MethodHello, func(hctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
@@ -97,6 +155,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		ccStr, _ := cc.(string)
 		spawn, _ := c.Meta.Load(metaSpawnID)
 		spawnStr, _ := spawn.(string)
+		role, _ := c.Meta.Load(metaRole)
+		roleStr, _ := role.(string)
 
 		shim := &Shim{
 			ID:          id,
@@ -104,6 +164,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			Workdir:     wdStr,
 			CCSessionID: ccStr,
 			SpawnID:     spawnStr,
+			Role:        roleStr,
 			Notify:      c.Notify,
 		}
 		d.Router.Register(shim)
@@ -139,52 +200,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	var idleWG sync.WaitGroup
 
-	if d.IdleTimeout > 0 {
-		idleExit := NewIdleExit(d.Router, d.IdleTimeout, func() {
-			slog.Info("idle timeout — exiting", "timeout", d.IdleTimeout)
-			d.dcancel()
-		})
-
-		idleWG.Go(func() {
-			idleExit.Run(d.dctx)
-		})
-	}
-
-	cleanup := NewRulesCleanup(d.Store, time.Minute)
-
-	idleWG.Go(func() {
-		cleanup.Run(d.dctx)
-	})
-
-	if d.TopicSweep != nil {
-		idleWG.Go(func() {
-			d.TopicSweep.Run(d.dctx)
-		})
-	}
-
-	if ic := NewInboxCleanup(d.Store, d.InboxTTL, time.Hour); ic != nil {
-		idleWG.Go(func() {
-			ic.Run(d.dctx)
-		})
-	}
-
-	if cs := NewCorruptSweep(d.Store, d.CorruptTTL, time.Hour); cs != nil {
-		idleWG.Go(func() {
-			cs.Run(d.dctx)
-		})
-	}
-
-	if ss := NewSessionsSweep(d.Store, d.SessionsTTL, time.Hour); ss != nil {
-		idleWG.Go(func() {
-			ss.Run(d.dctx)
-		})
-	}
-
-	if d.Typing != nil {
-		idleWG.Go(func() {
-			d.Typing.Run(d.dctx)
-		})
-	}
+	d.startBackgroundWorkers(&idleWG)
 
 	listenErr := server.Listen(d.dctx)
 	d.dcancel()
@@ -195,6 +211,61 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// startBackgroundWorkers launches every long-running goroutine that Daemon.Run
+// owns onto wg. Each worker reads ctx via d.dctx and shuts down when Listen
+// returns and the parent cancels. Pulled out of Run so the wiring fits under
+// the package gocyclo threshold.
+func (d *Daemon) startBackgroundWorkers(wg *sync.WaitGroup) {
+	if d.IdleTimeout > 0 {
+		idleExit := NewIdleExit(d.Router, d.IdleTimeout, func() {
+			slog.Info("idle timeout — exiting", "timeout", d.IdleTimeout)
+			d.dcancel()
+		})
+
+		wg.Go(func() { idleExit.Run(d.dctx) })
+	}
+
+	cleanup := NewRulesCleanup(d.Store, time.Minute)
+
+	wg.Go(func() { cleanup.Run(d.dctx) })
+
+	if d.TopicSweep != nil {
+		wg.Go(func() { d.TopicSweep.Run(d.dctx) })
+	}
+
+	if ic := NewInboxCleanup(d.Store, d.InboxTTL, time.Hour); ic != nil {
+		wg.Go(func() { ic.Run(d.dctx) })
+	}
+
+	if cs := NewCorruptSweep(d.Store, d.CorruptTTL, time.Hour); cs != nil {
+		wg.Go(func() { cs.Run(d.dctx) })
+	}
+
+	if ss := NewSessionsSweep(d.Store, d.SessionsTTL, time.Hour); ss != nil {
+		wg.Go(func() { ss.Run(d.dctx) })
+	}
+
+	if d.ShimsSweep != nil {
+		wg.Go(func() { d.ShimsSweep.Run(d.dctx) })
+	}
+
+	if d.Typing != nil {
+		wg.Go(func() { d.Typing.Run(d.dctx) })
+	}
+
+	if d.EventBus != nil {
+		wg.Go(func() { d.EventBus.Run(d.dctx) })
+	}
+
+	if d.Sitrep != nil {
+		wg.Go(func() { d.Sitrep.Run(d.dctx) })
+	}
+
+	if d.AdminMutator != nil {
+		wg.Go(func() { d.AdminMutator.Run(d.dctx) })
+	}
 }
 
 // Test seams: swappable so tests can mock the comm guard and shorten waits.
