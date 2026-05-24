@@ -150,41 +150,67 @@ func TestInvokerToolArgsWiresAdminTools(t *testing.T) {
 	assert.NotContains(t, joined, `"env"`)
 }
 
-// TestInvokeObserveOmitsTier2AutoApplyTools is the security regression guard for
-// the autonomous observer paths: a DM (Invoke) exposes Tier-2 auto-apply tools,
-// but an observer reaction (InvokeObserve) must not — so injected content in an
-// observed event/log can never drive an unconfirmed mutation.
-func TestInvokeObserveOmitsTier2AutoApplyTools(t *testing.T) {
-	capture := func(dst *[]string) ExecFunc {
-		return func(_ context.Context, _, _ string, args, _ []string) ([]byte, error) {
-			*dst = args
+// TestInvokeOwnerPathHasFullPermissions verifies the owner-DM path (Invoke) runs
+// with normal, unrestricted permissions so the operator can drive todoist,
+// subagents (Task), Bash, and any other configured tool — not only the admin
+// tools. Headless --print can't surface an approval prompt, so this requires
+// --permission-mode bypassPermissions; the admin tools stay wired via
+// --mcp-config; and neither --strict-mcp-config (which would hide the operator's
+// own MCP servers like todoist) nor --allowedTools (which would scope everything
+// else out) is present.
+func TestInvokeOwnerPathHasFullPermissions(t *testing.T) {
+	var got []string
+
+	iv := &Invoker{
+		SelfBin: "/bin/tg",
+		Exec: func(_ context.Context, _, _ string, args, _ []string) ([]byte, error) {
+			got = args
 			return []byte(streamFixture), nil
-		}
+		},
 	}
 
-	var dmArgs, obsArgs []string
-
-	dm := &Invoker{SelfBin: "/bin/tg", Exec: capture(&dmArgs)}
-	_, err := dm.Invoke(context.Background(), "q", nil)
+	_, err := iv.Invoke(context.Background(), "q", nil)
 	require.NoError(t, err)
 
-	obs := &Invoker{SelfBin: "/bin/tg", Exec: capture(&obsArgs)}
-	_, err = obs.InvokeObserve(context.Background(), "q", nil)
-	require.NoError(t, err)
+	joined := strings.Join(got, " ")
+	assert.Contains(t, joined, "--permission-mode")
+	assert.Contains(t, joined, "bypassPermissions")
+	assert.Contains(t, joined, "--mcp-config", "admin tools stay available on the owner path")
+	assert.NotContains(t, joined, "--strict-mcp-config", "operator MCP servers (todoist, …) must load")
+	assert.NotContains(t, joined, "--allowedTools", "owner path must not scope tools out")
+}
 
-	dmJoined := strings.Join(dmArgs, " ")
-	obsJoined := strings.Join(obsArgs, " ")
+// TestInvokeObserveStaysSandboxed is the security regression guard for the
+// autonomous observer paths (event reactions, sitreps, non-owner DMs): they keep
+// the restricted tool set — read + owner-confirmed Tier-3 (propose only) — and
+// must NEVER gain Tier-2 auto-apply or full bypass permissions, or injected
+// content in an observed event/log/message could drive an unconfirmed mutation
+// or arbitrary tool use with no human in the loop.
+func TestInvokeObserveStaysSandboxed(t *testing.T) {
+	var got []string
 
-	// Read tools + Tier-3 (owner-confirmed) on both paths.
-	for _, name := range []string{"list_shims", "add_allow"} {
-		assert.Contains(t, dmJoined, "mcp__admin__"+name)
-		assert.Contains(t, obsJoined, "mcp__admin__"+name)
+	iv := &Invoker{
+		SelfBin: "/bin/tg",
+		Exec: func(_ context.Context, _, _ string, args, _ []string) ([]byte, error) {
+			got = args
+			return []byte(streamFixture), nil
+		},
 	}
 
-	// Tier-2 auto-apply: human-DM path only.
+	_, err := iv.InvokeObserve(context.Background(), "q", nil)
+	require.NoError(t, err)
+
+	joined := strings.Join(got, " ")
+	assert.Contains(t, joined, "--strict-mcp-config")
+	assert.Contains(t, joined, "--allowedTools")
+	assert.NotContains(t, joined, "bypassPermissions", "observer path must not run with full permissions")
+
+	// Read + Tier-3 (owner-confirmed) present; Tier-2 auto-apply absent.
+	assert.Contains(t, joined, "mcp__admin__list_shims")
+	assert.Contains(t, joined, "mcp__admin__add_allow")
+
 	for _, t2 := range adminTier2ToolNames {
-		assert.Contains(t, dmJoined, "mcp__admin__"+t2, "DM path should expose Tier-2 %q", t2)
-		assert.NotContains(t, obsJoined, "mcp__admin__"+t2, "observer path must NOT expose Tier-2 %q", t2)
+		assert.NotContains(t, joined, "mcp__admin__"+t2, "observer path must NOT expose Tier-2 %q", t2)
 	}
 }
 
@@ -211,6 +237,9 @@ func TestInvokePassesToolArgsToExec(t *testing.T) {
 // claude's --allowedTools is variadic (<tools...>), so a prompt placed right
 // after it is swallowed and claude exits "Input must be provided". A "--"
 // separator after the tool flags forces the prompt to be parsed as a positional.
+// The observer path is exercised here because it is the path that still passes
+// --allowedTools (the owner path dropped it for full permissions); the trailing
+// "--" is appended on every path regardless.
 func TestInvokeShieldsPromptFromVariadicAllowedTools(t *testing.T) {
 	var gotArgs []string
 
@@ -222,7 +251,7 @@ func TestInvokeShieldsPromptFromVariadicAllowedTools(t *testing.T) {
 		},
 	}
 
-	_, err := iv.Invoke(context.Background(), "the question", nil)
+	_, err := iv.InvokeObserve(context.Background(), "the question", nil)
 	require.NoError(t, err)
 
 	require.GreaterOrEqual(t, len(gotArgs), 2)
@@ -230,6 +259,7 @@ func TestInvokeShieldsPromptFromVariadicAllowedTools(t *testing.T) {
 	assert.Equal(t, "--", gotArgs[len(gotArgs)-2], "'--' must immediately precede the prompt")
 
 	allowedIdx, dashIdx := -1, -1
+
 	for i, a := range gotArgs {
 		switch a {
 		case "--allowedTools":
@@ -238,6 +268,7 @@ func TestInvokeShieldsPromptFromVariadicAllowedTools(t *testing.T) {
 			dashIdx = i
 		}
 	}
+
 	require.NotEqual(t, -1, allowedIdx, "--allowedTools present")
 	require.NotEqual(t, -1, dashIdx, "-- present")
 	assert.Less(t, allowedIdx, dashIdx, "-- must come after --allowedTools to shield the prompt")

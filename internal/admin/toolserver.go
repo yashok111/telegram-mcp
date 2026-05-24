@@ -67,9 +67,10 @@ var adminTier3ToolNames = []string{
 }
 
 // adminToolNames is the authoritative list of EVERY registered tool (read +
-// both mutate tiers), used by registerTools and the human-DM invocation's
-// --allowedTools. KEEP IN SYNC with registerTools; TestAdminToolNamesMatchRegistered
-// guards against drift.
+// both mutate tiers). KEEP IN SYNC with registerTools; TestAdminToolNamesMatchRegistered
+// guards against drift. The owner-DM invocation runs with full permissions (no
+// --allowedTools scoping — see Invoker.fullToolArgs); the sandboxed observer
+// path scopes by adminObserveToolNames.
 var adminToolNames = slices.Concat(adminReadToolNames, adminTier2ToolNames, adminTier3ToolNames)
 
 // adminObserveToolNames is the tool set for the AUTONOMOUS observer paths

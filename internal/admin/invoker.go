@@ -61,21 +61,26 @@ type Invoker struct {
 	Directives func() string
 }
 
-// Invoke runs claude for a human-initiated DM with the FULL tool set (read +
-// Tier-2 auto-apply + Tier-3 confirm). ctx bounds the call; Timeout (default
-// 5m) caps it independently.
+// Invoke runs claude for a human-initiated owner DM with NORMAL, unrestricted
+// permissions: the operator's own MCP servers (todoist, …), subagents (Task),
+// Bash, and the admin tools are all available and run without an approval prompt
+// (--print is headless — see fullToolArgs). Reserved for the owner; the
+// autonomous/observer paths use InvokeObserve, which stays sandboxed. ctx bounds
+// the call; Timeout (default 5m) caps it independently.
 func (iv *Invoker) Invoke(ctx context.Context, prompt string, history []Message) (Result, error) {
-	return iv.invokeWith(ctx, prompt, history, adminToolNames)
+	return iv.invokeWith(ctx, prompt, history, iv.fullToolArgs())
 }
 
-// InvokeObserve runs claude for an AUTONOMOUS observer reaction (event/sitrep)
-// with the restricted tool set (read + Tier-3 propose, NO Tier-2 auto-apply),
-// so observed/injected content can never drive an unconfirmed mutation.
+// InvokeObserve runs claude for an AUTONOMOUS observer reaction (event/sitrep) or
+// a non-owner DM with the restricted tool set (read + Tier-3 propose, NO Tier-2
+// auto-apply), scoped by --strict-mcp-config + --allowedTools, so
+// observed/injected content can never drive an unconfirmed mutation nor reach
+// tools beyond the admin surface.
 func (iv *Invoker) InvokeObserve(ctx context.Context, prompt string, history []Message) (Result, error) {
-	return iv.invokeWith(ctx, prompt, history, adminObserveToolNames)
+	return iv.invokeWith(ctx, prompt, history, iv.toolArgsFor(adminObserveToolNames))
 }
 
-func (iv *Invoker) invokeWith(ctx context.Context, prompt string, history []Message, tools []string) (Result, error) {
+func (iv *Invoker) invokeWith(ctx context.Context, prompt string, history []Message, toolArgs []string) (Result, error) {
 	exe := iv.Exec
 	if exe == nil {
 		exe = defaultExec
@@ -99,7 +104,7 @@ func (iv *Invoker) invokeWith(ctx context.Context, prompt string, history []Mess
 		args = append(args, "--model="+iv.Model)
 	}
 
-	args = append(args, iv.toolArgsFor(tools)...)
+	args = append(args, toolArgs...)
 
 	var directives string
 	if iv.Directives != nil {
@@ -250,22 +255,17 @@ func parseInvocation(stdout []byte) (Result, error) {
 	return res, nil
 }
 
-// toolArgs builds the --mcp-config / --allowedTools flags that give the spawned
-// claude the read-only admin tools. Empty when SelfBin is unset (plain Q&A).
-// --strict-mcp-config keeps the spawned claude from inheriting the operator's
-// other MCP servers; --allowedTools scopes it to exactly the admin read tools so
-// nothing else (Bash, Edit, …) runs unprompted in --print mode.
-// toolArgsFor builds the --mcp-config / --allowedTools flags scoped to the given
-// tool names. The caller picks the set: adminToolNames for human DMs,
-// adminObserveToolNames for autonomous observer reactions.
-func (iv *Invoker) toolArgsFor(tools []string) []string {
+// adminMCPConfig marshals the --mcp-config value that wires the admin-tools MCP
+// server (mode "admin-tools"). Returns ("", false) when SelfBin is unset (plain
+// Q&A, no admin tools) or marshal fails — the caller then runs without them. No
+// "env" block: admin-tools inherits TELEGRAM_ADMIN_TOKEN through the spawn chain
+// (daemon→agent→claude→admin-tools); embedding it here would expose the token in
+// claude's argv, world-readable via /proc/<pid>/cmdline.
+func (iv *Invoker) adminMCPConfig() (string, bool) {
 	if iv.SelfBin == "" {
-		return nil
+		return "", false
 	}
 
-	// No "env" block: admin-tools inherits TELEGRAM_ADMIN_TOKEN through the
-	// spawn chain (daemon→agent→claude→admin-tools). Putting it here would
-	// embed the token in claude's argv, world-readable via /proc/<pid>/cmdline.
 	cfg, err := json.Marshal(map[string]any{
 		"mcpServers": map[string]any{
 			mcpServerName: map[string]any{
@@ -275,7 +275,21 @@ func (iv *Invoker) toolArgsFor(tools []string) []string {
 		},
 	})
 	if err != nil {
-		slog.Warn("admin invoker mcp-config marshal failed; running without tools", "err", err)
+		slog.Warn("admin invoker mcp-config marshal failed; running without admin tools", "err", err)
+		return "", false
+	}
+
+	return string(cfg), true
+}
+
+// toolArgsFor builds the SANDBOXED tool flags for the observer / non-owner paths,
+// scoped to the given tool names. --strict-mcp-config keeps the spawned claude
+// from inheriting the operator's other MCP servers; --allowedTools scopes it to
+// exactly those admin tools so nothing else (Bash, Edit, …) runs unprompted in
+// --print mode. Empty when SelfBin is unset (plain Q&A).
+func (iv *Invoker) toolArgsFor(tools []string) []string {
+	cfg, ok := iv.adminMCPConfig()
+	if !ok {
 		return nil
 	}
 
@@ -286,9 +300,29 @@ func (iv *Invoker) toolArgsFor(tools []string) []string {
 
 	return []string{
 		"--strict-mcp-config",
-		"--mcp-config", string(cfg),
+		"--mcp-config", cfg,
 		"--allowedTools", strings.Join(allowed, " "),
 	}
+}
+
+// fullToolArgs builds the UNRESTRICTED tool flags for the owner-DM path. Unlike
+// toolArgsFor it omits --strict-mcp-config (so the operator's own configured MCP
+// servers — todoist, … — load alongside the admin tools) and --allowedTools (so
+// subagents, Bash, and everything else are callable). --print is headless and
+// can't surface an interactive approval, so --permission-mode bypassPermissions
+// is required for any tool to run unprompted. The admin tools are still wired via
+// --mcp-config when SelfBin is set. Owner-initiated only — observed/injected
+// content never reaches this path (it goes through InvokeObserve).
+func (iv *Invoker) fullToolArgs() []string {
+	var args []string
+
+	// --mcp-config is variadic; keep it ahead of the single-valued
+	// --permission-mode so the latter terminates it before the prompt positional.
+	if cfg, ok := iv.adminMCPConfig(); ok {
+		args = append(args, "--mcp-config", cfg)
+	}
+
+	return append(args, "--permission-mode", "bypassPermissions")
 }
 
 // buildPrompt folds directives and prior conversation into a single prompt

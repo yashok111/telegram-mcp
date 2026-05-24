@@ -352,9 +352,11 @@ func TestAgentAnswerInboundFullFlow(t *testing.T) {
 }
 
 // TestAnswerInboundOwnerGatesTier2 is the security regression guard for the DM
-// path: the owner gets the full tool set (Tier-2 auto-apply), but a non-owner
-// allowlisted user reaching the agent via the DM-admin fallback gets the
-// observer set only (no Tier-2), so they can't drive an immediate mutation.
+// path: the owner gets full, unrestricted permissions (bypassPermissions, no
+// --allowedTools — every tool, incl. Tier-2 auto-apply, callable), but a
+// non-owner allowlisted user reaching the agent via the DM-admin fallback gets
+// the sandboxed observer set only (--allowedTools, no Tier-2 / no bypass), so
+// they can't drive an immediate mutation.
 func TestAnswerInboundOwnerGatesTier2(t *testing.T) {
 	fc := newFakeClient()
 
@@ -396,17 +398,23 @@ func TestAnswerInboundOwnerGatesTier2(t *testing.T) {
 		return strings.Join(lastArgs, " ")
 	}
 
-	// Owner DM (chat 123): full toolset includes Tier-2 auto-apply.
+	// Owner DM (chat 123): full, unrestricted permissions — every tool callable.
 	fc.fire(ipc.NotifyInbound, json.RawMessage(
 		`{"content":"hi","meta":{"chat_id":"123","message_id":"1"}}`))
 	waitForSendCalls(t, fc, 1)
-	assert.Contains(t, getArgs(), "mcp__admin__pin_chat_to_shim", "owner DM gets Tier-2 tools")
 
-	// Non-owner DM (chat 999): observer set only — read tools, no Tier-2.
+	ownerArgs := getArgs()
+	assert.Contains(t, ownerArgs, "bypassPermissions", "owner DM runs with full permissions")
+	assert.NotContains(t, ownerArgs, "--allowedTools", "owner DM is not scoped to an allowlist")
+
+	// Non-owner DM (chat 999): sandboxed observer set — read tools, no Tier-2.
 	fc.fire(ipc.NotifyInbound, json.RawMessage(
 		`{"content":"hi","meta":{"chat_id":"999","message_id":"2"}}`))
 	waitForSendCalls(t, fc, 2)
+
 	args := getArgs()
+	assert.Contains(t, args, "--allowedTools", "non-owner DM is sandboxed")
+	assert.NotContains(t, args, "bypassPermissions", "non-owner DM must NOT get full permissions")
 	assert.NotContains(t, args, "mcp__admin__pin_chat_to_shim", "non-owner DM must NOT get Tier-2")
 	assert.Contains(t, args, "mcp__admin__list_shims", "non-owner still gets read tools")
 
