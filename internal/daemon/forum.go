@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/yakov/telegram-mcp/internal/access"
+	"github.com/yakov/telegram-mcp/internal/bot"
 )
 
 // forumBot is the subset of bot.Bot the Forum manager calls into. Lets tests
@@ -16,6 +18,7 @@ import (
 type forumBot interface {
 	CreateForumTopic(ctx context.Context, chatID int64, name string, iconColor int) (int, error)
 	EditForumTopic(ctx context.Context, chatID int64, threadID int, name string) error
+	SendMessage(ctx context.Context, chatID, text string, opts bot.SendOpts) (int, error)
 }
 
 // Forum is the daemon-side topic allocator + reuse-key resolver. Stateless
@@ -208,11 +211,13 @@ func (f *Forum) adoptForcedTopic(ctx context.Context, shim *Shim, forced int) (i
 // LockedBy and falls through to fresh creation.
 func (f *Forum) allocateByReuseKey(ctx context.Context, shim *Shim) (int, error) {
 	var (
-		threadID  int
-		forumChat int64
-		reuseKey  string
-		haveKey   bool
-		oldName   string
+		threadID   int
+		forumChat  int64
+		reuseKey   string
+		haveKey    bool
+		oldName    string
+		collision  bool
+		holderName string
 	)
 
 	if err := f.store.Mutate(func(st *access.State) bool {
@@ -246,6 +251,9 @@ func (f *Forum) allocateByReuseKey(ctx context.Context, shim *Shim) (int, error)
 			if f.connected(meta.LockedBy) {
 				slog.Warn("topic locked by another live shim — creating fresh",
 					"reuse_key", reuseKey, "locked_by", meta.LockedBy, "shim_id", shim.ID, "thread_id", tid)
+
+				collision = true
+				holderName = meta.Name
 
 				return false
 			}
@@ -335,7 +343,40 @@ func (f *Forum) allocateByReuseKey(ctx context.Context, shim *Shim) (int, error)
 
 	slog.Info("topic created", "shim_id", shim.ID, "thread_id", tid, "name", name, "reuse_key", reuseKey)
 
+	if collision {
+		f.warnCollision(ctx, forumChat, tid, reuseKey, holderName, shim.Alias)
+	}
+
 	return tid, nil
+}
+
+// warnCollision posts a notice into a freshly-created topic explaining that it
+// is a duplicate: another live session already holds a topic for the same
+// reuse key, and the two can't share one Telegram topic (traffic would mix).
+// The duplicate is intentional — the message just makes it explicit so the
+// user understands where the second topic came from. Cosmetic: a send failure
+// is logged, never propagated, so it can't drop the shim to DM-mode.
+func (f *Forum) warnCollision(ctx context.Context, forumChat int64, threadID int, reuseKey, holderName, newAlias string) {
+	keySubject := "workdir"
+	if strings.HasPrefix(reuseKey, "label:") {
+		keySubject = "label"
+	}
+
+	holderDesc := ""
+	if holderName != "" {
+		holderDesc = " (" + holderName + ")"
+	}
+
+	text := fmt.Sprintf(
+		"⚠️ Another active session%s is already attached to this %s. "+
+			"Two sessions can't share one Telegram topic, so this is a separate topic for @%s — "+
+			"messages here won't reach the other session.",
+		holderDesc, keySubject, newAlias)
+
+	if _, err := f.bot.SendMessage(ctx, strconv.FormatInt(forumChat, 10), text, bot.SendOpts{MessageThreadID: threadID}); err != nil {
+		slog.Warn("forum: collision warning send failed",
+			"thread_id", threadID, "reuse_key", reuseKey, "err", err)
+	}
 }
 
 // connected reports whether shimID is a currently-attached shim. A nil isLive

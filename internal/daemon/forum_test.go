@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yakov/telegram-mcp/internal/access"
+	"github.com/yakov/telegram-mcp/internal/bot"
 )
 
 // fakeForumBot records createForumTopic calls and returns auto-incrementing
@@ -24,6 +25,10 @@ type fakeForumBot struct {
 
 	editThreadID []int
 	editName     []string
+
+	// sentThreadID / sentText record SendMessage calls (collision warnings).
+	sentThreadID []int
+	sentText     []string
 
 	// nextID is the thread_id that the next CreateForumTopic call returns.
 	nextID atomic.Int32
@@ -70,6 +75,16 @@ func (f *fakeForumBot) EditForumTopic(_ context.Context, _ int64, threadID int, 
 	f.editName = append(f.editName, name)
 
 	return nil
+}
+
+func (f *fakeForumBot) SendMessage(_ context.Context, _, text string, opts bot.SendOpts) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.sentThreadID = append(f.sentThreadID, opts.MessageThreadID)
+	f.sentText = append(f.sentText, text)
+
+	return 1, nil
 }
 
 func newForumFixture(t *testing.T, forumChatID int64) (*Forum, *access.Store, *fakeForumBot) {
@@ -444,6 +459,37 @@ func TestForum_collisionWhenLockHeldByLiveShim_createsFresh(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, first, second, "live lock collision → fresh topic")
 	assert.Len(t, fb.createName, 2)
+}
+
+// TestForum_collisionWarnsInNewTopic asserts that when a second live session
+// collides on the same reuse key and gets a fresh topic, a warning is posted
+// into that new topic so the duplicate is explicit (it names both the existing
+// owner and the new alias). Normal first-time creation must NOT warn.
+func TestForum_collisionWarnsInNewTopic(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123) // default fixture: every holder live
+
+	first, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-a", Alias: "s1", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, fb.sentThreadID, "first session created its topic — no collision warning")
+
+	second, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-b", Alias: "s2", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "live collision → fresh topic")
+	require.Len(t, fb.createName, 2)
+
+	// Build the holder name via the same helper the warning embeds so the
+	// assertion stays in sync (avoids a brittle em-dash string literal).
+	holderName := buildTopicName(&Shim{Alias: "s1", Workdir: "/projects/foo"})
+
+	require.Len(t, fb.sentThreadID, 1, "exactly one collision warning sent")
+	assert.Equal(t, second, fb.sentThreadID[0], "warning posted into the new topic")
+	assert.Contains(t, fb.sentText[0], holderName, "names the existing topic owner")
+	assert.Contains(t, fb.sentText[0], "@s2", "names the new session's alias")
+	assert.Contains(t, fb.sentText[0], "separate topic", "explains a separate topic was created")
 }
 
 // TestForum_seizesStaleLock_fromDisconnectedShim is the core regression test
