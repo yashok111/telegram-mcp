@@ -21,6 +21,11 @@ type SpawnRequest struct {
 	UserID         string
 	Model          string
 	ThinkingTokens int
+	// ThreadID, when non-zero, is the forum topic the /spawn command was
+	// issued from. The daemon pins the spawn to this thread so the spawned
+	// session's shim adopts that exact topic on hello instead of allocating
+	// one by workdir/label. Zero for DM-launched spawns.
+	ThreadID int
 }
 
 // SpawnTaskInfo is the runner's view of one live spawn. PID + StartedAt let
@@ -118,18 +123,31 @@ func parseSpawnArgs(text string) (SpawnArgs, error) {
 // handleSpawnCommand parses the /spawn subcommand and dispatches to runner.
 // runner is passed in so handler stays testable without a Bot-struct mutation.
 func (b *Bot) handleSpawnCommand(ctx context.Context, msg telego.Message, runner SpawnRunner) {
+	threadID := msg.MessageThreadID
+
+	// send keeps every reply in the originating forum topic when the command
+	// was issued inside one (threadID > 0); DM callers leave it unset.
+	send := func(text, parseMode string) {
+		p := tu.Message(tu.ID(msg.Chat.ID), text)
+		if threadID > 0 {
+			p = p.WithMessageThreadID(threadID)
+		}
+
+		if parseMode != "" {
+			p = p.WithParseMode(parseMode)
+		}
+
+		_, _ = b.api.SendMessage(ctx, p)
+	}
+
 	if runner == nil {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Spawn sessions are not configured."))
+		send("Spawn sessions are not configured.", "")
 		return
 	}
 
-	rest := stripBotCmd(msg.Text)
-
-	args, err := parseSpawnArgs(rest)
+	args, err := parseSpawnArgs(stripBotCmd(msg.Text))
 	if err != nil {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
-			"Invalid /spawn syntax: "+err.Error()+"\n\n"+formatSpawnHelpReply()))
-
+		send("Invalid /spawn syntax: "+err.Error()+"\n\n"+formatSpawnHelpReply(), "")
 		return
 	}
 
@@ -137,14 +155,14 @@ func (b *Bot) handleSpawnCommand(ctx context.Context, msg telego.Message, runner
 
 	switch args.Sub {
 	case SpawnSubHelp:
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), formatSpawnHelpReply()))
+		send(formatSpawnHelpReply(), "")
 	case SpawnSubList:
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), b.renderSpawnList(runner.List())).WithParseMode("MarkdownV2"))
+		send(b.renderSpawnList(runner.List()), "MarkdownV2")
 	case SpawnSubCancel:
 		if cerr := runner.Cancel(args.TaskID); cerr != nil {
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Cancel failed: "+cerr.Error()))
+			send("Cancel failed: "+cerr.Error(), "")
 		} else {
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "🛑 Cancelling spawn "+MdCode(args.TaskID)).WithParseMode("MarkdownV2"))
+			send("🛑 Cancelling spawn "+MdCode(args.TaskID), "MarkdownV2")
 		}
 	case SpawnSubStart:
 		var userID string
@@ -173,13 +191,26 @@ func (b *Bot) handleSpawnCommand(ctx context.Context, msg telego.Message, runner
 			UserID:         userID,
 			Model:          model,
 			ThinkingTokens: thinking,
+			ThreadID:       threadID,
 		})
 		if serr != nil {
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Spawn failed: "+serr.Error()))
+			send("Spawn failed: "+serr.Error(), "")
 			return
 		}
 		// The runner posts a "Spawn <id> started" message itself.
 	}
+}
+
+// handleSpawnInTopic handles /spawn issued inside a forum supergroup topic.
+// It reuses topicCommandGate (forum-chat + real-topic + allowlist checks)
+// rather than the DM gate, then delegates to handleSpawnCommand which reads
+// msg.MessageThreadID to pin the spawn to this topic.
+func (b *Bot) handleSpawnInTopic(ctx context.Context, msg telego.Message) {
+	if !b.topicCommandGate(ctx, &msg, b.store.Load()) {
+		return
+	}
+
+	b.handleSpawnCommand(ctx, msg, b.spawnRunner)
 }
 
 func formatSpawnHelpReply() string {

@@ -276,3 +276,118 @@ func TestHandleSpawnCommand_InvalidSyntax(t *testing.T) {
 	assert.Contains(t, texts[0], "Usage:")
 	assert.Empty(t, runner.spawnCalls)
 }
+
+// forumSpawnBot wires a bot in a forum-enabled state with a fake spawn runner,
+// modelling /spawn issued from inside a supergroup topic.
+func forumSpawnBot(t *testing.T) (*Bot, *mockAPI, *fakeSpawnRunner) {
+	t.Helper()
+
+	b, api, _ := newTestBot(t, access.State{
+		DMPolicy:    access.PolicyAllowlist,
+		AllowFrom:   []string{"99"},
+		Groups:      map[string]access.GroupPolicy{},
+		Pending:     map[string]access.Pending{},
+		ForumChatID: -100777,
+	})
+
+	fr := &fakeSpawnRunner{spawnID: "abc123"}
+	b.SetSpawnRunner(fr)
+
+	return b, api, fr
+}
+
+func forumSpawnMsg(threadID int, userID int64) telego.Message {
+	return telego.Message{
+		Chat:            telego.Chat{ID: -100777, Type: "supergroup"},
+		From:            &telego.User{ID: userID},
+		MessageThreadID: threadID,
+		Text:            "/spawn",
+	}
+}
+
+func TestHandleSpawn_DM_threadIDZero(t *testing.T) {
+	b, _ := spawnTestBot(t)
+	fr := &fakeSpawnRunner{spawnID: "x"}
+	b.SetSpawnRunner(fr)
+
+	require.NoError(t, b.handleCommand(t.Context(), spawnMsg("/spawn")))
+
+	require.Len(t, fr.spawnCalls, 1)
+	assert.Zero(t, fr.spawnCalls[0].ThreadID, "DM spawn carries no forum thread")
+}
+
+func TestHandleSpawn_forumTopic_passesThreadID(t *testing.T) {
+	b, _, fr := forumSpawnBot(t)
+
+	require.NoError(t, b.handleCommand(t.Context(), forumSpawnMsg(9, 99)))
+
+	require.Len(t, fr.spawnCalls, 1, "spawn invoked from inside a forum topic")
+	assert.Equal(t, 9, fr.spawnCalls[0].ThreadID, "thread of the originating topic")
+	assert.Equal(t, "-100777", fr.spawnCalls[0].ChatID, "forum chat id")
+}
+
+func TestHandleSpawn_forumGeneralThread_rejected(t *testing.T) {
+	b, api, fr := forumSpawnBot(t)
+
+	require.NoError(t, b.handleCommand(t.Context(), forumSpawnMsg(0, 99)))
+
+	assert.Empty(t, fr.spawnCalls, "no spawn from the General thread")
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "inside a topic")
+}
+
+func TestHandleSpawn_forumNotAllowlisted_rejected(t *testing.T) {
+	b, api, fr := forumSpawnBot(t)
+
+	require.NoError(t, b.handleCommand(t.Context(), forumSpawnMsg(9, 12345)))
+
+	assert.Empty(t, fr.spawnCalls, "non-allowlisted sender cannot spawn")
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "Not authorized")
+}
+
+func TestHandleSpawn_forumWrongChat_rejected(t *testing.T) {
+	b, api, fr := forumSpawnBot(t)
+
+	msg := forumSpawnMsg(9, 99)
+	msg.Chat.ID = -100999 // not the configured forum chat
+
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+
+	assert.Empty(t, fr.spawnCalls)
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "only runs inside the configured forum supergroup")
+}
+
+func TestHandleSpawn_plainGroup_silentlyDropped(t *testing.T) {
+	b, api, fr := forumSpawnBot(t)
+
+	// A plain (non-supergroup) group is not a forum; /spawn there must not be
+	// routed to the forum path at all — silent drop, no presence-confirming
+	// reply, no spawn.
+	msg := forumSpawnMsg(0, 99)
+	msg.Chat.Type = "group"
+
+	require.NoError(t, b.handleCommand(t.Context(), msg))
+
+	assert.Empty(t, fr.spawnCalls, "no spawn from a plain group")
+	assert.Empty(t, api.recordedCalls("sendMessage"), "no reply leaks into a plain group")
+}
+
+func TestHandleSpawn_forumTopic_errorReplyThreaded(t *testing.T) {
+	b, api, fr := forumSpawnBot(t)
+	fr.spawnErr = errors.New("boom")
+
+	require.NoError(t, b.handleCommand(t.Context(), forumSpawnMsg(9, 99)))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "Spawn failed")
+	assert.EqualValues(t, 9, calls[0].params["message_thread_id"], "error reply lands in the topic")
+}

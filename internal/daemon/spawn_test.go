@@ -22,14 +22,20 @@ import (
 type recordingBot struct {
 	mu        sync.Mutex
 	sentTexts []string
+	sentOpts  []bot.SendOpts
 	editTexts []string
 	sendErr   error
 	sendID    int
 }
 
+type recordedSend struct {
+	text string
+	opts bot.SendOpts
+}
+
 func newRecordingBot(sendID int) *recordingBot { return &recordingBot{sendID: sendID} }
 
-func (b *recordingBot) SendMessage(_ context.Context, _, text string, _ bot.SendOpts) (int, error) {
+func (b *recordingBot) SendMessage(_ context.Context, _, text string, opts bot.SendOpts) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -38,8 +44,23 @@ func (b *recordingBot) SendMessage(_ context.Context, _, text string, _ bot.Send
 	}
 
 	b.sentTexts = append(b.sentTexts, text)
+	b.sentOpts = append(b.sentOpts, opts)
 
 	return b.sendID, nil
+}
+
+// sends returns text+opts paired per call, so tests can assert the
+// message_thread_id a confirmation was posted with.
+func (b *recordingBot) sends() []recordedSend {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	out := make([]recordedSend, len(b.sentTexts))
+	for i := range b.sentTexts {
+		out[i] = recordedSend{text: b.sentTexts[i], opts: b.sentOpts[i]}
+	}
+
+	return out
 }
 
 func (b *recordingBot) SendFile(_ context.Context, _, _ string, _ bot.SendOpts) (int, error) {
@@ -165,11 +186,11 @@ func TestSpawnRunner_CancelUnknown(t *testing.T) {
 
 func TestSpawnRunner_ReserveSlotEnforcesMaxParallel(t *testing.T) {
 	r := NewSpawnRunner(SpawnConfig{MaxParallel: 2, RatePerHourPerUser: 99})
-	id1, err := r.reserveSlot("u1")
+	id1, err := r.reserveSlot("u1", 0)
 	require.NoError(t, err)
-	id2, err := r.reserveSlot("u1")
+	id2, err := r.reserveSlot("u1", 0)
 	require.NoError(t, err)
-	_, err = r.reserveSlot("u2")
+	_, err = r.reserveSlot("u2", 0)
 	require.ErrorIs(t, err, ErrTooManySpawnTasks)
 	assert.NotEqual(t, id1, id2)
 }
@@ -177,16 +198,16 @@ func TestSpawnRunner_ReserveSlotEnforcesMaxParallel(t *testing.T) {
 func TestSpawnRunner_ReserveSlotRateLimitsPerUser(t *testing.T) {
 	r := NewSpawnRunner(SpawnConfig{MaxParallel: 99, RatePerHourPerUser: 2})
 
-	_, err := r.reserveSlot("u1")
+	_, err := r.reserveSlot("u1", 0)
 	require.NoError(t, err)
 
-	id2, err := r.reserveSlot("u1")
+	id2, err := r.reserveSlot("u1", 0)
 	require.NoError(t, err)
 	r.releaseSlot(id2, SpawnStatusDone)
 
-	_, err = r.reserveSlot("u1")
+	_, err = r.reserveSlot("u1", 0)
 	require.ErrorIs(t, err, ErrSpawnRateLimited)
-	_, err = r.reserveSlot("u2")
+	_, err = r.reserveSlot("u2", 0)
 	require.NoError(t, err)
 }
 
@@ -201,7 +222,7 @@ func TestSpawnRunner_PerUserMapDropsStaleKeys(t *testing.T) {
 	}
 	r.mu.Unlock()
 
-	_, err := r.reserveSlot("u_fresh")
+	_, err := r.reserveSlot("u_fresh", 0)
 	require.NoError(t, err)
 
 	r.mu.Lock()
@@ -365,7 +386,7 @@ func TestSpawnRunner_StopCancelsAll(t *testing.T) {
 	)
 
 	for range 3 {
-		id, err := r.reserveSlot("u1")
+		id, err := r.reserveSlot("u1", 0)
 		require.NoError(t, err)
 
 		taskID := id
@@ -454,7 +475,7 @@ func TestSpawnRunner_SweepIdle_CancelsWhenPairedShimIdleExceeds(t *testing.T) {
 		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
 	})
 
-	id, err := r.reserveSlot("u")
+	id, err := r.reserveSlot("u", 0)
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
@@ -479,7 +500,7 @@ func TestSpawnRunner_SweepIdle_PairedShimUnderThresholdSurvives(t *testing.T) {
 		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
 	})
 
-	id, err := r.reserveSlot("u")
+	id, err := r.reserveSlot("u", 0)
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
@@ -504,7 +525,7 @@ func TestSpawnRunner_SweepIdle_OrphanCancelledAfterGrace(t *testing.T) {
 		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
 	})
 
-	id, err := r.reserveSlot("u")
+	id, err := r.reserveSlot("u", 0)
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
@@ -530,7 +551,7 @@ func TestSpawnRunner_SweepIdle_OrphanInsideGraceSurvives(t *testing.T) {
 		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
 	})
 
-	id, err := r.reserveSlot("u")
+	id, err := r.reserveSlot("u", 0)
 	require.NoError(t, err)
 
 	cancelled := make(chan struct{}, 1)
@@ -778,7 +799,7 @@ func TestSpawnRunner_SweepIdle_EmitsSpawnIdleKilledEvent(t *testing.T) {
 	sink := &recordingSink{}
 	r.SetEventSink(sink)
 
-	id, err := r.reserveSlot("u")
+	id, err := r.reserveSlot("u", 0)
 	require.NoError(t, err)
 
 	r.mu.Lock()
@@ -814,4 +835,113 @@ func TestFilterEnvStripsMultiplePrefixes(t *testing.T) {
 
 	// No prefixes => identity copy.
 	assert.Equal(t, []string{"A=1"}, filterEnv([]string{"A=1"}))
+}
+
+func newPinTestRunner(t *testing.T, pid int) (*SpawnRunner, *recordingBot) {
+	t.Helper()
+
+	proc := newFakeSpawnProcess(pid)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, fb, cmder)
+
+	return r, fb
+}
+
+func cancelAndDrain(t *testing.T, r *SpawnRunner, id string) {
+	t.Helper()
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_TopicForSpawn_returnsPinnedThread(t *testing.T) {
+	r, _ := newPinTestRunner(t, 700)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", ThreadID: 42})
+	require.NoError(t, err)
+
+	tid, ok := r.TopicForSpawn(id)
+	assert.True(t, ok, "spawn launched from a topic has a pinned thread")
+	assert.Equal(t, 42, tid)
+
+	cancelAndDrain(t, r, id)
+}
+
+func TestSpawnRunner_TopicForSpawn_zeroThreadIsAbsent(t *testing.T) {
+	r, _ := newPinTestRunner(t, 701)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", ThreadID: 0})
+	require.NoError(t, err)
+
+	_, ok := r.TopicForSpawn(id)
+	assert.False(t, ok, "DM-launched spawn carries no pinned thread")
+
+	cancelAndDrain(t, r, id)
+}
+
+func TestSpawnRunner_TopicForSpawn_unknownSpawnIsAbsent(t *testing.T) {
+	r := NewSpawnRunner(SpawnConfig{})
+
+	_, ok := r.TopicForSpawn("deadbeef")
+	assert.False(t, ok, "unknown spawn_id has no pin")
+}
+
+func TestSpawnRunner_TopicForSpawn_clearedAfterRelease(t *testing.T) {
+	r, _ := newPinTestRunner(t, 702)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", ThreadID: 55})
+	require.NoError(t, err)
+
+	cancelAndDrain(t, r, id)
+
+	_, ok := r.TopicForSpawn(id)
+	assert.False(t, ok, "pin is gone once the spawn task is released")
+}
+
+func TestSpawnRunner_StartFailure_threadedIntoTopic(t *testing.T) {
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return nil, errors.New("boom")
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, fb, cmder)
+
+	_, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", ThreadID: 88})
+	require.Error(t, err)
+
+	sends := fb.sends()
+	require.Len(t, sends, 1)
+	assert.Contains(t, sends[0].text, "❌ Spawn")
+	assert.Contains(t, sends[0].text, "failed to start")
+	assert.Equal(t, 88, sends[0].opts.MessageThreadID, "failure reply lands in the originating topic")
+}
+
+func TestSpawnRunner_SpawnStartConfirmation_threadedIntoTopic(t *testing.T) {
+	r, fb := newPinTestRunner(t, 123)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", ThreadID: 77})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		for _, s := range fb.sends() {
+			if contains(s.text, "🚀 Spawn "+id+" started") && s.opts.MessageThreadID == 77 {
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 20*time.Millisecond, "start confirmation must land in the originating topic")
+
+	cancelAndDrain(t, r, id)
 }
