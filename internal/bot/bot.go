@@ -241,8 +241,25 @@ func (b *Bot) Stop() {
 func (b *Bot) registerHandlers(bh *th.BotHandler) {
 	// Commands first — they need to win over the generic text handler.
 	bh.HandleMessage(b.onCommand, th.AnyCommand())
-	bh.HandleMessage(b.onMessage, th.AnyMessage())
+	bh.HandleMessage(b.onMessage, messageContentPredicate())
 	bh.HandleCallbackQuery(b.onCallback)
+}
+
+// messageContentPredicate matches only messages carrying user content, so
+// service updates (forum topic created/edited/closed, chat joins) and
+// content-less messages never reach onMessage. Telegram emits such updates for
+// the daemon's own CreateForumTopic/EditForumTopic calls and the bot polls them
+// back; left unfiltered they were delivered to Claude Code as empty inbound and
+// (post-#71) could trigger an auto-spawn into a forum topic. The three
+// predicates are OR-ed into one argument because HandleMessage AND-s multiple
+// predicates. AnyMessageWithMedia covers all content types beyond text/caption
+// (location, contact, poll, dice, …), so none are dropped.
+func messageContentPredicate() th.Predicate {
+	return th.Or(
+		th.AnyMessageWithText(),
+		th.AnyMessageWithCaption(),
+		th.AnyMessageWithMedia(),
+	)
 }
 
 // onCommand is the th.Context-flavoured entry that delegates to handleCommand;
