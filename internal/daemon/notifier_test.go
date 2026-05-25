@@ -161,6 +161,57 @@ func TestNotifierResolveUnknownIsNoop(_ *testing.T) {
 	n.ResolvePermission("nope", "deny") // must not panic
 }
 
+func TestNotifierDeliverInbound_setsHeaderBusy(t *testing.T) {
+	r := NewRouter()
+
+	var sink []capturedNotify
+
+	r.Register(newCapturingShim("a", &sink))
+	r.BindTopic("a", 119)
+
+	store := access.NewStore(t.TempDir(), false)
+	m := NewHeaderManager(store, &fakeHeaderBot{}, r, testForumChat, time.Minute, time.Minute)
+	n := NewNotifier(r, store, nil)
+	n.SetHeader(m)
+
+	// message_thread_id routes via the topic-owner arm (the production forum
+	// path), not the LRU fallback.
+	n.DeliverInbound("hi", map[string]string{"chat_id": "chat-x", "message_thread_id": "119"})
+
+	m.mu.Lock()
+	e := m.entries[119]
+	m.mu.Unlock()
+
+	require.NotNil(t, e)
+	assert.Equal(t, HeaderBusy, e.state, "inbound routed to a shim marks its topic busy")
+}
+
+func TestNotifierResolvePermission_setsHeaderBusy(t *testing.T) {
+	r := NewRouter()
+
+	var sink []capturedNotify
+
+	r.Register(newCapturingShim("a", &sink))
+	r.BindTopic("a", 119)
+	require.NoError(t, r.RegisterPermission("req-1", "a", PermDetails{ToolName: "Bash"}))
+
+	store := access.NewStore(t.TempDir(), false)
+	m := NewHeaderManager(store, &fakeHeaderBot{}, r, testForumChat, time.Minute, time.Minute)
+	m.SetState(119, HeaderPermission, "Bash")
+
+	n := NewNotifier(r, store, nil)
+	n.SetHeader(m)
+
+	n.ResolvePermission("req-1", "allow")
+
+	m.mu.Lock()
+	e := m.entries[119]
+	m.mu.Unlock()
+
+	require.NotNil(t, e)
+	assert.Equal(t, HeaderBusy, e.state, "resolved permission flips the header back to busy")
+}
+
 func TestDeliverInboundDispatchesToEveryTargetOnBroadcast(t *testing.T) {
 	r := NewRouter()
 	n := NewNotifier(r, nil, nil)

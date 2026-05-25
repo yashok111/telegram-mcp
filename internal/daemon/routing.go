@@ -85,6 +85,13 @@ type Router struct {
 	// (pin/owner/LRA/LRU) must not fire for a topic message that no shim owns —
 	// see RouteInboundMulti.
 	forumChatID int64
+
+	// headerHook, when set, is invoked with a forum thread_id whenever that
+	// topic's header should repaint for a reason the manager can't observe on
+	// its own (currently a /label change). Wired to HeaderManager.Refresh; nil
+	// disables. Always called WITHOUT r.mu held — the header manager takes its
+	// own lock, and holding both would invert the lock order taken by a flush.
+	headerHook func(threadID int)
 }
 
 type pin struct {
@@ -180,6 +187,16 @@ func (r *Router) SetForumChatID(id int64) {
 	defer r.mu.Unlock()
 
 	r.forumChatID = id
+}
+
+// SetHeaderHook wires the per-topic header repaint callback (HeaderManager.Refresh).
+// Called once at daemon wiring; nil disables. Safe to pass a nil-receiver method
+// value — Refresh guards m == nil.
+func (r *Router) SetHeaderHook(fn func(threadID int)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.headerHook = fn
 }
 
 func (r *Router) Register(s *Shim) {
@@ -492,6 +509,8 @@ func (r *Router) SetLabel(shimID, label string) (ShimInfo, error) {
 	r.indexLabelLocked(shimID, label)
 
 	notify := s.Notify
+	topicID := s.TopicID
+	hook := r.headerHook
 
 	r.mu.Unlock()
 
@@ -499,6 +518,10 @@ func (r *Router) SetLabel(shimID, label string) (ShimInfo, error) {
 		if err := notify(ipc.NotifyLabelChanged, map[string]any{"label": label}); err != nil {
 			slog.Warn("label push failed", "shim_id", shimID, "label", label, "err", err)
 		}
+	}
+
+	if hook != nil && topicID > 0 {
+		hook(topicID)
 	}
 
 	for _, info := range r.Snapshot() {
@@ -611,6 +634,48 @@ func (r *Router) ShimByTopic(threadID int) (*Shim, bool) {
 	s, ok := r.shims[owner]
 
 	return s, ok
+}
+
+// HeaderIdentity returns the identity snapshot the topic-header renderer needs
+// for threadID's owning shim. ok=false when no connected shim owns the topic
+// (orphan or just-disconnected) — the header manager then falls back to its
+// cached identity. Implements headerIdentitySource.
+func (r *Router) HeaderIdentity(threadID int) (HeaderIdentity, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	owner, ok := r.topicOwners[threadID]
+	if !ok {
+		return HeaderIdentity{}, false
+	}
+
+	s, ok := r.shims[owner]
+	if !ok {
+		return HeaderIdentity{}, false
+	}
+
+	return HeaderIdentity{
+		Alias:        s.Alias,
+		Label:        s.Label,
+		Workdir:      s.Workdir,
+		ShimIDPrefix: ShimInfo{ID: s.ID}.IDPrefix(),
+		ConnectedAt:  s.ConnectedAt,
+	}, true
+}
+
+// TopicForShim returns the forum thread_id bound to shimID, ok=false when the
+// shim is unknown or has no topic. Used by the disconnect hook to flip the
+// owning topic's header to ⚪ before the shim is dropped from the Router.
+func (r *Router) TopicForShim(shimID string) (int, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	s, ok := r.shims[shimID]
+	if !ok || s.TopicID <= 0 {
+		return 0, false
+	}
+
+	return s.TopicID, true
 }
 
 func (r *Router) RouteInbound(chatID string) (*Shim, bool) {

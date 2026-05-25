@@ -69,6 +69,18 @@ type TopicMeta struct {
 	// LockedBy is the currently-attached shim_id; "" means the topic is
 	// available for reuse on the next hello with a matching reuse_key.
 	LockedBy string `json:"locked_by,omitempty"`
+	// HeaderMessageID is the message_id of the pinned topic-header message the
+	// daemon maintains for this topic; 0 when no header has been sent yet.
+	HeaderMessageID int `json:"header_message_id,omitempty"`
+	// HeaderPinned tracks whether pinChatMessage succeeded for the header.
+	// false means the bot lacked pin rights — the header is still sent, just
+	// not pinned, and the daemon retries the pin on a later refresh.
+	HeaderPinned bool `json:"header_pinned,omitempty"`
+	// HeaderRenderHash is the FNV-64a hash of the last header text pushed to
+	// Telegram. The header refresh loop skips editMessageText when the freshly
+	// rendered text hashes equal, avoiding redundant API calls and Telegram's
+	// "message is not modified" 400s.
+	HeaderRenderHash uint64 `json:"header_render_hash,omitempty"`
 }
 
 // ClosedTopic tracks topics scheduled for deletion. Background sweep removes

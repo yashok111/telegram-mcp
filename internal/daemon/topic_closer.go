@@ -30,17 +30,20 @@ type TopicCloser struct {
 	store       *access.Store
 	bot         topicCloseBot
 	spawnRunner topicSpawnRunner
+	header      *HeaderManager
 }
 
 // NewTopicCloser constructs a closer bound to the daemon's collaborators.
 // spawnRunner may be nil if the daemon was started with /spawn disabled —
-// non-spawned shutdown still works.
-func NewTopicCloser(r *Router, store *access.Store, b topicCloseBot, spawn topicSpawnRunner) *TopicCloser {
+// non-spawned shutdown still works. header may be nil (topic headers disabled);
+// CloseTopic's flip-to-🔴 is then a no-op.
+func NewTopicCloser(r *Router, store *access.Store, b topicCloseBot, spawn topicSpawnRunner, header *HeaderManager) *TopicCloser {
 	return &TopicCloser{
 		router:      r,
 		store:       store,
 		bot:         b,
 		spawnRunner: spawn,
+		header:      header,
 	}
 }
 
@@ -82,6 +85,10 @@ func (c *TopicCloser) CloseTopic(ctx context.Context, threadID int) error {
 	if err := c.bot.CloseForumTopic(ctx, st.ForumChatID, threadID); err != nil {
 		return fmt.Errorf("close topic %d: %w", threadID, err)
 	}
+
+	// Flip the header to 🔴 only after the topic actually closed. The bot is a
+	// topic admin, so it can still edit the pinned header in a closed topic.
+	c.header.Closed(ctx, threadID)
 
 	if err := c.store.Mutate(func(st *access.State) bool {
 		st.ClosedTopics = append(st.ClosedTopics, access.ClosedTopic{

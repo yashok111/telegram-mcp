@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,7 +73,7 @@ func newCloserFixture(t *testing.T) (*TopicCloser, *Router, *access.Store, *fake
 	router := NewRouter()
 	bot := &fakeCloseBot{}
 	spawn := &fakeSpawnRunner{}
-	closer := NewTopicCloser(router, store, bot, spawn)
+	closer := NewTopicCloser(router, store, bot, spawn, nil)
 
 	return closer, router, store, bot, spawn
 }
@@ -88,7 +89,7 @@ func TestTopicCloser_forumDisabled(t *testing.T) {
 	store := access.NewStore(dir, false)
 	require.NoError(t, store.Save(access.State{ForumChatID: 0}))
 
-	c := NewTopicCloser(NewRouter(), store, &fakeCloseBot{}, &fakeSpawnRunner{})
+	c := NewTopicCloser(NewRouter(), store, &fakeCloseBot{}, &fakeSpawnRunner{}, nil)
 	require.Error(t, c.CloseTopic(context.Background(), 42))
 }
 
@@ -171,7 +172,7 @@ func TestTopicCloser_storeMutateFailure_returnsError(t *testing.T) {
 	}))
 
 	bot := &fakeCloseBot{}
-	c := NewTopicCloser(NewRouter(), store, bot, &fakeSpawnRunner{})
+	c := NewTopicCloser(NewRouter(), store, bot, &fakeSpawnRunner{}, nil)
 
 	require.NoError(t, os.Chmod(dir, 0o500), "drop write perm on store dir")
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
@@ -181,6 +182,36 @@ func TestTopicCloser_storeMutateFailure_returnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "topic closed in Telegram",
 		"error message must indicate the partial-success state")
 	assert.Equal(t, []int{42}, bot.closed, "Telegram-side close still happened")
+}
+
+func TestTopicCloser_closedFlipsHeaderToClosed(t *testing.T) {
+	dir := t.TempDir()
+	store := access.NewStore(dir, false)
+	require.NoError(t, store.Save(access.State{
+		DMPolicy:    access.PolicyAllowlist,
+		AllowFrom:   []string{"123"},
+		Groups:      map[string]access.GroupPolicy{},
+		Pending:     map[string]access.Pending{},
+		ForumChatID: -100123,
+	}))
+
+	router := NewRouter()
+	router.Register(&Shim{ID: "shim-a", Notify: func(string, any) error { return nil }})
+	router.BindTopic("shim-a", 42)
+
+	hb := &fakeHeaderBot{}
+	m := NewHeaderManager(store, hb, router, -100123, time.Minute, time.Minute)
+	m.Ensure(context.Background(), 42) // pin an initial 🟢 header
+
+	c := NewTopicCloser(router, store, &fakeCloseBot{}, &fakeSpawnRunner{}, m)
+	require.NoError(t, c.CloseTopic(context.Background(), 42))
+
+	sends, edits, _ := hb.snapshot()
+	assert.Len(t, sends, 1, "Ensure sent the header once; close must edit, not resend")
+	require.NotEmpty(t, edits, "close must edit the existing header")
+	last := edits[len(edits)-1].text
+	assert.Contains(t, last, "🔴")
+	assert.Contains(t, last, "status: closed")
 }
 
 func TestTopicCloser_spawnCancelFailure_continuesClose(t *testing.T) {

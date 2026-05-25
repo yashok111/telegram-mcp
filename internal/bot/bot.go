@@ -1453,6 +1453,43 @@ func (b *Bot) DeleteForumTopic(ctx context.Context, chatID int64, threadID int) 
 	return nil
 }
 
+// PinChatMessage pins messageID in chatID. In a forum supergroup, pinning a
+// message that lives in a topic pins it within that topic automatically —
+// telego's pinChatMessage has no thread parameter. DisableNotification is set
+// so maintaining a topic header doesn't ping every group member on each pin.
+// Requires the bot to have can_pin_messages in the chat; without it Telegram
+// returns 400 and the caller degrades gracefully (header stays unpinned).
+func (b *Bot) PinChatMessage(ctx context.Context, chatID int64, messageID int) error {
+	if err := b.api.PinChatMessage(ctx, &telego.PinChatMessageParams{
+		ChatID:              tu.ID(chatID),
+		MessageID:           messageID,
+		DisableNotification: true,
+	}); err != nil {
+		slog.Error("Telegram pinChatMessage failed", "chat_id", chatID, "message_id", messageID, "err", err)
+		return fmt.Errorf("pin chat message: %w", err)
+	}
+
+	slog.Info("Telegram pinChatMessage ok", "chat_id", chatID, "message_id", messageID)
+
+	return nil
+}
+
+// UnpinChatMessage removes messageID from chatID's pinned set. Used for
+// optional header cleanup on /topic close.
+func (b *Bot) UnpinChatMessage(ctx context.Context, chatID int64, messageID int) error {
+	if err := b.api.UnpinChatMessage(ctx, &telego.UnpinChatMessageParams{
+		ChatID:    tu.ID(chatID),
+		MessageID: messageID,
+	}); err != nil {
+		slog.Error("Telegram unpinChatMessage failed", "chat_id", chatID, "message_id", messageID, "err", err)
+		return fmt.Errorf("unpin chat message: %w", err)
+	}
+
+	slog.Info("Telegram unpinChatMessage ok", "chat_id", chatID, "message_id", messageID)
+
+	return nil
+}
+
 // PermissionTarget identifies the single chat (and optional supergroup forum
 // topic) that should receive a permission prompt. The daemon's permission
 // handler picks this via pickPermissionTarget; ThreadID=0 means a plain DM

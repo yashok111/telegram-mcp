@@ -167,6 +167,73 @@ func TestHandleSendMessageAllowed(t *testing.T) {
 	assert.True(t, ok, "RecordOutbound records on success")
 }
 
+func TestHandleSendMessage_setsHeaderIdle(t *testing.T) {
+	h, fb, r, store := newHandlersFixture(t)
+	fb.sentMessage.retID = 42
+
+	r.BindTopic("shim-a", 119)
+
+	m := NewHeaderManager(store, &fakeHeaderBot{}, r, testForumChat, time.Minute, time.Minute)
+	m.SetState(119, HeaderBusy, "") // start busy; outbound should settle to idle
+	h.SetHeader(m)
+
+	_, rpcErr := h.HandleSendMessage(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "text": "done",
+	}))
+	require.Nil(t, rpcErr)
+
+	m.mu.Lock()
+	e := m.entries[119]
+	m.mu.Unlock()
+
+	require.NotNil(t, e)
+	assert.Equal(t, HeaderIdle, e.state, "shim outbound settles its topic header to idle")
+}
+
+func TestHandleSendFile_setsHeaderIdle(t *testing.T) {
+	h, fb, r, store := newHandlersFixture(t)
+	fb.sentFile.retID = 7
+
+	r.BindTopic("shim-a", 119)
+
+	m := NewHeaderManager(store, &fakeHeaderBot{}, r, testForumChat, time.Minute, time.Minute)
+	m.SetState(119, HeaderBusy, "")
+	h.SetHeader(m)
+
+	_, rpcErr := h.HandleSendFile(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"chat_id": "123", "path": "/tmp/x.png",
+	}))
+	require.Nil(t, rpcErr)
+
+	m.mu.Lock()
+	e := m.entries[119]
+	m.mu.Unlock()
+
+	require.NotNil(t, e)
+	assert.Equal(t, HeaderIdle, e.state, "shim file outbound settles its topic header to idle")
+}
+
+func TestHandleBroadcastPermission_setsHeaderPermission(t *testing.T) {
+	h, _, r, store := newHandlersFixture(t)
+	r.BindTopic("shim-a", 119)
+
+	m := NewHeaderManager(store, &fakeHeaderBot{}, r, testForumChat, time.Minute, time.Minute)
+	h.SetHeader(m)
+
+	_, rpcErr := h.HandleBroadcastPermission(context.Background(), conn("shim-a"), raw(t, map[string]any{
+		"request_id": "req-1", "tool_name": "Bash", "description": "d", "input_preview": "go test",
+	}))
+	require.Nil(t, rpcErr)
+
+	m.mu.Lock()
+	e := m.entries[119]
+	m.mu.Unlock()
+
+	require.NotNil(t, e)
+	assert.Equal(t, HeaderPermission, e.state)
+	assert.Equal(t, "Bash", e.tool, "permission carries the tool name into the header")
+}
+
 func TestHandleSendMessage_prefixDisabledByEnv(t *testing.T) {
 	t.Setenv("TELEGRAM_PREFIX_ALIAS", "0")
 

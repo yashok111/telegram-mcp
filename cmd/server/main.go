@@ -243,9 +243,10 @@ func runDaemon(stateDir string) error {
 
 	router.SetForumChatID(store.Load().ForumChatID)
 
-	tgBot.SetTopicCloser(daemonpkg.NewTopicCloser(router, store, tgBot, spawnRunner))
+	headerMgr := buildHeaderManager(store, tgBot, router)
+	notifier.SetHeader(headerMgr)
 
-	topicPurgeAfter := resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 14*24*time.Hour)
+	tgBot.SetTopicCloser(daemonpkg.NewTopicCloser(router, store, tgBot, spawnRunner, headerMgr))
 
 	d := &daemonpkg.Daemon{
 		StateDir:     stateDir,
@@ -256,7 +257,8 @@ func runDaemon(stateDir string) error {
 		Router:       router,
 		Typing:       typing,
 		Forum:        daemonpkg.NewForum(store, tgBot, router.IsConnected, spawnRunner.TopicForSpawn),
-		TopicSweep:   daemonpkg.NewTopicSweep(store, tgBot, topicPurgeAfter, time.Hour),
+		Header:       headerMgr,
+		TopicSweep:   daemonpkg.NewTopicSweep(store, tgBot, resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 14*24*time.Hour), time.Hour),
 		ShimLogs:     shimLogs,
 		ShimsSweep:   daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
 		SpawnRunner:  spawnRunner,
@@ -510,6 +512,24 @@ func resolveIdleTimeout() time.Duration {
 // resolveDurationEnv parses a duration from env (e.g. "24h"). Unset, empty,
 // or unparseable falls back to def. Negative parses through unchanged so
 // callers can disable a sweep with a negative value if they need to.
+// buildHeaderManager constructs the pinned-topic-header manager when forum mode
+// is on and the feature isn't disabled via TELEGRAM_TOPIC_HEADER. Returns nil
+// otherwise — Daemon.Header nil disables the worker, and every header hook is
+// nil-safe.
+func buildHeaderManager(store *access.Store, b *bot.Bot, router *daemonpkg.Router) *daemonpkg.HeaderManager {
+	forumChatID := store.Load().ForumChatID
+	if forumChatID == 0 || !daemonpkg.HeaderEnabled() {
+		return nil
+	}
+
+	m := daemonpkg.NewHeaderManager(store, b, router, forumChatID,
+		resolveDurationEnv("TELEGRAM_TOPIC_HEADER_REFRESH", 5*time.Second),
+		resolveDurationEnv("TELEGRAM_TOPIC_HEADER_TICK", 60*time.Second))
+	router.SetHeaderHook(m.Refresh)
+
+	return m
+}
+
 func resolveDurationEnv(name string, def time.Duration) time.Duration {
 	v := os.Getenv(name)
 	if v == "" {
