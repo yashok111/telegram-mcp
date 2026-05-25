@@ -287,6 +287,123 @@ func TestRouter_Drop_clearsTopicOwner(t *testing.T) {
 	assert.Equal(t, "b", got[0].ID, "dropped shim's topic key cleared; fell through to LRU")
 }
 
+// forumChat is the chat_id string for a configured forum supergroup. Telegram
+// encodes supergroups as negative int64; every topic in the group shares it.
+const forumChat = "-1001234567890"
+
+func forumChatIDInt() int64 { return -1001234567890 }
+
+// TestRouteInboundMulti_forumTopicUnowned_doesNotLeak reproduces the reported
+// bug: a message in a forum topic that no live shim owns must not fall through
+// to the chat-keyed fallback (chatOwner/LRU), which would deliver it to a shim
+// living in a *different* topic of the same supergroup.
+func TestRouteInboundMulti_forumTopicUnowned_doesNotLeak(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	a := &Shim{ID: "a"} // owns topic 5 (e.g. good-vibez)
+	b := &Shim{ID: "b"} // owns topic 7 (e.g. telegram-mcp)
+
+	r.Register(a)
+	r.Register(b)
+	r.BindTopic("a", 5)
+	r.BindTopic("b", 7)
+
+	// a is the most recent sender in the supergroup → chatOwner + LRU bias.
+	r.RecordOutbound("a", forumChat, 100)
+
+	// Fresh message in topic 99 — no owner, no mention, no reply.
+	got := r.RouteInboundMulti(forumChat, "hello there", 0, 99)
+	assert.Empty(t, got, "unowned forum topic must not leak to a cross-topic shim")
+}
+
+// TestRouteInboundMulti_forumTopicOwnerDropped_doesNotLeak is the exact field
+// scenario: a topic's shim disconnects, then a message arrives in that now-orphaned
+// topic. It must drop, not leak to whichever shim last sent in the supergroup.
+func TestRouteInboundMulti_forumTopicOwnerDropped_doesNotLeak(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	a := &Shim{ID: "a"}
+	b := &Shim{ID: "b"}
+
+	r.Register(a)
+	r.Register(b)
+	r.BindTopic("a", 5)
+	r.BindTopic("b", 7)
+	r.RecordOutbound("a", forumChat, 100)
+
+	r.Drop("b") // telegram-mcp session leaves; topic 7 now unowned
+
+	got := r.RouteInboundMulti(forumChat, "you there?", 0, 7)
+	assert.Empty(t, got, "orphaned forum topic must not leak to the other topic's shim")
+}
+
+// TestRouteInboundMulti_forumGeneralTopic_stillRoutes confirms the isolation is
+// scoped to real topics: General (threadID 0) is the shared space and keeps
+// owner/LRU routing.
+func TestRouteInboundMulti_forumGeneralTopic_stillRoutes(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	a := &Shim{ID: "a"}
+	r.Register(a)
+	r.RecordOutbound("a", forumChat, 0)
+
+	got := r.RouteInboundMulti(forumChat, "hi", 0, 0)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID, "General topic still falls through to owner")
+}
+
+// TestRouteInboundMulti_forumOwnedTopic_routes is a sanity check that isolation
+// doesn't break the happy path: a topic with a live owner routes to it.
+func TestRouteInboundMulti_forumOwnedTopic_routes(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	a := &Shim{ID: "a"}
+	r.Register(a)
+	r.BindTopic("a", 7)
+
+	got := r.RouteInboundMulti(forumChat, "hi", 0, 7)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID)
+}
+
+// TestRouteInboundMulti_forumTopicUnowned_mentionStillEscapes locks the design
+// choice that an explicit @mention overrides topic isolation — the user named a
+// shim, so honor it even from an unowned topic.
+func TestRouteInboundMulti_forumTopicUnowned_mentionStillEscapes(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	a := &Shim{ID: "a"} // s1
+	b := &Shim{ID: "b"} // s2
+
+	r.Register(a)
+	r.Register(b)
+
+	got := r.RouteInboundMulti(forumChat, "@s1 ping", 0, 7)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID, "explicit mention escapes the topic")
+}
+
+// TestRouteInboundMulti_forumOff_unownedTopicFallsThrough guards the negative:
+// with forum mode off (forumChatID 0), threadID>0 messages keep the legacy
+// chat-keyed fallback so non-forum / discussion-thread groups are unaffected.
+func TestRouteInboundMulti_forumOff_unownedTopicFallsThrough(t *testing.T) {
+	r := NewRouter()
+	// no SetForumChatID → forum mode off
+
+	a := &Shim{ID: "a"}
+	r.Register(a)
+	r.RecordOutbound("a", forumChat, 0)
+
+	got := r.RouteInboundMulti(forumChat, "plain", 0, 7)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID, "forum off → legacy fallthrough preserved")
+}
+
 func TestRouteInboundMultiNoMentionFallsThroughToOwner(t *testing.T) {
 	r := NewRouter()
 	a := &Shim{ID: "a"}
