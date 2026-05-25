@@ -78,6 +78,13 @@ type Router struct {
 	lastAssigned map[string]time.Time  // shim_id → most recent inbound-route resolution
 	pins         map[string]pin        // chat_id → pin
 	replyOwners  map[string]*replyRing // chat_id → per-chat bounded message_id ownership
+
+	// forumChatID is the configured forum supergroup (access.State.ForumChatID),
+	// set once at wiring via SetForumChatID; 0 means forum mode off. In that
+	// supergroup every topic shares one chat_id, so the chat-keyed fallbacks
+	// (pin/owner/LRA/LRU) must not fire for a topic message that no shim owns —
+	// see RouteInboundMulti.
+	forumChatID int64
 }
 
 type pin struct {
@@ -163,6 +170,16 @@ func NewRouter() *Router {
 		pins:         map[string]pin{},
 		replyOwners:  map[string]*replyRing{},
 	}
+}
+
+// SetForumChatID records the configured forum supergroup so RouteInboundMulti
+// can isolate topic messages from the chat-keyed fallback. Called once at
+// daemon wiring after the env→state merge; 0 disables forum isolation.
+func (r *Router) SetForumChatID(id int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.forumChatID = id
 }
 
 func (r *Router) Register(s *Shim) {
@@ -806,11 +823,36 @@ func (r *Router) RouteInboundMulti(chatID, content string, replyToMsgID, threadI
 		// All mentions were unknown; fall through to owner/LRU.
 	}
 
+	// Forum topic with no owner and no explicit reply/mention target. The
+	// chat-keyed fallback below (pin/owner/LRA/LRU) is shared across every
+	// topic in the supergroup, so falling through would deliver the message to
+	// a shim living in a different topic. Drop instead — an unattached topic
+	// gets no answer rather than the wrong one.
+	if r.forumIsolatesLocked(chatID, threadID) {
+		slog.Warn("RouteInbound forum topic unowned — dropping to avoid cross-topic leak",
+			"chat_id", chatID, "thread_id", threadID)
+
+		return nil
+	}
+
 	if single, ok := r.routeInboundLocked(chatID); ok {
 		return []*Shim{single}
 	}
 
 	return nil
+}
+
+// forumIsolatesLocked reports whether an otherwise-unrouted inbound must be
+// dropped rather than handed to the chat-keyed fallback. True only for a
+// message inside a real forum topic (threadID > 0) of the configured forum
+// supergroup: there every topic shares one chat_id, so pin/owner/LRA/LRU would
+// leak the message into the wrong session's topic. Caller holds r.mu.
+func (r *Router) forumIsolatesLocked(chatID string, threadID int) bool {
+	if threadID <= 0 || r.forumChatID == 0 {
+		return false
+	}
+
+	return chatID == strconv.FormatInt(r.forumChatID, 10)
 }
 
 // resolveMentionsLocked translates mention tokens into Shim pointers.

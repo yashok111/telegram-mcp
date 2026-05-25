@@ -4,11 +4,25 @@ import (
 	"context"
 	"log/slog"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
 	"github.com/yakov/telegram-mcp/internal/ipc"
 )
+
+// defaultAutoSpawnCooldown bounds how often a single forum topic re-triggers an
+// auto-spawn. Covers the spawn-bootstrap window (fork → plugin load → shim
+// hello → BindTopic); once the topic is owned, the empty-topic path stops
+// firing. A failed spawn retries after the cooldown.
+const defaultAutoSpawnCooldown = 90 * time.Second
+
+// topicSpawner is the slice of SpawnRunner the Notifier needs to fork a CC
+// session into an empty forum topic. *SpawnRunner satisfies it.
+type topicSpawner interface {
+	Spawn(ctx context.Context, req bot.SpawnRequest) (string, error)
+}
 
 // Notifier implements bot.Notifier by routing daemon-side bot callbacks to
 // the right shim over IPC. The bot package doesn't import daemon — it sees
@@ -18,6 +32,29 @@ type Notifier struct {
 	store   *access.Store
 	typing  *TypingTracker
 	mutator *AdminMutator
+
+	// Forum auto-spawn: an inbound landing in a forum topic that no shim owns
+	// forks a CC session pinned to that topic instead of dropping the message.
+	// nil spawner disables. The original message is NOT forwarded to the new
+	// session (its MCP isn't ready that early) — the user re-asks once the
+	// spawned shim registers and claims the topic via the normal hello path.
+	spawner           topicSpawner
+	autoSpawnCooldown time.Duration
+	spawnMu           sync.Mutex
+	lastTopicSpawn    map[int]time.Time
+}
+
+// SetAutoSpawn enables forum auto-spawn with the given per-topic cooldown
+// (<=0 → default). A nil spawner leaves the feature off. Called once at daemon
+// wiring, before Poll, so the field writes happen-before any DeliverInbound.
+func (n *Notifier) SetAutoSpawn(spawner topicSpawner, cooldown time.Duration) {
+	if cooldown <= 0 {
+		cooldown = defaultAutoSpawnCooldown
+	}
+
+	n.spawner = spawner
+	n.autoSpawnCooldown = cooldown
+	n.lastTopicSpawn = map[int]time.Time{}
 }
 
 // NewNotifier wires the router used to fan out inbound messages plus, optionally,
@@ -41,7 +78,12 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 
 	targets := n.router.RouteInboundMulti(chatID, content, replyToMsgID, threadID)
 	if len(targets) == 0 {
+		if n.maybeAutoSpawn(chatID, threadID, meta) {
+			return
+		}
+
 		slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "thread_id", threadID, "user", meta["user"])
+
 		return
 	}
 
@@ -68,6 +110,96 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 		if err := t.Notify(ipc.NotifyInbound, params); err != nil {
 			slog.Error("inbound notify failed", "shim_id", t.ID, "chat_id", chatID, "err", err)
 		}
+	}
+}
+
+// maybeAutoSpawn forks a CC session into an unowned forum topic so a message in
+// an empty topic boots a session instead of silently dropping. Returns true
+// when it owns the inbound (spawn fired, or suppressed by the per-topic
+// cooldown) so the caller skips the "dropped" warning. The spawn is pinned to
+// the topic via SpawnRequest.ThreadID, so the new shim adopts it on hello and
+// future messages route there normally. Best-effort: the original message is
+// not forwarded — the user re-asks once the session is up.
+func (n *Notifier) maybeAutoSpawn(chatID string, threadID int, meta map[string]string) bool {
+	if n.spawner == nil || !n.inForumTopic(chatID, threadID) {
+		return false
+	}
+
+	n.spawnMu.Lock()
+	if last, seen := n.lastTopicSpawn[threadID]; seen && time.Since(last) < n.autoSpawnCooldown {
+		n.spawnMu.Unlock()
+		slog.Info("forum auto-spawn suppressed by cooldown", "thread_id", threadID, "chat_id", chatID)
+
+		return true
+	}
+
+	n.lastTopicSpawn[threadID] = time.Now()
+	n.spawnMu.Unlock()
+
+	req := bot.SpawnRequest{
+		Workdir:  n.topicWorkdir(threadID),
+		ChatID:   chatID,
+		UserID:   meta["user_id"],
+		ThreadID: threadID,
+	}
+	n.applyEffort(chatID, &req)
+
+	slog.Info("forum auto-spawn into empty topic",
+		"thread_id", threadID, "chat_id", chatID, "workdir", req.Workdir, "user", meta["user"])
+
+	// Spawn off the inbound goroutine: it forks a pty and posts a Telegram
+	// status message, neither of which should block the bot's update loop.
+	go func() {
+		if _, err := n.spawner.Spawn(context.Background(), req); err != nil {
+			slog.Warn("forum auto-spawn failed", "thread_id", threadID, "chat_id", chatID, "err", err)
+		}
+	}()
+
+	return true
+}
+
+// inForumTopic reports whether (chatID, threadID) is a real topic in the
+// configured forum supergroup — the only place auto-spawn fires.
+func (n *Notifier) inForumTopic(chatID string, threadID int) bool {
+	if threadID <= 0 || n.store == nil {
+		return false
+	}
+
+	fc := n.store.Load().ForumChatID
+
+	return fc != 0 && chatID == strconv.FormatInt(fc, 10)
+}
+
+// topicWorkdir returns the workdir recorded for threadID so the spawned session
+// opens in the topic's repo. Empty when the topic is untracked — SpawnRunner
+// then falls back to its configured default workdir.
+func (n *Notifier) topicWorkdir(threadID int) string {
+	if n.store == nil {
+		return ""
+	}
+
+	if meta, ok := n.store.Load().TopicsByThread[strconv.Itoa(threadID)]; ok {
+		return meta.Workdir
+	}
+
+	return ""
+}
+
+// applyEffort copies the chat's configured model/thinking budget onto req so an
+// auto-spawn honors /effort exactly like a manual /spawn.
+func (n *Notifier) applyEffort(chatID string, req *bot.SpawnRequest) {
+	if n.store == nil {
+		return
+	}
+
+	level, ok := n.store.Load().EffortByChat[chatID]
+	if !ok {
+		return
+	}
+
+	if cfg, found := bot.ResolveEffort(level); found {
+		req.Model = cfg.Model
+		req.ThinkingTokens = cfg.ThinkingTokens
 	}
 }
 

@@ -189,6 +189,13 @@ func runDaemon(stateDir string) error {
 
 	defer spawnRunner.Stop()
 
+	// Forum auto-spawn: a message in a forum topic that no shim owns forks a CC
+	// session pinned to that topic instead of dropping. Default on; only fires
+	// in the configured forum supergroup (see Notifier.inForumTopic).
+	if !forumAutoSpawnDisabled() {
+		notifier.SetAutoSpawn(spawnRunner, resolveDurationEnv("TELEGRAM_FORUM_AUTOSPAWN_COOLDOWN", 90*time.Second))
+	}
+
 	adminSpawner := daemonpkg.NewAdminSpawner(resolveAdminBin(), daemonpkg.NewExecAdminCommander())
 
 	go adminSpawner.Run(ctx)
@@ -233,6 +240,8 @@ func runDaemon(stateDir string) error {
 	if err := applyForumChatID(store); err != nil {
 		slog.Warn("forum chat id env apply failed", "err", err)
 	}
+
+	router.SetForumChatID(store.Load().ForumChatID)
 
 	tgBot.SetTopicCloser(daemonpkg.NewTopicCloser(router, store, tgBot, spawnRunner))
 
@@ -737,6 +746,18 @@ func buildShimLogs(stateDir string) (*daemonpkg.ShimLogs, error) {
 
 func shimLogDisabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("TELEGRAM_SHIM_LOG_DISABLE")))
+	switch v {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+
+	return true
+}
+
+// forumAutoSpawnDisabled reports whether the operator turned off auto-spawning
+// a session into an empty forum topic. Default (unset) is enabled.
+func forumAutoSpawnDisabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("TELEGRAM_FORUM_AUTOSPAWN_DISABLE")))
 	switch v {
 	case "", "0", "false", "no", "off":
 		return false

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -8,8 +10,64 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
 )
+
+// fakeSpawner records SpawnRequests and signals each call on fired so tests can
+// wait for the off-goroutine Spawn deterministically.
+type fakeSpawner struct {
+	mu    sync.Mutex
+	reqs  []bot.SpawnRequest
+	fired chan struct{}
+}
+
+func newFakeSpawner() *fakeSpawner { return &fakeSpawner{fired: make(chan struct{}, 16)} }
+
+func (f *fakeSpawner) Spawn(_ context.Context, req bot.SpawnRequest) (string, error) {
+	f.mu.Lock()
+	f.reqs = append(f.reqs, req)
+	f.mu.Unlock()
+
+	f.fired <- struct{}{}
+
+	return "spawn-test", nil
+}
+
+func (f *fakeSpawner) calls() []bot.SpawnRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.reqs)
+}
+
+// waitFired blocks until n Spawn calls land or the test times out.
+func (f *fakeSpawner) waitFired(t *testing.T, n int) {
+	t.Helper()
+
+	for range n {
+		select {
+		case <-f.fired:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for spawn (got %d of %d)", len(f.calls()), n)
+		}
+	}
+}
+
+func forumTestStore(t *testing.T, forumID int64, topics map[string]access.TopicMeta, effort map[string]string) *access.Store {
+	t.Helper()
+
+	st := access.NewStore(t.TempDir(), false)
+	require.NoError(t, st.Mutate(func(s *access.State) bool {
+		s.ForumChatID = forumID
+		s.TopicsByThread = topics
+		s.EffortByChat = effort
+
+		return true
+	}))
+
+	return st
+}
 
 type capturedNotify struct {
 	method string
@@ -307,4 +365,148 @@ func TestDeliverInboundDispatchesToMentionTargetOnly(t *testing.T) {
 
 	assert.Equal(t, 0, delivered["a"])
 	assert.Equal(t, 1, delivered["b"])
+}
+
+func TestNotifier_autoSpawn_firesOnEmptyForumTopic(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	store := forumTestStore(t, forumChatIDInt(),
+		map[string]access.TopicMeta{"7": {ThreadID: 7, Workdir: "/home/yakov/projects/telegram-mcp"}}, nil)
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Minute)
+
+	// No shim owns topic 7 → RouteInboundMulti returns empty → auto-spawn.
+	n.DeliverInbound("how do I run tests?", map[string]string{
+		"chat_id": forumChat, "message_thread_id": "7", "user_id": "42", "user": "yakov",
+	})
+
+	sp.waitFired(t, 1)
+
+	calls := sp.calls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, 7, calls[0].ThreadID, "spawn pinned to the topic")
+	assert.Equal(t, forumChat, calls[0].ChatID)
+	assert.Equal(t, "42", calls[0].UserID)
+	assert.Equal(t, "/home/yakov/projects/telegram-mcp", calls[0].Workdir, "workdir resolved from topic meta")
+}
+
+func TestNotifier_autoSpawn_dedupWithinCooldown(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	store := forumTestStore(t, forumChatIDInt(), nil, nil)
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Hour) // long cooldown
+
+	meta := map[string]string{"chat_id": forumChat, "message_thread_id": "7", "user_id": "42"}
+	n.DeliverInbound("first", meta)
+	n.DeliverInbound("second", meta) // suppressed: dedup decision is synchronous
+
+	sp.waitFired(t, 1)
+	assert.Len(t, sp.calls(), 1, "second message within cooldown must not spawn again")
+}
+
+func TestNotifier_autoSpawn_appliesEffort(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	store := forumTestStore(t, forumChatIDInt(), nil, map[string]string{forumChat: "high"})
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Minute)
+
+	n.DeliverInbound("q", map[string]string{"chat_id": forumChat, "message_thread_id": "7", "user_id": "42"})
+
+	sp.waitFired(t, 1)
+
+	cfg, ok := bot.ResolveEffort("high")
+	require.True(t, ok)
+	assert.Equal(t, cfg.Model, sp.calls()[0].Model, "auto-spawn honors per-chat /effort")
+	assert.Equal(t, cfg.ThinkingTokens, sp.calls()[0].ThinkingTokens)
+}
+
+func TestNotifier_autoSpawn_skipsGeneralTopic(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	store := forumTestStore(t, forumChatIDInt(), nil, nil)
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Minute)
+
+	// threadID 0 = General; not a topic → no auto-spawn (and no shims → drop).
+	n.DeliverInbound("hi", map[string]string{"chat_id": forumChat, "user_id": "42"})
+
+	assert.Empty(t, sp.calls(), "General topic must not auto-spawn")
+}
+
+func TestNotifier_autoSpawn_skipsNonForumChat(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	store := forumTestStore(t, forumChatIDInt(), nil, nil)
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Minute)
+
+	// A different chat with a thread id (e.g. linked-discussion group) is not
+	// the configured forum → no auto-spawn.
+	n.DeliverInbound("hi", map[string]string{"chat_id": "-9999", "message_thread_id": "7", "user_id": "42"})
+
+	assert.Empty(t, sp.calls(), "non-forum chat must not auto-spawn")
+}
+
+func TestNotifier_autoSpawn_skipsWhenForumOff(t *testing.T) {
+	r := NewRouter() // forum off (no SetForumChatID)
+
+	store := forumTestStore(t, 0, nil, nil) // ForumChatID 0
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Minute)
+
+	n.DeliverInbound("hi", map[string]string{"chat_id": forumChat, "message_thread_id": "7", "user_id": "42"})
+
+	assert.Empty(t, sp.calls(), "forum mode off → no auto-spawn")
+}
+
+func TestNotifier_autoSpawn_skipsWhenOwnerExists(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	var aSink []capturedNotify
+
+	r.Register(newCapturingShim("a", &aSink))
+	r.BindTopic("a", 7)
+
+	store := forumTestStore(t, forumChatIDInt(), nil, nil)
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Minute)
+
+	n.DeliverInbound("hi", map[string]string{"chat_id": forumChat, "message_thread_id": "7", "user_id": "42"})
+
+	assert.Empty(t, sp.calls(), "topic already owned → route to owner, no spawn")
+	assert.Len(t, aSink, 1, "owner shim receives the inbound")
+}
+
+func TestNotifier_autoSpawn_disabledWhenNoSpawner(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	store := forumTestStore(t, forumChatIDInt(), nil, nil)
+
+	n := NewNotifier(r, store, nil) // SetAutoSpawn never called
+
+	// Must not panic; just drops.
+	n.DeliverInbound("hi", map[string]string{"chat_id": forumChat, "message_thread_id": "7", "user_id": "42"})
 }
