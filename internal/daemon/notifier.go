@@ -32,6 +32,7 @@ type Notifier struct {
 	store   *access.Store
 	typing  *TypingTracker
 	mutator *AdminMutator
+	header  *HeaderManager
 
 	// Forum auto-spawn: an inbound landing in a forum topic that no shim owns
 	// forks a CC session pinned to that topic instead of dropping the message.
@@ -107,6 +108,8 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 	)
 
 	for _, t := range targets {
+		n.headerState(t.ID, HeaderBusy, "")
+
 		if err := t.Notify(ipc.NotifyInbound, params); err != nil {
 			slog.Error("inbound notify failed", "shim_id", t.ID, "chat_id", chatID, "err", err)
 		}
@@ -243,6 +246,17 @@ func (n *Notifier) LookupPermission(requestID string) (bot.PermissionDetails, bo
 // notifier wiring.
 func (n *Notifier) SetMutator(m *AdminMutator) { n.mutator = m }
 
+// SetHeader wires the topic-header manager (nil disables header state updates).
+// Called once at daemon wiring before Poll, so the write happens-before any
+// DeliverInbound/ResolvePermission.
+func (n *Notifier) SetHeader(m *HeaderManager) { n.header = m }
+
+// headerState pushes a lifecycle-state change to the topic header owned by
+// shimID. No-op when headers are off or the shim has no forum topic.
+func (n *Notifier) headerState(shimID string, st HeaderState, tool string) {
+	setShimHeaderState(n.header, n.router, shimID, st, tool)
+}
+
 // ResolveMutation implements bot.Notifier: routes an owner confirm tap to the
 // AdminMutator. The bot already gate-authenticated the tapper.
 func (n *Notifier) ResolveMutation(ctx context.Context, pendingID string, approve bool) (bool, string) {
@@ -261,6 +275,10 @@ func (n *Notifier) ResolvePermission(requestID, behavior string) {
 		slog.Warn("permission resolution dropped: shim gone", "request_id", requestID, "behavior", behavior)
 		return
 	}
+
+	// Permission resolved → the agent resumes work; flip 🔵 back to 🟡 busy
+	// until its next outbound settles the header to 🟢 idle.
+	n.headerState(target.ID, HeaderBusy, "")
 
 	if err := target.Notify(ipc.NotifyPermissionResolved, map[string]any{
 		"request_id": requestID,

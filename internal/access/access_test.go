@@ -468,3 +468,33 @@ func TestStore_Save_effortByChatNil_omitsField(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "effortByChat", "nil EffortByChat must be omitted from JSON")
 }
+
+func TestTopicMetaHeaderFieldsRoundTrip(t *testing.T) {
+	// non-zero values exercise the round-trip path
+	original := TopicMeta{
+		ThreadID:         7,
+		HeaderMessageID:  4242,
+		HeaderPinned:     true,
+		HeaderRenderHash: 0xdeadbeefcafef00d,
+	}
+
+	b, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var got TopicMeta
+	require.NoError(t, json.Unmarshal(b, &got))
+
+	assert.Equal(t, original.HeaderMessageID, got.HeaderMessageID)
+	assert.Equal(t, original.HeaderPinned, got.HeaderPinned)
+	assert.Equal(t, original.HeaderRenderHash, got.HeaderRenderHash)
+
+	// zero-valued TopicMeta must omit all three header keys (omitempty)
+	zero := TopicMeta{}
+	zb, err := json.Marshal(zero)
+	require.NoError(t, err)
+
+	s := string(zb)
+	assert.NotContains(t, s, `"header_message_id"`)
+	assert.NotContains(t, s, `"header_pinned"`)
+	assert.NotContains(t, s, `"header_render_hash"`)
+}

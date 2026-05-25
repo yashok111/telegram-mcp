@@ -136,7 +136,8 @@ func (m *mockAPI) respond(w http.ResponseWriter, method string, params map[strin
 			"chat":       map[string]any{"id": 1, "type": "private"},
 		}))
 	case "setMessageReaction", "answerCallbackQuery", "sendChatAction", "setMyCommands",
-		"editForumTopic", "closeForumTopic", "deleteForumTopic":
+		"editForumTopic", "closeForumTopic", "deleteForumTopic",
+		"pinChatMessage", "unpinChatMessage":
 		writeJSON(w, ok(true))
 	case "createForumTopic":
 		m.mu.Lock()
@@ -674,6 +675,45 @@ func TestDeleteForumTopic_passesThreadID(t *testing.T) {
 	calls := api.recordedCalls("deleteForumTopic")
 	require.Len(t, calls, 1)
 	assert.EqualValues(t, 42, calls[0].params["message_thread_id"])
+}
+
+func TestBotPinChatMessage(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+
+	require.NoError(t, b.PinChatMessage(t.Context(), -100123, 99))
+
+	calls := api.recordedCalls("pinChatMessage")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, -100123, calls[0].params["chat_id"])
+	assert.EqualValues(t, 99, calls[0].params["message_id"])
+	assert.EqualValues(t, true, calls[0].params["disable_notification"])
+}
+
+func TestBotPinChatMessage_noRights(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["pinChatMessage"] = "Bad Request: not enough rights to pin a message"
+
+	err := b.PinChatMessage(t.Context(), -100123, 99)
+	require.Error(t, err)
+}
+
+func TestBotUnpinChatMessage(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+
+	require.NoError(t, b.UnpinChatMessage(t.Context(), -100123, 99))
+
+	calls := api.recordedCalls("unpinChatMessage")
+	require.Len(t, calls, 1)
+	assert.EqualValues(t, -100123, calls[0].params["chat_id"])
+	assert.EqualValues(t, 99, calls[0].params["message_id"])
+}
+
+func TestBotUnpinChatMessage_error(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["unpinChatMessage"] = "Bad Request: not enough rights to unpin a message"
+
+	err := b.UnpinChatMessage(t.Context(), -100123, 99)
+	require.Error(t, err)
 }
 
 func TestSendFile_caption(t *testing.T) {

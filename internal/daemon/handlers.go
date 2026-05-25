@@ -51,6 +51,7 @@ type Handlers struct {
 	bgs        bgLister
 	sink       EventSink
 	mutator    *AdminMutator
+	header     *HeaderManager
 }
 
 func NewHandlers(store *access.Store, b botSurface, r *Router, typing *TypingTracker) *Handlers {
@@ -85,6 +86,18 @@ func (h *Handlers) SetEventSink(s EventSink) { h.sink = s }
 // be called before server.Listen — same unsynchronized-write rule as
 // SetShimLogs/SetAdminToken.
 func (h *Handlers) SetMutator(m *AdminMutator) { h.mutator = m }
+
+// SetHeader wires the topic-header manager (nil disables header state updates).
+// Must be called before server.Listen — same unsynchronized-write rule as
+// SetShimLogs/SetAdminToken.
+func (h *Handlers) SetHeader(m *HeaderManager) { h.header = m }
+
+// headerState pushes a lifecycle-state change to the topic header owned by the
+// shim with conn-id shimID. No-op when headers are off or the shim has no forum
+// topic.
+func (h *Handlers) headerState(shimID string, st HeaderState, tool string) {
+	setShimHeaderState(h.header, h.router, shimID, st, tool)
+}
 
 func (h *Handlers) emit(e Event) {
 	if h.sink != nil {
@@ -237,6 +250,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params js
 
 	h.router.RecordOutbound(h.shimID(c), p.ChatID, id)
 	h.typing.Done(ctx, p.ChatID)
+	h.headerState(h.shimID(c), HeaderIdle, "")
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -270,6 +284,7 @@ func (h *Handlers) HandleSendFile(ctx context.Context, c *ipc.Conn, params json.
 
 	h.router.RecordOutbound(h.shimID(c), p.ChatID, id)
 	h.typing.Done(ctx, p.ChatID)
+	h.headerState(h.shimID(c), HeaderIdle, "")
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -315,6 +330,10 @@ func (h *Handlers) HandleEditMessage(ctx context.Context, c *ipc.Conn, params js
 	slog.Info("bot.EditMessage ok", "chat_id", p.ChatID, "message_id", id, "text_len", len(text), "parse_mode", p.ParseMode)
 
 	h.typing.Done(ctx, p.ChatID)
+
+	// Deliberately no header idle-flip here: edit_message is the interim-progress
+	// tool, so the agent is typically still working. Idle is settled by a fresh
+	// reply (SendMessage/SendFile), not by an in-place edit.
 
 	return map[string]any{"message_id": id}, nil
 }
@@ -389,6 +408,8 @@ func (h *Handlers) HandleBroadcastPermission(ctx context.Context, c *ipc.Conn, p
 	}
 
 	slog.Info("permission registered", "request_id", p.RequestID, "shim_id", shimID, "tool", p.ToolName, "desc_len", len(p.Description), "preview_len", len(p.InputPreview))
+
+	h.headerState(shimID, HeaderPermission, p.ToolName)
 
 	target := h.pickPermissionTarget(shimID)
 	h.bot.SendPermissionPrompt(ctx, target, h.textPrefixFor(c), p.RequestID, p.ToolName)

@@ -30,6 +30,7 @@ type Daemon struct {
 	Router     *Router
 	Typing     *TypingTracker // nil disables typing-refresh goroutine
 	Forum      *Forum         // nil disables forum-topic allocation; required only when ForumChatID is configured
+	Header     *HeaderManager // nil disables pinned topic headers (forum mode only)
 	TopicSweep *TopicSweep    // nil disables periodic closed-topic deletion
 	ShimLogs   *ShimLogs      // nil disables per-shim log files
 	ShimsSweep *ShimsSweep    // nil disables shims/*.log retention sweep
@@ -90,6 +91,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	handlers.SetAdminToken(d.AdminToken)
 	handlers.SetRunners(d.SpawnRunner, d.BgRunner)
 	handlers.SetMutator(d.AdminMutator)
+	handlers.SetHeader(d.Header)
 
 	if d.EventBus != nil {
 		handlers.SetEventSink(d.EventBus)
@@ -111,6 +113,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.Forum != nil {
 			d.Forum.ReleaseLock(id)
 		}
+
+		d.headerDisconnect(id)
 
 		d.Router.Drop(id)
 
@@ -185,6 +189,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				// owner immediately.
 				d.Router.BindTopic(id, tid)
 				m["topic_id"] = tid
+				d.Header.Ensure(hctx, tid) // nil-safe; no-op when headers disabled
 			}
 		}
 
@@ -235,6 +240,10 @@ func (d *Daemon) startBackgroundWorkers(wg *sync.WaitGroup) {
 		wg.Go(func() { d.TopicSweep.Run(d.dctx) })
 	}
 
+	if d.Header != nil {
+		wg.Go(func() { d.Header.Run(d.dctx) })
+	}
+
 	if ic := NewInboxCleanup(d.Store, d.InboxTTL, time.Hour); ic != nil {
 		wg.Go(func() { ic.Run(d.dctx) })
 	}
@@ -265,6 +274,19 @@ func (d *Daemon) startBackgroundWorkers(wg *sync.WaitGroup) {
 
 	if d.AdminMutator != nil {
 		wg.Go(func() { d.AdminMutator.Run(d.dctx) })
+	}
+}
+
+// headerDisconnect flips the disconnecting shim's topic header to ⚪ before the
+// shim is dropped from the Router — TopicForShim needs it still registered.
+// No-op when headers are disabled (Header nil → Disconnected guards it).
+func (d *Daemon) headerDisconnect(shimID string) {
+	if d.Header == nil {
+		return
+	}
+
+	if tid, ok := d.Router.TopicForShim(shimID); ok {
+		d.Header.Disconnected(tid)
 	}
 }
 
