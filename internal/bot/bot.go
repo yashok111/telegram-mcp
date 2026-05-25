@@ -253,13 +253,32 @@ func (b *Bot) onCommand(ctx *th.Context, msg telego.Message) error {
 
 // handleCommand routes /start, /help, /status. DM-only — group commands would
 // leak pairing codes and confirm bot presence in unapproved chats.
+// routeForumCommand dispatches commands that are valid inside a forum
+// supergroup topic. These run before the DM gate (their own gate is
+// topicCommandGate). Returns true when it consumed the message.
+func (b *Bot) routeForumCommand(ctx context.Context, msg telego.Message, cmd string) bool {
+	switch {
+	case cmd == "topic":
+		b.handleTopicCommand(ctx, msg)
+		return true
+	case cmd == "spawn" && msg.Chat.Type == "supergroup":
+		// /spawn from inside a forum topic (only supergroups have topics)
+		// pins the spawn to that topic; the DM path in handleCommand still
+		// handles /spawn in a private chat. Plain groups fall through and
+		// drop silently rather than leaking a presence-confirming reply.
+		b.handleSpawnInTopic(ctx, msg)
+		return true
+	default:
+		return false
+	}
+}
+
 func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	cmd := commandName(msg.Text)
 
-	// Forum-topic commands run inside a supergroup topic, not DM. Branch
-	// before the DM gate so the supergroup case isn't filtered out below.
-	if cmd == "topic" {
-		b.handleTopicCommand(ctx, msg)
+	// Forum-supergroup commands run inside a topic, not DM, so they branch
+	// before the DM gate below.
+	if b.routeForumCommand(ctx, msg, cmd) {
 		return nil
 	}
 

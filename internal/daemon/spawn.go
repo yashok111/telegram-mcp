@@ -166,6 +166,10 @@ type spawnTask struct {
 	info   bot.SpawnTaskInfo
 	cancel func()
 	pid    int
+	// topicThreadID is the forum topic the /spawn was issued from (0 for
+	// DM-launched spawns). TopicForSpawn exposes it so Forum.AllocateOrReuse
+	// seats the spawned shim in that exact topic on hello.
+	topicThreadID int
 }
 
 // IdleLookup reports the idle duration for the shim currently paired with
@@ -393,7 +397,9 @@ func (r *SpawnRunner) Cancel(id string) error {
 
 // reserveSlot atomically picks a fresh spawn_id, enforces MaxParallel and
 // the per-user hourly cap, and seeds tasks[id] with a starting-status entry.
-func (r *SpawnRunner) reserveSlot(userID string) (string, error) {
+// threadID is the forum topic the spawn is pinned to (0 for DM) — set at
+// creation so TopicForSpawn is correct from the first call, before cmd.Start.
+func (r *SpawnRunner) reserveSlot(userID string, threadID int) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -439,7 +445,8 @@ func (r *SpawnRunner) reserveSlot(userID string) (string, error) {
 			UserID:    userID,
 			Status:    string(SpawnStatusStarting),
 		},
-		cancel: func() {},
+		cancel:        func() {},
+		topicThreadID: threadID,
 	}
 
 	return id, nil
@@ -469,7 +476,7 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 		workdir, _ = os.UserHomeDir()
 	}
 
-	id, err := r.reserveSlot(req.UserID)
+	id, err := r.reserveSlot(req.UserID, req.ThreadID)
 	if err != nil {
 		return "", err
 	}
@@ -501,7 +508,8 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 		cancel()
 		r.releaseSlot(id, SpawnStatusFailed)
 		_, _ = r.bot.SendMessage(ctx, req.ChatID,
-			fmt.Sprintf("❌ Spawn %s failed to start: %v", id, perr), bot.SendOpts{})
+			fmt.Sprintf("❌ Spawn %s failed to start: %v", id, perr),
+			bot.SendOpts{MessageThreadID: req.ThreadID})
 
 		return "", fmt.Errorf("start: %w", perr)
 	}
@@ -532,9 +540,25 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 	_, _ = r.bot.SendMessage(ctx, req.ChatID,
 		fmt.Sprintf("🚀 Spawn %s started · pid=%d · workdir=%s\nWait a moment for the shim to register — then use /sessions or @<alias> to talk to it.",
 			id, proc.Pid(), workdir),
-		bot.SendOpts{})
+		bot.SendOpts{MessageThreadID: req.ThreadID})
 
 	return id, nil
+}
+
+// TopicForSpawn reports the forum thread_id a spawn was pinned to — the topic
+// the /spawn command was issued from. ok=false when the spawn is unknown or
+// was launched outside a topic (DM). Wired into Forum so the spawned shim
+// seats in that exact topic at hello instead of allocating one by workdir.
+func (r *SpawnRunner) TopicForSpawn(id string) (int, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	t, ok := r.tasks[id]
+	if !ok || t.topicThreadID == 0 {
+		return 0, false
+	}
+
+	return t.topicThreadID, true
 }
 
 // filterEnv returns a copy of env with any entry whose key matches one of the

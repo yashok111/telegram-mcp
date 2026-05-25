@@ -36,6 +36,11 @@ type Forum struct {
 	// from $HOME or with empty workdir get a fresh topic rather than
 	// schclassing into a shared bucket.
 	home string
+	// topicForSpawn resolves a spawn_id → the forum thread its /spawn was
+	// issued from (ok=false for user-launched shims, DM spawns, or when no
+	// lookup is wired). Wired to SpawnRunner.TopicForSpawn. When it resolves,
+	// the shim is seated in that exact topic (priority over label/workdir).
+	topicForSpawn func(spawnID string) (int, bool)
 }
 
 // NewForum constructs a Forum bound to a single Store + forumBot pair. isLive
@@ -43,9 +48,9 @@ type Forum struct {
 // reuse can distinguish a live lock holder from a stale one left by a crashed
 // or restarted daemon. $HOME resolution is at constructor time — if HOME
 // changes mid-process (not expected outside tests), restart the daemon.
-func NewForum(store *access.Store, b forumBot, isLive func(shimID string) bool) *Forum {
+func NewForum(store *access.Store, b forumBot, isLive func(shimID string) bool, topicForSpawn func(spawnID string) (int, bool)) *Forum {
 	home, _ := os.UserHomeDir()
-	return &Forum{store: store, bot: b, isLive: isLive, home: home}
+	return &Forum{store: store, bot: b, isLive: isLive, home: home, topicForSpawn: topicForSpawn}
 }
 
 // Enabled reports whether forum routing is active (ForumChatID configured).
@@ -70,18 +75,138 @@ func (f *Forum) resolveReuseKey(shim *Shim) (string, bool) {
 	return "", false
 }
 
-// AllocateOrReuse picks a forum topic for shim — reusing an existing one
-// keyed by label/workdir when free, otherwise creating a fresh topic via
-// the Telegram API. Returns the thread_id to use for outbound messages.
+// AllocateOrReuse picks a forum topic for shim and returns its thread_id.
 //
-// Returns (0, nil) when ForumChatID is unset (feature off) — caller treats
-// that as "no topic routing for this shim" and falls back to DM-mode.
+// A /spawn-pinned shim (its spawn_id resolves to a forum thread via
+// topicForSpawn) is seated in that exact topic — adopted in place, no new
+// topic created — which takes priority over label/workdir. If that topic is
+// held by another live shim, it falls through to the normal allocation below
+// rather than co-locating two sessions in one topic.
+//
+// Otherwise it reuses an existing topic keyed by label/workdir when free, or
+// creates a fresh one. Returns (0, nil) when ForumChatID is unset (feature
+// off) — caller falls back to DM-mode.
+func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
+	if forced, ok := f.forcedTopic(shim); ok {
+		tid, handled, err := f.adoptForcedTopic(ctx, shim, forced)
+		if handled {
+			return tid, err
+		}
+		// Pinned topic held by another live shim — fall through to normal
+		// label/workdir/fresh allocation instead of co-locating.
+	}
+
+	return f.allocateByReuseKey(ctx, shim)
+}
+
+// forcedTopic reports the forum thread the shim's /spawn was issued from, via
+// the wired spawn→thread lookup. ok=false for user-launched shims (no
+// spawn_id), DM spawns (thread 0), or when no lookup is wired.
+func (f *Forum) forcedTopic(shim *Shim) (int, bool) {
+	if shim.SpawnID == "" || f.topicForSpawn == nil {
+		return 0, false
+	}
+
+	tid, ok := f.topicForSpawn(shim.SpawnID)
+	if !ok || tid <= 0 {
+		// Guard the boundary: a 0/negative thread is never a real topic, so
+		// never let it become a "topic:0" reuse-key.
+		return 0, false
+	}
+
+	return tid, true
+}
+
+// adoptForcedTopic seats shim in the exact forum thread its /spawn was issued
+// from. The thread already exists in Telegram (the user typed /spawn in it),
+// so no CreateForumTopic call is made — meta plus a `topic:<tid>` reuse-key
+// are registered and locked to shim. A free or stale-locked topic is
+// (re)claimed; one held by another *live* shim is refused (handled=false) so
+// the caller falls back to normal allocation. handled=true means the result
+// is authoritative (adopted, or feature off); handled=false means "not mine,
+// allocate normally".
+func (f *Forum) adoptForcedTopic(ctx context.Context, shim *Shim, forced int) (int, bool, error) {
+	reuseKey := "topic:" + strconv.Itoa(forced)
+	tidStr := strconv.Itoa(forced)
+
+	var (
+		forumChat int64
+		oldName   string
+		conflict  bool
+	)
+
+	if err := f.store.Mutate(func(st *access.State) bool {
+		forumChat = st.ForumChatID
+		if forumChat == 0 {
+			return false
+		}
+
+		meta, exists := st.TopicsByThread[tidStr]
+		if exists && meta.LockedBy != "" && meta.LockedBy != shim.ID && f.connected(meta.LockedBy) {
+			conflict = true
+			return false
+		}
+
+		switch {
+		case !exists:
+			meta = access.TopicMeta{ThreadID: forced, Workdir: shim.Workdir, Label: shim.Label}
+		default:
+			oldName = meta.Name
+			if meta.LockedBy != "" && meta.LockedBy != shim.ID {
+				slog.Info("seizing stale topic lock for /spawn-pinned topic",
+					"thread_id", forced, "stale_locked_by", meta.LockedBy, "shim_id", shim.ID)
+			}
+		}
+
+		meta.LockedBy = shim.ID
+		meta.LastShimID = shim.ID
+
+		if st.TopicsByThread == nil {
+			st.TopicsByThread = map[string]access.TopicMeta{}
+		}
+
+		st.TopicsByThread[tidStr] = meta
+
+		if st.TopicsByReuseKey == nil {
+			st.TopicsByReuseKey = map[string]int{}
+		}
+
+		st.TopicsByReuseKey[reuseKey] = forced
+
+		return true
+	}); err != nil {
+		return 0, true, fmt.Errorf("forum: adopt pinned topic save: %w", err)
+	}
+
+	if conflict {
+		slog.Warn("/spawn target topic held by another live shim — using default allocation",
+			"thread_id", forced, "shim_id", shim.ID)
+
+		return 0, false, nil
+	}
+
+	if forumChat == 0 {
+		return 0, true, nil
+	}
+
+	// Label the adopted topic with the shim's alias, consistent with
+	// daemon-created topics. oldName=="" (untracked, user-made topic) forces
+	// the push; a reused topic only re-pushes on alias divergence.
+	f.resyncName(ctx, forumChat, forced, oldName, shim)
+	slog.Info("topic adopted for /spawn", "shim_id", shim.ID, "thread_id", forced, "reuse_key", reuseKey)
+
+	return forced, true, nil
+}
+
+// allocateByReuseKey reuses an existing topic keyed by label/workdir when
+// free, otherwise creates a fresh topic via the Telegram API. Returns the
+// thread_id to use for outbound messages.
 //
 // On parallel collision (reuse_key matches an existing topic still
 // LockedBy another shim), creates a fresh topic and logs a Warn. Concurrent
 // callers race only inside access.Store.Mutate; the loser sees a non-empty
 // LockedBy and falls through to fresh creation.
-func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
+func (f *Forum) allocateByReuseKey(ctx context.Context, shim *Shim) (int, error) {
 	var (
 		threadID  int
 		forumChat int64

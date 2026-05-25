@@ -90,12 +90,177 @@ func newForumFixture(t *testing.T, forumChatID int64) (*Forum, *access.Store, *f
 	// Default liveness: treat every lock holder as still connected, so reuse
 	// keeps the historical "locked → fresh" behavior unless a test opts a
 	// shim_id out of the live set to exercise stale-lock seizing.
-	f := NewForum(store, fb, func(string) bool { return true })
+	// nil topicForSpawn by default: most tests exercise label/workdir reuse,
+	// not /spawn topic pinning. Forced-topic tests set f.topicForSpawn directly.
+	f := NewForum(store, fb, func(string) bool { return true }, nil)
 	// Force a non-HOME workdir comparison by overriding home — tests pass
 	// explicit workdirs and verify whether reuse triggers.
 	f.home = "/test/home"
 
 	return f, store, fb
+}
+
+// pinSpawn wires a topicForSpawn lookup that maps spawnID → threadID.
+func pinSpawn(spawnID string, threadID int) func(string) (int, bool) {
+	return func(id string) (int, bool) {
+		if id == spawnID {
+			return threadID, true
+		}
+
+		return 0, false
+	}
+}
+
+func TestForum_adoptsForcedTopic_untracked(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+	f.topicForSpawn = pinSpawn("spawn-x", 200)
+
+	shim := &Shim{ID: "shim-a", Alias: "s1", SpawnID: "spawn-x", Workdir: "/projects/foo"}
+	tid, err := f.AllocateOrReuse(context.Background(), shim)
+	require.NoError(t, err)
+	assert.Equal(t, 200, tid, "seats in the pinned topic")
+	assert.Empty(t, fb.createName, "adopts the existing thread — no fresh topic created")
+
+	st := store.Load()
+	assert.Equal(t, 200, st.TopicsByReuseKey["topic:200"], "topic:<tid> reuse-key registered")
+	meta := st.TopicsByThread["200"]
+	assert.Equal(t, "shim-a", meta.LockedBy)
+	assert.Equal(t, 200, meta.ThreadID)
+
+	require.Len(t, fb.editName, 1, "adopted topic labelled with the alias")
+	assert.Equal(t, "@s1 — foo", fb.editName[0])
+}
+
+func TestForum_forcedTopic_priorityOverLabel(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+	f.topicForSpawn = pinSpawn("spawn-x", 200)
+
+	// Shim carries BOTH a label and a pinned spawn topic; forced must win.
+	shim := &Shim{ID: "shim-a", Alias: "s1", Label: "mylabel", SpawnID: "spawn-x", Workdir: "/projects/foo"}
+	tid, err := f.AllocateOrReuse(context.Background(), shim)
+	require.NoError(t, err)
+	assert.Equal(t, 200, tid)
+
+	st := store.Load()
+	assert.Equal(t, 200, st.TopicsByReuseKey["topic:200"])
+	assert.NotContains(t, st.TopicsByReuseKey, "label:mylabel", "forced topic wins over label")
+	assert.Empty(t, fb.createName)
+}
+
+func TestForum_forcedTopic_reusesTrackedFreeTopic(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+	f.topicForSpawn = pinSpawn("spawn-x", 200)
+
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByThread = map[string]access.TopicMeta{"200": {ThreadID: 200, Name: "@s9 — old", LockedBy: ""}}
+		st.TopicsByReuseKey = map[string]int{"topic:200": 200}
+
+		return true
+	}))
+
+	shim := &Shim{ID: "shim-a", Alias: "s1", SpawnID: "spawn-x", Workdir: "/projects/foo"}
+	tid, err := f.AllocateOrReuse(context.Background(), shim)
+	require.NoError(t, err)
+	assert.Equal(t, 200, tid)
+	assert.Empty(t, fb.createName, "reuses the tracked free topic")
+	assert.Equal(t, "shim-a", store.Load().TopicsByThread["200"].LockedBy)
+
+	require.Len(t, fb.editName, 1, "name diverged @s9→@s1 → resynced")
+	assert.Equal(t, "@s1 — foo", fb.editName[0])
+}
+
+func TestForum_forcedTopic_seizesStaleLock(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+	f.isLive = func(string) bool { return false } // holder is gone
+	f.topicForSpawn = pinSpawn("spawn-x", 200)
+
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByThread = map[string]access.TopicMeta{"200": {ThreadID: 200, Name: "@s1 — foo", LockedBy: "dead-shim"}}
+		st.TopicsByReuseKey = map[string]int{"topic:200": 200}
+
+		return true
+	}))
+
+	shim := &Shim{ID: "shim-a", Alias: "s1", SpawnID: "spawn-x", Workdir: "/projects/foo"}
+	tid, err := f.AllocateOrReuse(context.Background(), shim)
+	require.NoError(t, err)
+	assert.Equal(t, 200, tid, "stale lock seized, pinned topic reused")
+	assert.Equal(t, "shim-a", store.Load().TopicsByThread["200"].LockedBy)
+	assert.Empty(t, fb.createName)
+}
+
+func TestForum_forcedTopic_conflictFallsBackToNormal(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123) // default: every holder live
+	f.topicForSpawn = pinSpawn("spawn-x", 200)
+
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByThread = map[string]access.TopicMeta{"200": {ThreadID: 200, Name: "@s5 — x", LockedBy: "live-shim"}}
+		st.TopicsByReuseKey = map[string]int{"topic:200": 200}
+
+		return true
+	}))
+
+	// Non-home workdir → normal fallback path allocates a fresh topic.
+	shim := &Shim{ID: "shim-a", Alias: "s1", SpawnID: "spawn-x", Workdir: "/projects/foo"}
+	tid, err := f.AllocateOrReuse(context.Background(), shim)
+	require.NoError(t, err)
+	assert.Positive(t, tid, "fallback actually allocated a topic")
+	assert.NotEqual(t, 200, tid, "must not co-locate into a live-held pinned topic")
+	require.Len(t, fb.createName, 1, "fell back to a fresh topic via the workdir key")
+	assert.Equal(t, "live-shim", store.Load().TopicsByThread["200"].LockedBy, "live holder untouched")
+}
+
+func TestForum_forcedTopic_zeroThreadFallsThrough(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+	// A lookup that resolves but yields thread 0 must not be treated as a
+	// pin (defends the topic:0 footgun); fall through to normal allocation.
+	f.topicForSpawn = pinSpawn("spawn-dm", 0)
+
+	shim := &Shim{ID: "shim-a", Alias: "s1", SpawnID: "spawn-dm", Workdir: "/projects/foo"}
+	tid, err := f.AllocateOrReuse(context.Background(), shim)
+	require.NoError(t, err)
+	assert.Positive(t, tid, "allocated via the normal workdir path")
+	require.Len(t, fb.createName, 1, "fresh topic, not an adopt")
+
+	st := store.Load()
+	assert.NotContains(t, st.TopicsByReuseKey, "topic:0", "never register a topic:0 key")
+	assert.Equal(t, tid, st.TopicsByReuseKey["workdir:/projects/foo"], "normal workdir key registered")
+}
+
+func TestForum_forcedTopic_reconnectSameTopic(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123)
+	f.topicForSpawn = pinSpawn("spawn-x", 200)
+
+	first, err := f.AllocateOrReuse(context.Background(),
+		&Shim{ID: "shim-a", Alias: "s1", SpawnID: "spawn-x", Workdir: "/projects/foo"})
+	require.NoError(t, err)
+	assert.Equal(t, 200, first)
+
+	f.ReleaseLock("shim-a")
+
+	// Reconnect: fresh shim_id, same spawn_id → back into the same topic.
+	second, err := f.AllocateOrReuse(context.Background(),
+		&Shim{ID: "shim-b", Alias: "s1", SpawnID: "spawn-x", Workdir: "/projects/foo"})
+	require.NoError(t, err)
+	assert.Equal(t, 200, second, "reconnect stays in the pinned topic")
+	assert.Empty(t, fb.createName, "never creates a topic for a pinned spawn")
+}
+
+func TestForum_noSpawnID_skipsForcedPath(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123)
+
+	called := false
+	f.topicForSpawn = func(string) (int, bool) {
+		called = true
+		return 0, false
+	}
+
+	// No SpawnID → forced path must not even consult the lookup.
+	_, err := f.AllocateOrReuse(context.Background(),
+		&Shim{ID: "shim-a", Alias: "s1", Workdir: "/test/home"})
+	require.NoError(t, err)
+	assert.False(t, called, "lookup not consulted for a user-launched shim")
+	require.Len(t, fb.createName, 1, "normal allocation path runs")
 }
 
 func TestForum_disabled_whenForumChatIDZero(t *testing.T) {
