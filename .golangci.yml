@@ -118,15 +118,19 @@ linters:
         path: internal/
       # Test files: gosec's "file inclusion via variable" is a false positive
       # for fixture paths derived from t.TempDir(); G306 fires on 0o644 perms
-      # for non-secret temp files; G120 fires on the httptest mock parser.
+      # for non-secret temp files; G302 fires on the 0o500/0o700 directory perms
+      # tests set deliberately to exercise permission-denied paths (a directory
+      # cannot be 0o600); G120 fires on the httptest mock parser.
       - linters: [gosec]
-        text: 'G304|G306|G120'
+        text: 'G302|G304|G306|G120'
         path: _test\.go
       # main.go / bot.go / daemon read files whose paths are derived from
-      # configured state dirs, not user input. G304 here is noise.
+      # configured state dirs, not user input. G304 here is noise. sessions_sweep
+      # reads session snapshots from the daemon-owned sessions dir; shim_log opens
+      # per-shim logs under the daemon's log dir — both paths are internal.
       - linters: [gosec]
         text: G304
-        path: 'cmd/server/main\.go|cmd/server/self\.go|internal/bot/bot\.go|internal/daemon/daemon\.go|internal/daemon/log_redirect\.go'
+        path: 'cmd/server/main\.go|cmd/server/self\.go|internal/bot/bot\.go|internal/daemon/daemon\.go|internal/daemon/log_redirect\.go|internal/daemon/sessions_sweep\.go|internal/daemon/shim_log\.go'
       # spawn.go execs /proc/self/exe (or operator-configured BinaryPath); G204
       # complains about subprocess-with-variable but the binary is trusted.
       - linters: [gosec]

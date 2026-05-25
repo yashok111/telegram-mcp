@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +20,7 @@ func TestEventLogAppendAmortizedStaysBoundedAndReadable(t *testing.T) {
 	// Far more appends than MaxEvents, crossing several compaction boundaries via
 	// the O(1) appendLine path in between.
 	for i := range 200 {
-		require.NoError(t, l.Append(Event{Type: "t", Subject: fmt.Sprintf("%d", i)}))
+		require.NoError(t, l.Append(Event{Type: "t", Subject: strconv.Itoa(i)}))
 	}
 
 	got, err := l.Recent(0)

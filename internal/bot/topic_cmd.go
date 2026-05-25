@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,10 +93,8 @@ func (b *Bot) topicCommandGate(ctx context.Context, msg *telego.Message, st acce
 	}
 
 	senderID := strconv.FormatInt(msg.From.ID, 10)
-	for _, allow := range st.AllowFrom {
-		if allow == senderID {
-			return true
-		}
+	if slices.Contains(st.AllowFrom, senderID) {
+		return true
 	}
 
 	slog.Warn("topic command denied: sender not allowlisted",
@@ -169,6 +168,7 @@ func (b *Bot) handleTopicRename(ctx context.Context, msg *telego.Message, newNam
 		b.sendPlain(ctx, msg.Chat.ID, msg.MessageThreadID,
 			fmt.Sprintf("Topic name too long: %d chars (max %d).",
 				utf8.RuneCountInString(newName), maxTopicNameRunes))
+
 		return
 	}
 
@@ -206,14 +206,7 @@ func (b *Bot) handleTopicsListCommand(ctx context.Context, msg telego.Message) {
 
 	st := b.store.Load()
 	senderID := strconv.FormatInt(msg.From.ID, 10)
-
-	allowed := false
-	for _, a := range st.AllowFrom {
-		if a == senderID {
-			allowed = true
-			break
-		}
-	}
+	allowed := slices.Contains(st.AllowFrom, senderID)
 
 	if !allowed {
 		return
@@ -299,6 +292,7 @@ func (b *Bot) sendPlain(ctx context.Context, chatID int64, threadID int, text st
 // trimmed. Returns nil for "/topic" alone.
 func topicArgs(text string) []string {
 	text = strings.TrimSpace(text)
+
 	parts := strings.Fields(text)
 	if len(parts) <= 1 {
 		return nil

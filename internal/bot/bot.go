@@ -826,31 +826,7 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 	slog.Info("callback received", "behavior", behavior, "request_id", requestID, "user_id", q.From.ID)
 
 	if behavior == "more" {
-		details, ok := b.notifier.LookupPermission(requestID)
-		if !ok {
-			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-				CallbackQueryID: q.ID,
-				Text:            "Details no longer available.",
-			})
-
-			return nil
-		}
-
-		expanded := fmt.Sprintf("🔐 Permission: %s\n\ntool_name: %s\ndescription: %s\ninput_preview:\n%s",
-			details.ToolName, details.ToolName, details.Description, details.InputPreview)
-
-		keyboard := tu.InlineKeyboard(tu.InlineKeyboardRow(
-			tu.InlineKeyboardButton("✅ Allow").WithCallbackData("perm:allow:"+requestID),
-			tu.InlineKeyboardButton("❌ Deny").WithCallbackData("perm:deny:"+requestID),
-		))
-		if msg, ok := q.Message.(*telego.Message); ok && msg != nil {
-			_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID, expanded).
-				WithReplyMarkup(keyboard))
-		}
-
-		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
-
-		return nil
+		return b.handleMoreCallback(ctx, q, requestID)
 	}
 
 	switch behavior {
@@ -881,6 +857,37 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID,
 			msg.Text+"\n\n"+label))
 	}
+
+	return nil
+}
+
+// handleMoreCallback expands a permission prompt with the full tool details
+// when the user taps "ℹ See more", then restores the Allow/Deny buttons so the
+// request can still be answered. Authorization already ran in handleCallback.
+func (b *Bot) handleMoreCallback(ctx context.Context, q telego.CallbackQuery, requestID string) error {
+	details, ok := b.notifier.LookupPermission(requestID)
+	if !ok {
+		_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: q.ID,
+			Text:            "Details no longer available.",
+		})
+
+		return nil
+	}
+
+	expanded := fmt.Sprintf("🔐 Permission: %s\n\ntool_name: %s\ndescription: %s\ninput_preview:\n%s",
+		details.ToolName, details.ToolName, details.Description, details.InputPreview)
+
+	keyboard := tu.InlineKeyboard(tu.InlineKeyboardRow(
+		tu.InlineKeyboardButton("✅ Allow").WithCallbackData("perm:allow:"+requestID),
+		tu.InlineKeyboardButton("❌ Deny").WithCallbackData("perm:deny:"+requestID),
+	))
+	if msg, ok := q.Message.(*telego.Message); ok && msg != nil {
+		_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID, expanded).
+			WithReplyMarkup(keyboard))
+	}
+
+	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
 
 	return nil
 }

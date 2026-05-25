@@ -219,12 +219,15 @@ func TestAdminToolGroupsPartition(t *testing.T) {
 	assert.Len(t, adminToolNames, 30)
 
 	assert.Len(t, adminObserveToolNames, 24, "observe = read(16) + Tier-3(8), no Tier-2")
+
 	for _, t2 := range adminTier2ToolNames {
 		assert.NotContains(t, adminObserveToolNames, t2, "observer set must exclude Tier-2 tool %q", t2)
 	}
+
 	for _, r := range adminReadToolNames {
 		assert.Contains(t, adminObserveToolNames, r)
 	}
+
 	for _, t3 := range adminTier3ToolNames {
 		assert.Contains(t, adminObserveToolNames, t3)
 	}

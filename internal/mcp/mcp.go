@@ -329,7 +329,7 @@ func (s *Server) registerNotifications() {
 // handlePermissionRequest is the testable body of the permission_request
 // notification. Pending-store always happens upfront so a concurrent "See more"
 // callback still works defensively, even when a rule short-circuits broadcast.
-func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolName, description, inputPreview string) {
+func (s *Server) handlePermissionRequest(_ context.Context, requestID, toolName, description, inputPreview string) {
 	slog.Info("permission_request received", "request_id", requestID, "tool", toolName, "desc_len", len(description), "preview_len", len(inputPreview))
 
 	if requestID == "" {
@@ -383,16 +383,12 @@ func (s *Server) handlePermissionRequest(ctx context.Context, requestID, toolNam
 	}
 
 	if b := s.Bot(); b != nil {
-		s.broadcastWG.Add(1)
-
-		go func() {
-			defer s.broadcastWG.Done()
-
+		s.broadcastWG.Go(func() {
 			bctx, cancel := context.WithTimeout(s.broadcastCtx, broadcastTimeout)
 			defer cancel()
 
 			b.BroadcastPermissionRequest(bctx, requestID, toolName)
-		}()
+		})
 	} else {
 		slog.Warn("permission_request not broadcast: bot not attached", "request_id", requestID)
 	}

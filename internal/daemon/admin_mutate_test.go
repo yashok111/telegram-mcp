@@ -499,6 +499,7 @@ func TestApplyBroadcastSendsToAllowlist(t *testing.T) {
 	require.Len(t, fb.sentCalls, 2)
 	assert.ElementsMatch(t, []string{"330621952", "999"},
 		[]string{fb.sentCalls[0].chatID, fb.sentCalls[1].chatID})
+
 	for _, c := range fb.sentCalls {
 		assert.Equal(t, "heads up", c.text)
 	}

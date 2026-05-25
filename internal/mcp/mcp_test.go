@@ -475,6 +475,7 @@ func TestHandlePermissionRequest_broadcastCtxCancelAborts(t *testing.T) {
 	srv.broadcastCtxCancel()
 
 	done := make(chan struct{})
+
 	go func() {
 		srv.broadcastWG.Wait()
 		close(done)
@@ -500,9 +501,11 @@ type blockingBot struct {
 func (b *blockingBot) SendMessage(_ context.Context, _, _ string, _ bot.SendOpts) (int, error) {
 	return 0, nil
 }
+
 func (b *blockingBot) SendFile(_ context.Context, _, _ string, _ bot.SendOpts) (int, error) {
 	return 0, nil
 }
+
 func (b *blockingBot) EditMessage(_ context.Context, _ string, _ int, _, _ string) (int, error) {
 	return 0, nil
 }
@@ -544,6 +547,7 @@ func TestHandlePermissionRequest_preservesCreatedAtOnUpdate(t *testing.T) {
 	srv, _, _ := newServerWithAllowlist(t, "123")
 
 	original := time.Now().Add(-30 * time.Minute)
+
 	srv.permMu.Lock()
 	srv.pending["abc"] = pendingEntry{
 		details:   bot.PermissionDetails{ToolName: "Bash"},
