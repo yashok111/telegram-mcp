@@ -18,11 +18,18 @@ type fakeSweepBot struct {
 	mu        sync.Mutex
 	deleted   []int
 	failFirst bool
+	// forceErr, when set, is returned for every DeleteForumTopic call without
+	// recording a deletion. Lets a test drive the terminal-vs-transient branch.
+	forceErr error
 }
 
 func (f *fakeSweepBot) DeleteForumTopic(_ context.Context, _ int64, threadID int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.forceErr != nil {
+		return f.forceErr
+	}
 
 	if f.failFirst {
 		f.failFirst = false
@@ -69,6 +76,46 @@ func TestTopicSweep_emptyClosedTopics_noop(t *testing.T) {
 	s, _, b := newSweepFixture(t, 1*time.Second)
 	s.SweepOnce(context.Background())
 	assert.Empty(t, b.deleted)
+}
+
+func seedExpiredClosedTopic(t *testing.T, store *access.Store, threadID int, reuseKey string) {
+	t.Helper()
+
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.ClosedTopics = []access.ClosedTopic{{ThreadID: threadID, ClosedAt: time.Now().Add(-time.Hour).Unix()}}
+		st.TopicsByThread = map[string]access.TopicMeta{strconv.Itoa(threadID): {ThreadID: threadID}}
+		st.TopicsByReuseKey = map[string]int{reuseKey: threadID}
+
+		return true
+	}))
+}
+
+func TestTopicSweep_terminalError_dropsQueueEntry(t *testing.T) {
+	s, store, b := newSweepFixture(t, 1*time.Second)
+	seedExpiredClosedTopic(t, store, 283, "workdir:/x")
+
+	// "message thread not found" = already gone in Telegram → don't retry forever.
+	b.forceErr = errors.New("telego: deleteForumTopic: api: 400 \"Bad Request: message thread not found\"")
+
+	s.SweepOnce(context.Background())
+
+	st := store.Load()
+	assert.Empty(t, st.ClosedTopics, "terminal delete error drops the queue entry — no infinite retry")
+	assert.NotContains(t, st.TopicsByThread, "283", "meta cleaned")
+	assert.NotContains(t, st.TopicsByReuseKey, "workdir:/x", "reuse key cleaned")
+	assert.Empty(t, b.deleted, "delete never actually succeeded")
+}
+
+func TestTopicSweep_transientError_retainsQueueEntry(t *testing.T) {
+	s, store, b := newSweepFixture(t, 1*time.Second)
+	seedExpiredClosedTopic(t, store, 283, "workdir:/x")
+
+	// "not enough rights" is recoverable → keep the entry for the next tick.
+	b.forceErr = errors.New("telego: deleteForumTopic: api: 400 \"Bad Request: not enough rights\"")
+
+	s.SweepOnce(context.Background())
+
+	assert.Len(t, store.Load().ClosedTopics, 1, "transient delete error retains the entry for retry")
 }
 
 func TestTopicSweep_deletesExpiredAndCleansState(t *testing.T) {

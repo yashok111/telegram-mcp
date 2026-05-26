@@ -526,6 +526,7 @@ func buildHeaderManager(store *access.Store, b *bot.Bot, router *daemonpkg.Route
 		resolveDurationEnv("TELEGRAM_TOPIC_HEADER_REFRESH", 5*time.Second),
 		resolveDurationEnv("TELEGRAM_TOPIC_HEADER_TICK", 60*time.Second))
 	router.SetHeaderHook(m.Refresh)
+	m.SetPurgeHook(router.DropTopic)
 
 	return m
 }

@@ -444,6 +444,36 @@ func TestNotifier_autoSpawn_firesOnEmptyForumTopic(t *testing.T) {
 	assert.Equal(t, "/home/yakov/projects/telegram-mcp", calls[0].Workdir, "workdir resolved from topic meta")
 }
 
+func TestNotifier_autoSpawn_evictsStaleCooldownEntries(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	store := forumTestStore(t, forumChatIDInt(), nil, nil)
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, 50*time.Millisecond) // short cooldown window
+
+	// Seed a stale cooldown entry for a topic that won't be touched again — it
+	// would otherwise leak in lastTopicSpawn forever.
+	n.spawnMu.Lock()
+	n.lastTopicSpawn[999] = time.Now().Add(-time.Hour)
+	n.spawnMu.Unlock()
+
+	// A fresh inbound on a different empty topic runs maybeAutoSpawn, which GCs
+	// stale entries before its cooldown check.
+	n.DeliverInbound("q", map[string]string{"chat_id": forumChat, "message_thread_id": "7", "user_id": "42"})
+	sp.waitFired(t, 1)
+
+	n.spawnMu.Lock()
+	_, stale := n.lastTopicSpawn[999]
+	_, fresh := n.lastTopicSpawn[7]
+	n.spawnMu.Unlock()
+
+	assert.False(t, stale, "cooldown entry past the window is evicted (no unbounded growth)")
+	assert.True(t, fresh, "the active topic's fresh entry is retained")
+}
+
 func TestNotifier_autoSpawn_dedupWithinCooldown(t *testing.T) {
 	r := NewRouter()
 	r.SetForumChatID(forumChatIDInt())

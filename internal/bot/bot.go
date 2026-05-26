@@ -1245,6 +1245,14 @@ func (b *Bot) checkApprovals(ctx context.Context) {
 
 		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(id), "Paired! Say hi to Claude.")); err != nil {
 			slog.Error("send approval confirm failed", "sender_id", senderID, "err", err)
+
+			if !IsPermanentChatError(err) {
+				// Transient (network / flood) — keep the marker so the next
+				// approval tick retries delivery instead of dropping the confirm.
+				continue
+			}
+			// Permanent (user blocked / deactivated): the confirm can never
+			// land — fall through to remove the marker so we don't retry forever.
 		}
 
 		_ = os.Remove(filepath.Join(b.store.ApprovedDir(), senderID))
