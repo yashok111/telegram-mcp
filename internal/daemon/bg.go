@@ -324,9 +324,9 @@ func (r *BgRunner) Spawn(ctx context.Context, req bot.BgSpawnRequest) (string, e
 		return "", err
 	}
 
-	initial := fmt.Sprintf("🚀 Task %s started\nworkdir: %s\nprompt: %s", id, workdir, truncate(req.Prompt, 200))
+	initial := bgStartedMsg(id, workdir, truncate(req.Prompt, 200))
 
-	msgID, sendErr := r.bot.SendMessage(ctx, req.ChatID, initial, bot.SendOpts{})
+	msgID, sendErr := r.bot.SendMessage(ctx, req.ChatID, initial, bot.SendOpts{ParseMode: "MarkdownV2"})
 	if sendErr != nil {
 		r.releaseSlot(id, BgStatusFailed)
 		return "", fmt.Errorf("send initial: %w", sendErr)
@@ -364,7 +364,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 
 	proc, err := r.cmd.Start(ctx, workdir, r.cfg.ClaudeBin, args, env)
 	if err != nil {
-		r.editFinal(ctx, req.ChatID, progressMsgID, id, fmt.Sprintf("❌ Task %s failed to start: %v", id, err), 0)
+		r.editFinal(ctx, req.ChatID, progressMsgID, id, bgStartFailedMsg(id, err), 0)
 		r.emit(Event{Type: "bg_failed", Severity: "warning", Subject: id, Detail: fmt.Sprintf("failed to start: %v", err)})
 		r.releaseSlot(id, BgStatusFailed)
 
@@ -447,7 +447,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 		case <-tick.C:
 			text := state.progressText(id)
 			if text != "" {
-				if _, eerr := r.bot.EditMessage(ctx, req.ChatID, progressMsgID, text, ""); eerr != nil {
+				if _, eerr := r.bot.EditMessage(ctx, req.ChatID, progressMsgID, text, "MarkdownV2"); eerr != nil {
 					slog.Warn("bg progress edit failed", "task_id", id, "err", eerr)
 				}
 			}
@@ -459,7 +459,7 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 	<-stderrDone
 
 	dur := time.Since(state.startedAt).Round(time.Second)
-	final := fmt.Sprintf("✅ Task %s done · %s · $%.4f · %d turns", id, dur, result.CostUSD, result.NumTurns)
+	final := bgDoneMsg(id, dur, result.CostUSD, result.NumTurns)
 	r.editFinal(ctx, req.ChatID, progressMsgID, id, final, result.NumTurns)
 
 	for _, c := range chunk.Split(result.ResultText, 4096, chunk.Length) {
@@ -506,7 +506,7 @@ func (s *bgRunState) progressText(id string) string {
 		head = "(no output yet)"
 	}
 
-	return fmt.Sprintf("🔄 Task %s · turns=%d tools=%d\n%s", id, s.numTurns, s.numTools, head)
+	return bgProgressMsg(id, s.numTurns, s.numTools, head)
 }
 
 func (s *bgRunState) last() *StreamEvent {
@@ -535,13 +535,13 @@ func (r *BgRunner) consumeStream(stdout io.ReadCloser, state *bgRunState) error 
 }
 
 func (r *BgRunner) editFinal(ctx context.Context, chatID string, msgID int, taskID, text string, _ int) {
-	if _, err := r.bot.EditMessage(ctx, chatID, msgID, text, ""); err != nil {
+	if _, err := r.bot.EditMessage(ctx, chatID, msgID, text, "MarkdownV2"); err != nil {
 		slog.Warn("bg final edit failed", "task_id", taskID, "err", err)
 	}
 }
 
 func (r *BgRunner) finalizeFailure(ctx context.Context, chatID string, msgID int, id string, err error, stderrTail string) {
-	r.editFinal(ctx, chatID, msgID, id, fmt.Sprintf("❌ Task %s failed: %v", id, err), 0)
+	r.editFinal(ctx, chatID, msgID, id, bgFailedMsg(id, err), 0)
 
 	if tail := strings.TrimSpace(stderrTail); tail != "" {
 		if _, serr := r.bot.SendMessage(ctx, chatID, "stderr:\n"+truncate(tail, 1800), bot.SendOpts{ReplyTo: msgID}); serr != nil {
@@ -559,7 +559,7 @@ func (r *BgRunner) finalizeFailure(ctx context.Context, chatID string, msgID int
 // the doneCh branch's ctx-cancelled guard (the stream can error *because* the
 // process was killed, and select may pick doneCh over ctx.Done in that race).
 func (r *BgRunner) finalizeCancelled(ctx context.Context, chatID string, msgID int, id string, startedAt time.Time) {
-	text := fmt.Sprintf("🛑 Task %s cancelled · ran %s", id, time.Since(startedAt).Round(time.Second))
+	text := bgCancelledMsg(id, time.Since(startedAt).Round(time.Second))
 	r.editFinal(ctx, chatID, msgID, id, text, 0)
 	r.releaseSlot(id, BgStatusCancelled)
 }
@@ -599,6 +599,40 @@ func (s *stderrRing) String() string {
 	defer s.mu.Unlock()
 
 	return string(s.buf)
+}
+
+// bgStartedMsg and its siblings render the daemon-side /bg status messages as
+// MarkdownV2 with the task id wrapped in a tap-to-copy inline-code span. Every
+// non-id fragment (workdir, prompt, claude output, error text) is routed through
+// bot.EscapeMarkdownV2 so free-form content can't trip the MarkdownV2 parser.
+// Callers MUST send/edit with ParseMode "MarkdownV2".
+func bgStartedMsg(id, workdir, promptHead string) string {
+	return "🚀 Task " + bot.MdCode(id) + "\n" +
+		bot.EscapeMarkdownV2("workdir: "+workdir) + "\n" +
+		bot.EscapeMarkdownV2("prompt: "+promptHead)
+}
+
+func bgProgressMsg(id string, turns, tools int, head string) string {
+	return "🔄 Task " + bot.MdCode(id) +
+		bot.EscapeMarkdownV2(fmt.Sprintf(" · turns=%d tools=%d", turns, tools)) + "\n" +
+		bot.EscapeMarkdownV2(head)
+}
+
+func bgDoneMsg(id string, dur time.Duration, costUSD float64, turns int) string {
+	return "✅ Task " + bot.MdCode(id) +
+		bot.EscapeMarkdownV2(fmt.Sprintf(" done · %s · $%.4f · %d turns", dur, costUSD, turns))
+}
+
+func bgFailedMsg(id string, err error) string {
+	return "❌ Task " + bot.MdCode(id) + bot.EscapeMarkdownV2(" failed: "+err.Error())
+}
+
+func bgStartFailedMsg(id string, err error) string {
+	return "❌ Task " + bot.MdCode(id) + bot.EscapeMarkdownV2(" failed to start: "+err.Error())
+}
+
+func bgCancelledMsg(id string, ran time.Duration) string {
+	return "🛑 Task " + bot.MdCode(id) + bot.EscapeMarkdownV2(" cancelled · ran "+ran.String())
 }
 
 func truncate(s string, n int) string {

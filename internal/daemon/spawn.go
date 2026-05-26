@@ -508,8 +508,8 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 		cancel()
 		r.releaseSlot(id, SpawnStatusFailed)
 		_, _ = r.bot.SendMessage(ctx, req.ChatID,
-			fmt.Sprintf("❌ Spawn %s failed to start: %v", id, perr),
-			bot.SendOpts{MessageThreadID: req.ThreadID})
+			spawnStartFailedMsg(id, perr),
+			bot.SendOpts{MessageThreadID: req.ThreadID, ParseMode: "MarkdownV2"})
 
 		return "", fmt.Errorf("start: %w", perr)
 	}
@@ -538,11 +538,25 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 	slog.Info("spawn started", attrs...)
 
 	_, _ = r.bot.SendMessage(ctx, req.ChatID,
-		fmt.Sprintf("🚀 Spawn %s started · pid=%d · workdir=%s\nWait a moment for the shim to register — then use /sessions or @<alias> to talk to it.",
-			id, proc.Pid(), workdir),
-		bot.SendOpts{MessageThreadID: req.ThreadID})
+		spawnStartedMsg(id, proc.Pid(), workdir),
+		bot.SendOpts{MessageThreadID: req.ThreadID, ParseMode: "MarkdownV2"})
 
 	return id, nil
+}
+
+// spawnStartedMsg and spawnStartFailedMsg render the daemon-side /spawn (and
+// auto-spawn) notifications as MarkdownV2 with the spawn id and pid wrapped in
+// tap-to-copy inline-code spans. All other text is routed through
+// bot.EscapeMarkdownV2. Callers MUST send with ParseMode "MarkdownV2".
+func spawnStartedMsg(id string, pid int, workdir string) string {
+	return "🚀 Spawn " + bot.MdCode(id) +
+		bot.EscapeMarkdownV2(" started · pid=") + bot.MdCode(strconv.Itoa(pid)) +
+		bot.EscapeMarkdownV2(" · workdir="+workdir) + "\n" +
+		bot.EscapeMarkdownV2("Wait a moment for the shim to register — then use /sessions or @<alias> to talk to it.")
+}
+
+func spawnStartFailedMsg(id string, err error) string {
+	return "❌ Spawn " + bot.MdCode(id) + bot.EscapeMarkdownV2(" failed to start: "+err.Error())
 }
 
 // TopicForSpawn reports the forum thread_id a spawn was pinned to — the topic

@@ -46,6 +46,6 @@ func TestBgRunner_EndToEndWithFakeClaude(t *testing.T) {
 	require.NotEmpty(t, id)
 
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 5*time.Second, 50*time.Millisecond)
-	assert.Contains(t, fb.lastEditedText(), "✅ Task "+id+" done")
+	assert.Contains(t, fb.lastEditedText(), "✅ Task "+bot.MdCode(id))
 	assert.Contains(t, fb.lastSentText(), "hi!")
 }

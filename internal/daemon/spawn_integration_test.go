@@ -79,6 +79,6 @@ func TestSpawnRunner_EndToEndWithFakeClaude(t *testing.T) {
 
 	// Start confirmation must have been posted to TG.
 	assert.True(t, slices.ContainsFunc(fb.sent(), func(s string) bool {
-		return strings.Contains(s, "🚀 Spawn "+id+" started")
+		return strings.Contains(s, "🚀 Spawn "+bot.MdCode(id))
 	}), "start confirmation must hit TG; got=%v", fb.sent())
 }

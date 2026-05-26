@@ -232,6 +232,13 @@ func (b *lockedBot) lastEditedText() string {
 	return b.fb.editedMessage.text
 }
 
+func (b *lockedBot) lastEditedParseMode() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.fb.editedMessage.parseMode
+}
+
 func (b *lockedBot) lastSentText() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -322,7 +329,9 @@ func TestBgRunner_SpawnHappyPath(t *testing.T) {
 
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 10*time.Millisecond)
 
-	assert.Contains(t, fb.lastEditedText(), "✅ Task "+id+" done")
+	assert.Contains(t, fb.lastEditedText(), "✅ Task "+bot.MdCode(id))
+	assert.Contains(t, fb.lastEditedText(), "done")
+	assert.Equal(t, "MarkdownV2", fb.lastEditedParseMode())
 	assert.Contains(t, fb.lastSentText(), "hi!")
 }
 
@@ -367,7 +376,9 @@ func TestBgRunner_CancelSendsSIGTERMAndMarks(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
-	assert.Contains(t, fb.lastEditedText(), "🛑 Task "+id+" cancelled")
+	assert.Contains(t, fb.lastEditedText(), "🛑 Task "+bot.MdCode(id))
+	assert.Contains(t, fb.lastEditedText(), "cancelled")
+	assert.Equal(t, "MarkdownV2", fb.lastEditedParseMode())
 }
 
 func TestBgRunner_StartFailureMarksFailed(t *testing.T) {
@@ -388,7 +399,8 @@ func TestBgRunner_StartFailureMarksFailed(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
-	assert.Contains(t, fb.lastEditedText(), "❌ Task "+id)
+	assert.Contains(t, fb.lastEditedText(), "❌ Task "+bot.MdCode(id))
+	assert.Equal(t, "MarkdownV2", fb.lastEditedParseMode())
 }
 
 func TestBgRunner_WorkdirFallbackHome(t *testing.T) {

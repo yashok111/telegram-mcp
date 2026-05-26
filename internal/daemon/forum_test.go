@@ -26,9 +26,11 @@ type fakeForumBot struct {
 	editThreadID []int
 	editName     []string
 
-	// sentThreadID / sentText record SendMessage calls (collision warnings).
-	sentThreadID []int
-	sentText     []string
+	// sentThreadID / sentText / sentParseMode record SendMessage calls
+	// (collision warnings).
+	sentThreadID  []int
+	sentText      []string
+	sentParseMode []string
 
 	// nextID is the thread_id that the next CreateForumTopic call returns.
 	nextID atomic.Int32
@@ -83,6 +85,7 @@ func (f *fakeForumBot) SendMessage(_ context.Context, _, text string, opts bot.S
 
 	f.sentThreadID = append(f.sentThreadID, opts.MessageThreadID)
 	f.sentText = append(f.sentText, text)
+	f.sentParseMode = append(f.sentParseMode, opts.ParseMode)
 
 	return 1, nil
 }
@@ -490,6 +493,8 @@ func TestForum_collisionWarnsInNewTopic(t *testing.T) {
 	assert.Contains(t, fb.sentText[0], holderName, "names the existing topic owner")
 	assert.Contains(t, fb.sentText[0], "@s2", "names the new session's alias")
 	assert.Contains(t, fb.sentText[0], "separate topic", "explains a separate topic was created")
+	assert.Equal(t, "MarkdownV2", fb.sentParseMode[0], "warning is MarkdownV2")
+	assert.Contains(t, fb.sentText[0], bot.MdCode("@s2"), "new alias is a tap-to-copy code span")
 }
 
 // TestForum_seizesStaleLock_fromDisconnectedShim is the core regression test
