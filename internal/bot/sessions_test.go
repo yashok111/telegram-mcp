@@ -14,16 +14,18 @@ import (
 )
 
 type fakeRouterView struct {
-	snap      []ShimInfo
-	pinErr    error
-	pinned    ShimInfo
-	evictErr  error
-	evicted   ShimInfo
-	lastPin   pinCall
-	lastEvict string
-	lastLabel labelCall
-	labelInfo ShimInfo
-	labelErr  error
+	snap        []ShimInfo
+	pinErr      error
+	pinned      ShimInfo
+	evictErr    error
+	evicted     ShimInfo
+	lastPin     pinCall
+	lastEvict   string
+	lastLabel   labelCall
+	labelInfo   ShimInfo
+	labelErr    error
+	unpinResult bool
+	lastUnpin   string
 }
 
 type pinCall struct {
@@ -40,6 +42,11 @@ func (f *fakeRouterView) Snapshot() []ShimInfo { return f.snap }
 func (f *fakeRouterView) Pin(chat, pref string, ttl time.Duration) (ShimInfo, error) {
 	f.lastPin = pinCall{chatID: chat, prefix: pref, ttl: ttl}
 	return f.pinned, f.pinErr
+}
+
+func (f *fakeRouterView) Unpin(chat string) bool {
+	f.lastUnpin = chat
+	return f.unpinResult
 }
 
 func (f *fakeRouterView) Evict(pref string) (ShimInfo, error) {
@@ -174,6 +181,33 @@ func TestHandleUsePinError(t *testing.T) {
 	assert.Contains(t, reply, "ambiguous")
 }
 
+func TestHandleUnpinSuccess(t *testing.T) {
+	fv := &fakeRouterView{unpinResult: true}
+	b := &Bot{router: fv}
+
+	reply, ok := b.handleUnpinCommand("123")
+	require.True(t, ok)
+	assert.Contains(t, reply, "Unpinned")
+	assert.Equal(t, "123", fv.lastUnpin)
+}
+
+func TestHandleUnpinNoPin(t *testing.T) {
+	fv := &fakeRouterView{unpinResult: false}
+	b := &Bot{router: fv}
+
+	reply, ok := b.handleUnpinCommand("123")
+	require.True(t, ok)
+	assert.Contains(t, reply, "No session pin")
+	assert.Equal(t, "123", fv.lastUnpin)
+}
+
+func TestHandleUnpinNoRouter(t *testing.T) {
+	b := &Bot{}
+	reply, ok := b.handleUnpinCommand("123")
+	require.True(t, ok)
+	assert.Contains(t, reply, "no router wired")
+}
+
 // renderShims output stays compact enough to never need Telegram's split.
 func TestRenderShimsStaysUnderChunkLimit(t *testing.T) {
 	now := time.Now()
@@ -265,6 +299,71 @@ func TestHandleCommand_use_pinsShim(t *testing.T) {
 	assert.Equal(t, "1", fv.lastPin.chatID)
 	assert.Equal(t, "abcdef", fv.lastPin.prefix)
 	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
+}
+
+func TestHandleCommand_pin_aliasesUse(t *testing.T) {
+	fv := &fakeRouterView{pinned: ShimInfo{IDPrefix: "abcdef01", Alias: "s1", Label: "main"}}
+
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/pin abcdef")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "Pinned")
+	assert.Equal(t, "1", fv.lastPin.chatID)
+	assert.Equal(t, "abcdef", fv.lastPin.prefix)
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
+}
+
+func TestHandleCommand_pin_noArgMentionsAlias(t *testing.T) {
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = &fakeRouterView{}
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/pin")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	// Usage string must not mislead an alias user with a bare "/use" reference.
+	assert.Contains(t, calls[0].params["text"], "Usage")
+	assert.Contains(t, calls[0].params["text"], "/pin")
+}
+
+func TestHandleCommand_unpin_clearsPin(t *testing.T) {
+	fv := &fakeRouterView{unpinResult: true}
+
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/unpin")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "Unpinned")
+	assert.Equal(t, "1", fv.lastUnpin)
+	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
+}
+
+func TestHandleCommand_unpin_noPin(t *testing.T) {
+	fv := &fakeRouterView{unpinResult: false}
+
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = fv
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/unpin")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "No session pin")
+}
+
+func TestHandleCommand_sessions_footerHintsUnpin(t *testing.T) {
+	b, api, _ := newTestBot(t, allowlistState("1"))
+	b.router = &fakeRouterView{
+		snap: []ShimInfo{{IDPrefix: "abcd0000", Alias: "s1", Label: "main"}},
+	}
+	require.NoError(t, b.handleCommand(t.Context(), dmMsg(1, "/sessions")))
+
+	calls := api.recordedCalls("sendMessage")
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0].params["text"], "/unpin")
 }
 
 func allowlistState(userID string) access.State {
