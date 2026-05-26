@@ -555,7 +555,53 @@ func replyToMeta(msg *telego.Message) map[string]string {
 		out["reply_to_quote"] = msg.Quote.Text
 	}
 
+	if kind, fileID, name, mime := replyToMedia(r); kind != "" {
+		out["reply_to_media_type"] = kind
+		out["reply_to_file_id"] = fileID
+
+		if name != "" {
+			out["reply_to_filename"] = name
+		}
+
+		if mime != "" {
+			out["reply_to_mime"] = mime
+		}
+	}
+
 	return out
+}
+
+// replyToMedia classifies the attachment on a cited message and returns its
+// kind, file_id, and (when present) filename + mime. No download — the agent
+// decides whether to fetch via download_attachment. Animation is checked before
+// Document because Telegram populates msg.Document as a backward-compat twin of
+// every animation; without the ordering a GIF would surface as "document".
+func replyToMedia(msg *telego.Message) (kind, fileID, filename, mime string) {
+	switch {
+	case len(msg.Photo) > 0:
+		best := msg.Photo[len(msg.Photo)-1]
+		return "photo", best.FileID, "", ""
+	case msg.Animation != nil:
+		a := msg.Animation
+		return "animation", a.FileID, safeName(a.FileName), a.MimeType
+	case msg.Video != nil:
+		v := msg.Video
+		return "video", v.FileID, safeName(v.FileName), v.MimeType
+	case msg.Audio != nil:
+		a := msg.Audio
+		return "audio", a.FileID, safeName(a.FileName), a.MimeType
+	case msg.Voice != nil:
+		return "voice", msg.Voice.FileID, "", msg.Voice.MimeType
+	case msg.VideoNote != nil:
+		return "video_note", msg.VideoNote.FileID, "", ""
+	case msg.Sticker != nil:
+		return "sticker", msg.Sticker.FileID, "", ""
+	case msg.Document != nil:
+		d := msg.Document
+		return "document", d.FileID, safeName(d.FileName), d.MimeType
+	}
+
+	return "", "", "", ""
 }
 
 func attachmentMeta(msg *telego.Message) map[string]string {

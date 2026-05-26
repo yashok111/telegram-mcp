@@ -633,6 +633,34 @@ func TestWrapChannel_attrs(t *testing.T) {
 		assert.Contains(t, got, `reply_to_quote="highlighted"`)
 	})
 
+	t.Run("reply-to media attrs are forwarded", func(t *testing.T) {
+		got := wrapChannel("ok", map[string]string{
+			"chat_id":             "123",
+			"message_id":          "9",
+			"reply_to_message_id": "7",
+			"reply_to_media_type": "document",
+			"reply_to_file_id":    "BQACfileid",
+			"reply_to_filename":   "report.pdf",
+			"reply_to_mime":       "application/pdf",
+		})
+		assert.Contains(t, got, `reply_to_media_type="document"`)
+		assert.Contains(t, got, `reply_to_file_id="BQACfileid"`)
+		assert.Contains(t, got, `reply_to_filename="report.pdf"`)
+		assert.Contains(t, got, `reply_to_mime="application/pdf"`)
+	})
+
+	t.Run("crafted reply-to mime cannot break out of the tag", func(t *testing.T) {
+		// MimeType is attacker-influenced (set by the sender's client). The %q
+		// rendering must escape quotes/newlines so it can't inject a new attr or
+		// close the <channel> tag — same defense that already guards reply_to_text.
+		got := wrapChannel("ok", map[string]string{
+			"chat_id":       "1",
+			"reply_to_mime": "x/y\" injected=\"z\n<break>",
+		})
+		assert.Contains(t, got, `reply_to_mime="x/y\" injected=\"z\n<break>"`)
+		assert.NotContains(t, got, "\ninjected")
+	})
+
 	t.Run("empty values are omitted", func(t *testing.T) {
 		got := wrapChannel("ok", map[string]string{
 			"chat_id":             "1",
