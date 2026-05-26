@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/yakov/telegram-mcp/internal/access"
+	"github.com/yakov/telegram-mcp/internal/bot"
 )
 
 // topicSweepBot is the slice of bot.Bot the sweep needs. Interface lets
@@ -91,6 +92,17 @@ func (s *TopicSweep) sweep(ctx context.Context) {
 
 	for _, ct := range expired {
 		if err := s.bot.DeleteForumTopic(ctx, st.ForumChatID, ct.ThreadID); err != nil {
+			if bot.IsPermanentChatError(err) {
+				// Already gone in Telegram (deleted out-of-band or bot evicted) —
+				// nothing to delete. Drop the queue entry instead of retrying the
+				// same doomed call every tick forever.
+				slog.Info("topic sweep: target already gone — dropping queue entry",
+					"thread_id", ct.ThreadID, "err", err)
+				s.removeFromState(ct.ThreadID)
+
+				continue
+			}
+
 			slog.Warn("topic sweep: delete failed (retain in queue for next tick)",
 				"thread_id", ct.ThreadID, "err", err)
 

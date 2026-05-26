@@ -550,6 +550,34 @@ func TestCheckApprovals_noDir_silentNoop(t *testing.T) {
 	assert.Empty(t, api.recordedCalls("sendMessage"))
 }
 
+func TestCheckApprovals_keepsFileOnTransientError(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	approved := filepath.Join(dir, "approved")
+	require.NoError(t, os.MkdirAll(approved, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(approved, "42"), []byte{}, 0o600))
+
+	api.errFor["sendMessage"] = "Too Many Requests: retry after 5" // transient
+
+	b.checkApprovals(t.Context())
+
+	entries, _ := os.ReadDir(approved)
+	assert.Len(t, entries, 1, "transient send failure keeps the marker for the next approval tick")
+}
+
+func TestCheckApprovals_dropsFileOnPermanentError(t *testing.T) {
+	b, api, dir := newTestBot(t, access.State{})
+	approved := filepath.Join(dir, "approved")
+	require.NoError(t, os.MkdirAll(approved, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(approved, "42"), []byte{}, 0o600))
+
+	api.errFor["sendMessage"] = "Forbidden: bot was blocked by the user" // permanent
+
+	b.checkApprovals(t.Context())
+
+	entries, _ := os.ReadDir(approved)
+	assert.Empty(t, entries, "permanent failure drops the marker — no infinite retry against a blocked user")
+}
+
 // ===== SendPermissionPrompt =====
 
 func TestSendPermissionPrompt_sendsOneMessage(t *testing.T) {

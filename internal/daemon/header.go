@@ -97,9 +97,27 @@ type HeaderManager struct {
 	refresh     time.Duration
 	tick        time.Duration
 	now         func() time.Time // test seam
+	// onPurge, when set, is called with a thread_id after purgeTopic drops a
+	// permanently-gone topic's state. Wired to Router.DropTopic so the owning
+	// shim's in-memory binding is cleared too — otherwise the Router keeps
+	// routing inbound to (and the shim keeps sending into) a dead thread.
+	// Set once at construction wiring; read without the lock. Nil-safe.
+	onPurge func(threadID int)
 
 	mu      sync.Mutex
 	entries map[int]*headerEntry
+}
+
+// SetPurgeHook wires the callback invoked when a topic is purged for being
+// permanently gone in Telegram. The daemon passes Router.DropTopic so the
+// purge clears the in-memory topic binding in lockstep with the persisted
+// state. Safe to leave unset (purge then only cleans header + access.json).
+func (m *HeaderManager) SetPurgeHook(fn func(threadID int)) {
+	if m == nil {
+		return
+	}
+
+	m.onPurge = fn
 }
 
 // NewHeaderManager wires a manager for the configured forum supergroup. A
@@ -404,8 +422,8 @@ func (m *HeaderManager) flush(ctx context.Context, threadID int) {
 func (m *HeaderManager) create(ctx context.Context, threadID int, chatStr, text string, hash uint64) {
 	msgID, err := m.bot.SendMessage(ctx, chatStr, text, bot.SendOpts{MessageThreadID: threadID})
 	if err != nil {
-		if isMessageThreadNotFound(err) {
-			slog.Info("topic gone in Telegram — purging header state", "thread_id", threadID)
+		if bot.IsPermanentChatError(err) {
+			slog.Info("topic permanently unreachable — purging header state", "thread_id", threadID, "err", err)
 			m.purgeTopic(threadID)
 
 			return
@@ -431,11 +449,6 @@ func (m *HeaderManager) edit(ctx context.Context, threadID int, chatStr, text st
 	if hash != meta.HeaderRenderHash {
 		if _, err := m.bot.EditMessage(ctx, chatStr, meta.HeaderMessageID, text, ""); err != nil {
 			switch {
-			case isMessageThreadNotFound(err):
-				slog.Info("topic gone in Telegram — purging header state", "thread_id", threadID)
-				m.purgeTopic(threadID)
-
-				return
 			case isMessageToEditNotFound(err):
 				slog.Info("topic header gone — recreating", "thread_id", threadID, "message_id", meta.HeaderMessageID)
 				m.create(ctx, threadID, chatStr, text, hash)
@@ -444,6 +457,11 @@ func (m *HeaderManager) edit(ctx context.Context, threadID int, chatStr, text st
 			case isMessageNotModified(err):
 				// Content already current despite a hash miss; fall through to
 				// persist the hash so we stop retrying.
+			case bot.IsPermanentChatError(err):
+				slog.Info("topic permanently unreachable — purging header state", "thread_id", threadID, "err", err)
+				m.purgeTopic(threadID)
+
+				return
 			default:
 				slog.Warn("topic header edit failed", "thread_id", threadID, "message_id", meta.HeaderMessageID, "err", err)
 				m.redirty(threadID)
@@ -558,6 +576,14 @@ func (m *HeaderManager) purgeTopic(threadID int) {
 		return changed
 	}); err != nil {
 		slog.Error("topic purge: state cleanup save failed", "thread_id", threadID, "err", err)
+	}
+
+	// Clear the in-memory Router binding too (the owning shim's TopicID +
+	// topicOwners entry) so inbound stops routing to the dead thread and the
+	// shim re-allocates a fresh topic on its next hello. Without this the
+	// persisted state and the Router diverge.
+	if m.onPurge != nil {
+		m.onPurge(threadID)
 	}
 }
 
@@ -734,14 +760,6 @@ func isMessageToEditNotFound(err error) bool {
 // normally prevents reaching here; if a race slips through we swallow it.
 func isMessageNotModified(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "message is not modified")
-}
-
-// isMessageThreadNotFound matches Telegram's 400 when the forum topic itself
-// was deleted out from under us. Unlike a missing header message (recreated in
-// place), a missing thread is terminal — there is nothing to recreate into — so
-// the topic's state is purged to break the recreate→fail→retry loop.
-func isMessageThreadNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "message thread not found")
 }
 
 // HeaderEnabled reports whether the daemon should maintain pinned topic headers.

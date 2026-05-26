@@ -129,6 +129,14 @@ func (n *Notifier) maybeAutoSpawn(chatID string, threadID int, meta map[string]s
 	}
 
 	n.spawnMu.Lock()
+	// Evict entries past the cooldown window: they no longer suppress anything,
+	// so retaining them just leaks one map entry per topic ever auto-spawned.
+	for tid, t := range n.lastTopicSpawn {
+		if time.Since(t) >= n.autoSpawnCooldown {
+			delete(n.lastTopicSpawn, tid)
+		}
+	}
+
 	if last, seen := n.lastTopicSpawn[threadID]; seen && time.Since(last) < n.autoSpawnCooldown {
 		n.spawnMu.Unlock()
 		slog.Info("forum auto-spawn suppressed by cooldown", "thread_id", threadID, "chat_id", chatID)

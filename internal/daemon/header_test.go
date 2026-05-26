@@ -414,6 +414,60 @@ func TestHeaderManager_PurgeOnThreadGone(t *testing.T) {
 	assert.Len(t, editsAfter, len(editsBefore), "no further edit after purge — loop broken")
 }
 
+func TestHeaderManager_PurgeOnPermanentError(t *testing.T) {
+	// Any permanent Telegram failure (not just thread-deleted) must purge and
+	// stop, not redirty forever — this is the generalization of the zombie fix.
+	cases := []struct {
+		name    string
+		errText string
+	}{
+		{"thread deleted", "Bad Request: message thread not found"},
+		{"bot kicked", "Forbidden: bot was kicked from the supergroup chat"},
+		{"chat not found", "Bad Request: chat not found"},
+		{"user deactivated", "Forbidden: user is deactivated"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &fakeHeaderBot{}
+			m, store, _ := newTestHeader(t, b, idleIdents(), time.Minute)
+
+			m.Ensure(context.Background(), 119) // create send #1
+
+			b.editErr = errors.New(tc.errText)
+
+			m.SetState(119, HeaderBusy, "Bash")
+			m.flush(context.Background(), 119)
+
+			m.mu.Lock()
+			_, tracked := m.entries[119]
+			m.mu.Unlock()
+			assert.False(t, tracked, "permanent error purges the runtime entry")
+
+			_, hasMeta := store.Load().TopicsByThread["119"]
+			assert.False(t, hasMeta, "permanent error purges persisted meta")
+		})
+	}
+}
+
+func TestHeaderManager_PurgeFiresUnbindHook(t *testing.T) {
+	b := &fakeHeaderBot{}
+	m, _, _ := newTestHeader(t, b, idleIdents(), time.Minute)
+
+	var unbound []int
+
+	m.SetPurgeHook(func(tid int) { unbound = append(unbound, tid) })
+
+	m.Ensure(context.Background(), 119)
+
+	b.editErr = errors.New("Forbidden: bot was kicked from the supergroup chat")
+
+	m.SetState(119, HeaderBusy, "x")
+	m.flush(context.Background(), 119)
+
+	assert.Equal(t, []int{119}, unbound, "purge fires the unbind hook so the Router binding is cleared in lockstep")
+}
+
 func TestHeaderManager_DisconnectedUsesCachedIdentity(t *testing.T) {
 	idents := idleIdents()
 	b := &fakeHeaderBot{}
@@ -519,6 +573,29 @@ func TestRouterTopicForShim(t *testing.T) {
 
 	_, ok = r.TopicForShim("ghost")
 	assert.False(t, ok, "unknown shim resolves to none")
+}
+
+func TestRouterDropTopic(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s-owner"})
+	r.BindTopic("s-owner", 119)
+
+	tid, ok := r.TopicForShim("s-owner")
+	require.True(t, ok)
+	require.Equal(t, 119, tid)
+
+	r.DropTopic(119)
+
+	_, ok = r.TopicForShim("s-owner")
+	assert.False(t, ok, "owning shim's TopicID cleared")
+
+	_, ok = r.HeaderIdentity(119)
+	assert.False(t, ok, "topicOwners entry removed")
+
+	assert.NotPanics(t, func() {
+		r.DropTopic(999) // unknown thread
+		r.DropTopic(0)   // guard
+	})
 }
 
 func TestRouterSetLabelFiresHeaderHook(t *testing.T) {

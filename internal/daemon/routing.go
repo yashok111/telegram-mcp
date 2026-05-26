@@ -328,6 +328,32 @@ func (r *Router) BindTopic(shimID string, threadID int) {
 	r.topicOwners[threadID] = shimID
 }
 
+// DropTopic detaches a forum thread from its owner after the topic was purged
+// for being permanently gone in Telegram (deleted, or the bot evicted). Clears
+// topicOwners[threadID] and zeroes the owning shim's TopicID so inbound stops
+// routing to the dead thread and the shim's outbound no longer targets it; the
+// shim re-allocates a fresh topic on its next hello. No-op when the thread has
+// no owner. Wired to HeaderManager.SetPurgeHook.
+func (r *Router) DropTopic(threadID int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if threadID <= 0 {
+		return
+	}
+
+	owner, ok := r.topicOwners[threadID]
+	if !ok {
+		return
+	}
+
+	if s, ok := r.shims[owner]; ok && s.TopicID == threadID {
+		s.TopicID = 0
+	}
+
+	delete(r.topicOwners, threadID)
+}
+
 func (r *Router) Drop(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
