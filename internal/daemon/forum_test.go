@@ -111,9 +111,6 @@ func newForumFixture(t *testing.T, forumChatID int64) (*Forum, *access.Store, *f
 	// nil topicForSpawn by default: most tests exercise label/workdir reuse,
 	// not /spawn topic pinning. Forced-topic tests set f.topicForSpawn directly.
 	f := NewForum(store, fb, func(string) bool { return true }, nil)
-	// Force a non-HOME workdir comparison by overriding home — tests pass
-	// explicit workdirs and verify whether reuse triggers.
-	f.home = "/test/home"
 
 	return f, store, fb
 }
@@ -292,19 +289,6 @@ func TestForum_disabled_whenForumChatIDZero(t *testing.T) {
 	assert.Empty(t, fb.createName, "no topic should have been created")
 }
 
-func TestForum_createsFreshTopic_withoutReuseKey(t *testing.T) {
-	f, store, fb := newForumFixture(t, -100123)
-
-	threadID, err := f.AllocateOrReuse(context.Background(), &Shim{
-		ID: "shim-a", Alias: "s1", Workdir: "/test/home",
-	})
-	require.NoError(t, err)
-	assert.Positive(t, threadID)
-	require.Len(t, fb.createName, 1, "topic created")
-	// $HOME workdir → no reuse key registered (label-less + workdir==home)
-	assert.Empty(t, store.Load().TopicsByReuseKey, "no reuse key for $HOME workdir")
-}
-
 func TestForum_createsFreshTopic_registersLabelKey(t *testing.T) {
 	f, store, fb := newForumFixture(t, -100123)
 
@@ -433,17 +417,127 @@ func TestForum_reusesByWorkdir_whenNotHome(t *testing.T) {
 	assert.Len(t, fb.createName, 1)
 }
 
-func TestForum_skipsReuse_forHomeWorkdir(t *testing.T) {
-	f, _, fb := newForumFixture(t, -100123)
+// TestForum_distinctLiveSessions_sameWorkdir_collide: three different sessions
+// live in the same workdir at once still each get their own topic — the first
+// holds the canonical key, the other two collide into fresh topics (and are
+// warned). Reuse only kicks in once a holder drops (see the reconnect test).
+func TestForum_distinctLiveSessions_sameWorkdir_collide(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123) // default: every holder live
 
 	for range 3 {
 		_, err := f.AllocateOrReuse(context.Background(), &Shim{
-			ID: "shim-" + strconv.Itoa(len(fb.createName)), Alias: "s1", Workdir: "/test/home",
+			ID: "shim-" + strconv.Itoa(len(fb.createName)), Alias: "s1", Workdir: "/projects/foo",
 		})
 		require.NoError(t, err)
 	}
 
-	assert.Len(t, fb.createName, 3, "$HOME workdir → fresh topic every time")
+	assert.Len(t, fb.createName, 3, "3 concurrent live sessions → 1 canonical + 2 collision topics")
+}
+
+// TestForum_homeWorkdir_reusesAfterReconnect is the core (a) fix: a session
+// running in $HOME (or any workdir) reattaches to its existing topic on
+// reconnect instead of spawning a fresh one every time. Pre-fix, $HOME got no
+// reuse key, so each reconnect created a new topic (the @s1-yakov churn).
+func TestForum_homeWorkdir_reusesAfterReconnect(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123)
+
+	first, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-old", Alias: "s1", Workdir: "/test/home",
+	})
+	require.NoError(t, err)
+
+	f.ReleaseLock("shim-old") // session drops (CC restart / daemon rotate)
+
+	second, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-new", Alias: "s1", Workdir: "/test/home",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, first, second, "home-dir session reattaches to its topic on reconnect")
+	assert.Len(t, fb.createName, 1, "reconnect reuses — no fresh topic")
+}
+
+// TestForum_emptyWorkdir_noReuseKey: an empty workdir has no stable key, so it
+// still gets a fresh topic each time (the only remaining no-key case).
+func TestForum_emptyWorkdir_noReuseKey(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123)
+
+	threadID, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-a", Alias: "s1", Workdir: "",
+	})
+	require.NoError(t, err)
+	assert.Positive(t, threadID)
+	require.Len(t, fb.createName, 1)
+	assert.Empty(t, store.Load().TopicsByReuseKey, "empty workdir + no label → no reuse key")
+}
+
+// TestForum_collision_doesNotStealReuseKey is the (b) key-hygiene fix: when a
+// second LIVE session collides on the same reuse key it gets its own topic, but
+// it must NOT steal the canonical reuse key from the still-live holder —
+// otherwise the next reconnect chases the collider and the original topic
+// becomes a churned orphan.
+func TestForum_collision_doesNotStealReuseKey(t *testing.T) {
+	f, store, fb := newForumFixture(t, -100123) // default: every holder live
+
+	first, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-a", Alias: "s1", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+
+	// shim-a still live → second session collides into a fresh topic.
+	second, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-b", Alias: "s2", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "live collision → fresh topic")
+
+	assert.Equal(t, first, store.Load().TopicsByReuseKey["workdir:/projects/foo"],
+		"collision must not steal the canonical reuse key from the live holder")
+
+	// Canonical holder drops → next session reuses IT, not the collider.
+	f.ReleaseLock("shim-a")
+
+	third, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-c", Alias: "s3", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, first, third, "reuse targets the canonical topic, not the collider")
+	assert.Len(t, fb.createName, 2, "only the collision created a 2nd topic; the reuse created none")
+}
+
+// TestForum_concurrentSameKey_keyStaysReusable drives many concurrent hellos
+// for one reuse key through the serialized allocator (-race catches any data
+// race). The invariant: the reuse key always resolves to a tracked, locked
+// topic — never dangling and never a silent double-claim.
+func TestForum_concurrentSameKey_keyStaysReusable(t *testing.T) {
+	f, store, _ := newForumFixture(t, -100123)
+
+	const n = 20
+
+	var wg sync.WaitGroup
+
+	errs := make([]error, n)
+
+	for i := range n {
+		wg.Go(func() {
+			_, errs[i] = f.AllocateOrReuse(context.Background(), &Shim{
+				ID: "shim-" + strconv.Itoa(i), Alias: "s1", Workdir: "/projects/foo",
+			})
+		})
+	}
+
+	wg.Wait()
+
+	for _, e := range errs {
+		require.NoError(t, e)
+	}
+
+	st := store.Load()
+	key := st.TopicsByReuseKey["workdir:/projects/foo"]
+	require.NotZero(t, key, "reuse key registered")
+
+	meta, ok := st.TopicsByThread[strconv.Itoa(key)]
+	require.True(t, ok, "reuse key points to a tracked topic, not a dangling thread")
+	assert.NotEmpty(t, meta.LockedBy, "canonical topic is locked by a live holder")
 }
 
 func TestForum_collisionWhenLockHeldByLiveShim_createsFresh(t *testing.T) {

@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
@@ -35,10 +35,13 @@ type Forum struct {
 	// Consulting live connections lets reuse seize a stale lock instead of
 	// orphaning a duplicate topic. nil means "assume held" (no seizing).
 	isLive func(shimID string) bool
-	// home is the workdir treated as the "default" pwd. Sessions started
-	// from $HOME or with empty workdir get a fresh topic rather than
-	// schclassing into a shared bucket.
-	home string
+	// allocMu serializes AllocateOrReuse so two concurrent hellos for the same
+	// reuse_key can't both miss the existence check and both CreateForumTopic
+	// (the duplicate-topic race). The second caller observes the first's
+	// registration and reuses (holder dropped) or cleanly collides (holder
+	// live) instead of silently double-creating. Held across the one
+	// CreateForumTopic network call — acceptable since hellos are infrequent.
+	allocMu sync.Mutex
 	// topicForSpawn resolves a spawn_id → the forum thread its /spawn was
 	// issued from (ok=false for user-launched shims, DM spawns, or when no
 	// lookup is wired). Wired to SpawnRunner.TopicForSpawn. When it resolves,
@@ -49,11 +52,9 @@ type Forum struct {
 // NewForum constructs a Forum bound to a single Store + forumBot pair. isLive
 // reports whether a shim_id is still connected; pass Router.IsConnected so
 // reuse can distinguish a live lock holder from a stale one left by a crashed
-// or restarted daemon. $HOME resolution is at constructor time — if HOME
-// changes mid-process (not expected outside tests), restart the daemon.
+// or restarted daemon.
 func NewForum(store *access.Store, b forumBot, isLive func(shimID string) bool, topicForSpawn func(spawnID string) (int, bool)) *Forum {
-	home, _ := os.UserHomeDir()
-	return &Forum{store: store, bot: b, isLive: isLive, home: home, topicForSpawn: topicForSpawn}
+	return &Forum{store: store, bot: b, isLive: isLive, topicForSpawn: topicForSpawn}
 }
 
 // Enabled reports whether forum routing is active (ForumChatID configured).
@@ -63,15 +64,18 @@ func (f *Forum) Enabled() bool {
 }
 
 // resolveReuseKey returns the lookup key for finding an existing topic to
-// reuse. Composite priority: label (explicit) → workdir-if-not-home →
-// fresh. Returns ok=false when no reusable key applies; the caller must
-// create a fresh topic without registering any reuse-key mapping.
+// reuse. Composite priority: label (explicit) → workdir → fresh. Returns
+// ok=false only for an empty workdir (no stable key), where the caller creates
+// a fresh topic without registering any reuse-key mapping. $HOME is keyed like
+// any other workdir: a reconnecting session reattaches to its topic instead of
+// churning a new one; two distinct live sessions in the same dir still get
+// separate topics via the lock-collision path (each warned).
 func (f *Forum) resolveReuseKey(shim *Shim) (string, bool) {
 	if shim.Label != "" {
 		return "label:" + shim.Label, true
 	}
 
-	if shim.Workdir != "" && shim.Workdir != f.home {
+	if shim.Workdir != "" {
 		return "workdir:" + shim.Workdir, true
 	}
 
@@ -90,6 +94,9 @@ func (f *Forum) resolveReuseKey(shim *Shim) (string, bool) {
 // creates a fresh one. Returns (0, nil) when ForumChatID is unset (feature
 // off) — caller falls back to DM-mode.
 func (f *Forum) AllocateOrReuse(ctx context.Context, shim *Shim) (int, error) {
+	f.allocMu.Lock()
+	defer f.allocMu.Unlock()
+
 	if forced, ok := f.forcedTopic(shim); ok {
 		tid, handled, err := f.adoptForcedTopic(ctx, shim, forced)
 		if handled {
@@ -313,14 +320,14 @@ func (f *Forum) allocateByReuseKey(ctx context.Context, shim *Shim) (int, error)
 			LastShimID: shim.ID,
 			LockedBy:   shim.ID,
 		}
-		if haveKey {
-			// Race detection: if a concurrent AllocateOrReuse with the same
-			// reuse_key reached the register step ahead of us, log the
-			// collision so the operator notices the orphan topic. We still
-			// overwrite (last writer wins) — the loser's freshly-created
-			// topic is tracked under TopicsByThread and the sweep (Wave 5)
-			// will eventually reap unreferenced threads. Single-user design
-			// makes this race vanishingly rare in practice.
+		// Only a non-collision fresh topic becomes the canonical reuse target.
+		// A collision topic (created because a *live* holder already owns the
+		// key) must NOT steal the key — otherwise the next reconnect chases the
+		// collider and the original holder's topic churns into an orphan.
+		if haveKey && !collision {
+			// Defensive tripwire: with allocMu serializing allocation this
+			// should never fire (the second caller sees the key and collides
+			// or reuses), but log if a concurrent writer ever beats us.
 			if prev, exists := st.TopicsByReuseKey[reuseKey]; exists && prev != tid {
 				slog.Warn("forum: reuse_key race — duplicate topic created",
 					"reuse_key", reuseKey, "winner_thread_id", tid, "orphan_thread_id", prev)
