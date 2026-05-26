@@ -186,13 +186,15 @@ func TestReplyToMeta(t *testing.T) {
 			msg: &telego.Message{ReplyToMessage: &telego.Message{
 				MessageID: 5,
 				Caption:   "look at this",
-				Photo:     []telego.PhotoSize{{FileID: "p"}},
+				Photo:     []telego.PhotoSize{{FileID: "small"}, {FileID: "p"}},
 				From:      &telego.User{ID: 9, Username: "bob"},
 			}},
 			want: map[string]string{
 				"reply_to_message_id": "5",
 				"reply_to_text":       "look at this",
 				"reply_to_from":       "@bob",
+				"reply_to_media_type": "photo",
+				"reply_to_file_id":    "p",
 			},
 		},
 		{
@@ -205,6 +207,8 @@ func TestReplyToMeta(t *testing.T) {
 			want: map[string]string{
 				"reply_to_message_id": "11",
 				"reply_to_from":       "@carol",
+				"reply_to_media_type": "sticker",
+				"reply_to_file_id":    "s",
 			},
 		},
 		{
@@ -281,6 +285,108 @@ func TestReplyToMeta(t *testing.T) {
 				Quote: &telego.TextQuote{Text: "orphan"},
 			},
 			want: map[string]string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, replyToMeta(tt.msg))
+		})
+	}
+}
+
+// TestReplyToMediaMeta covers the media-attachment branch of replyToMeta:
+// reply_to_media_type / reply_to_file_id plus the optional filename + mime.
+func TestReplyToMediaMeta(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *telego.Message
+		want map[string]string
+	}{
+		{
+			name: "document reply carries filename and mime",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 20,
+				Document:  &telego.Document{FileID: "doc", MimeType: "application/pdf", FileName: "report.pdf"},
+				From:      &telego.User{ID: 2, Username: "erin"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "20",
+				"reply_to_from":       "@erin",
+				"reply_to_media_type": "document",
+				"reply_to_file_id":    "doc",
+				"reply_to_filename":   "report.pdf",
+				"reply_to_mime":       "application/pdf",
+			},
+		},
+		{
+			name: "video reply carries filename and mime",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 21,
+				Video:     &telego.Video{FileID: "vid", MimeType: "video/mp4", FileName: "clip.mp4"},
+				From:      &telego.User{ID: 3, Username: "finn"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "21",
+				"reply_to_from":       "@finn",
+				"reply_to_media_type": "video",
+				"reply_to_file_id":    "vid",
+				"reply_to_filename":   "clip.mp4",
+				"reply_to_mime":       "video/mp4",
+			},
+		},
+		{
+			name: "audio reply carries filename and mime",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 25,
+				Audio:     &telego.Audio{FileID: "aud", MimeType: "audio/mpeg", FileName: "song.mp3"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "25",
+				"reply_to_media_type": "audio",
+				"reply_to_file_id":    "aud",
+				"reply_to_filename":   "song.mp3",
+				"reply_to_mime":       "audio/mpeg",
+			},
+		},
+		{
+			name: "voice reply has file_id and mime, no filename",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 22,
+				Voice:     &telego.Voice{FileID: "voi", MimeType: "audio/ogg"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "22",
+				"reply_to_media_type": "voice",
+				"reply_to_file_id":    "voi",
+				"reply_to_mime":       "audio/ogg",
+			},
+		},
+		{
+			name: "video_note reply has only type and file_id",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 23,
+				VideoNote: &telego.VideoNote{FileID: "vn"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "23",
+				"reply_to_media_type": "video_note",
+				"reply_to_file_id":    "vn",
+			},
+		},
+		{
+			name: "animation reply classified as animation despite document twin",
+			msg: &telego.Message{ReplyToMessage: &telego.Message{
+				MessageID: 24,
+				Animation: &telego.Animation{FileID: "anim", MimeType: "video/mp4", FileName: "fun.gif"},
+				Document:  &telego.Document{FileID: "doc-twin", MimeType: "video/mp4", FileName: "fun.gif"},
+			}},
+			want: map[string]string{
+				"reply_to_message_id": "24",
+				"reply_to_media_type": "animation",
+				"reply_to_file_id":    "anim",
+				"reply_to_filename":   "fun.gif",
+				"reply_to_mime":       "video/mp4",
+			},
 		},
 	}
 	for _, tt := range tests {
