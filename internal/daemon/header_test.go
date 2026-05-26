@@ -365,6 +365,55 @@ func TestHeaderManager_RecreateOnNotFound(t *testing.T) {
 	assert.Equal(t, 2, pins[1].msgID)
 }
 
+func TestHeaderManager_PurgeOnThreadGone(t *testing.T) {
+	b := &fakeHeaderBot{}
+	m, store, _ := newTestHeader(t, b, idleIdents(), time.Minute)
+
+	const reuseKey = "workdir:/home/yakov/projects/telegram-mcp"
+
+	// Seed a reuse-key pointing at the topic so we can assert it is purged too.
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByReuseKey = map[string]int{reuseKey: 283}
+
+		return true
+	}))
+
+	m.Ensure(context.Background(), 283) // create send #1 (msgID 1), persists meta
+
+	// Topic deleted in Telegram out from under us: the edit 400s "message to
+	// edit not found", and the recreate send 400s "message thread not found".
+	b.editErr = errors.New("Bad Request: message to edit not found")
+	b.sendErr = errors.New("Bad Request: message thread not found")
+
+	m.SetState(283, HeaderBusy, "Bash")
+	m.flush(context.Background(), 283)
+
+	// Runtime entry dropped so markActiveDirty stops re-dirtying it.
+	m.mu.Lock()
+	_, stillTracked := m.entries[283]
+	m.mu.Unlock()
+	assert.False(t, stillTracked, "purged topic must leave no runtime entry")
+
+	// Persisted state purged: no meta, no reuse key.
+	st := store.Load()
+
+	_, hasMeta := st.TopicsByThread["283"]
+	assert.False(t, hasMeta, "purged topic meta deleted")
+
+	_, hasKey := st.TopicsByReuseKey[reuseKey]
+	assert.False(t, hasKey, "purged topic reuse key deleted")
+
+	// The error loop is broken: a background tick + flush issues no further IO.
+	sendsBefore, editsBefore, _ := b.snapshot()
+
+	m.markActiveDirty()
+	m.flushDirty(context.Background())
+
+	sendsAfter, editsAfter, _ := b.snapshot()
+	assert.Len(t, sendsAfter, len(sendsBefore), "no further send after purge — loop broken")
+	assert.Len(t, editsAfter, len(editsBefore), "no further edit after purge — loop broken")
+}
+
 func TestHeaderManager_DisconnectedUsesCachedIdentity(t *testing.T) {
 	idents := idleIdents()
 	b := &fakeHeaderBot{}

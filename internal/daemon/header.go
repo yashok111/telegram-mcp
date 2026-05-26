@@ -404,6 +404,13 @@ func (m *HeaderManager) flush(ctx context.Context, threadID int) {
 func (m *HeaderManager) create(ctx context.Context, threadID int, chatStr, text string, hash uint64) {
 	msgID, err := m.bot.SendMessage(ctx, chatStr, text, bot.SendOpts{MessageThreadID: threadID})
 	if err != nil {
+		if isMessageThreadNotFound(err) {
+			slog.Info("topic gone in Telegram — purging header state", "thread_id", threadID)
+			m.purgeTopic(threadID)
+
+			return
+		}
+
 		slog.Warn("topic header send failed", "thread_id", threadID, "err", err)
 		m.redirty(threadID)
 
@@ -424,6 +431,11 @@ func (m *HeaderManager) edit(ctx context.Context, threadID int, chatStr, text st
 	if hash != meta.HeaderRenderHash {
 		if _, err := m.bot.EditMessage(ctx, chatStr, meta.HeaderMessageID, text, ""); err != nil {
 			switch {
+			case isMessageThreadNotFound(err):
+				slog.Info("topic gone in Telegram — purging header state", "thread_id", threadID)
+				m.purgeTopic(threadID)
+
+				return
 			case isMessageToEditNotFound(err):
 				slog.Info("topic header gone — recreating", "thread_id", threadID, "message_id", meta.HeaderMessageID)
 				m.create(ctx, threadID, chatStr, text, hash)
@@ -501,6 +513,51 @@ func (m *HeaderManager) redirty(threadID int) {
 
 	if e, ok := m.entries[threadID]; ok {
 		e.dirty = true
+	}
+}
+
+// purgeTopic drops all runtime + persisted state for a forum topic that no
+// longer exists in Telegram (deleted by a user/admin). Dropping the runtime
+// entry stops markActiveDirty from re-dirtying it; deleting the meta, every
+// reuse-key pointing at it, and any closed-queue entry stops a later hello from
+// rebinding a dead thread. Without this, a recreate into the gone thread keeps
+// failing and redirty re-queues it — an unbounded editMessageText error loop.
+func (m *HeaderManager) purgeTopic(threadID int) {
+	m.mu.Lock()
+	delete(m.entries, threadID)
+	m.mu.Unlock()
+
+	tidStr := strconv.Itoa(threadID)
+
+	if err := m.store.Mutate(func(st *access.State) bool {
+		changed := false
+
+		if _, ok := st.TopicsByThread[tidStr]; ok {
+			delete(st.TopicsByThread, tidStr)
+
+			changed = true
+		}
+
+		for key, tid := range st.TopicsByReuseKey {
+			if tid == threadID {
+				delete(st.TopicsByReuseKey, key)
+
+				changed = true
+			}
+		}
+
+		for i, ct := range st.ClosedTopics {
+			if ct.ThreadID == threadID {
+				st.ClosedTopics = append(st.ClosedTopics[:i], st.ClosedTopics[i+1:]...)
+				changed = true
+
+				break
+			}
+		}
+
+		return changed
+	}); err != nil {
+		slog.Error("topic purge: state cleanup save failed", "thread_id", threadID, "err", err)
 	}
 }
 
@@ -677,6 +734,14 @@ func isMessageToEditNotFound(err error) bool {
 // normally prevents reaching here; if a race slips through we swallow it.
 func isMessageNotModified(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "message is not modified")
+}
+
+// isMessageThreadNotFound matches Telegram's 400 when the forum topic itself
+// was deleted out from under us. Unlike a missing header message (recreated in
+// place), a missing thread is terminal — there is nothing to recreate into — so
+// the topic's state is purged to break the recreate→fail→retry loop.
+func isMessageThreadNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "message thread not found")
 }
 
 // HeaderEnabled reports whether the daemon should maintain pinned topic headers.
