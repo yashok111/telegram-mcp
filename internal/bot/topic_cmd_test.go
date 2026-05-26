@@ -196,6 +196,7 @@ func (s *stubRouterView) Snapshot() []ShimInfo { return s.snap }
 func (s *stubRouterView) Pin(string, string, time.Duration) (ShimInfo, error) {
 	return ShimInfo{}, nil
 }
+func (s *stubRouterView) Unpin(string) bool                         { return false }
 func (s *stubRouterView) Evict(string) (ShimInfo, error)            { return ShimInfo{}, nil }
 func (s *stubRouterView) SetLabel(string, string) (ShimInfo, error) { return ShimInfo{}, nil }
 

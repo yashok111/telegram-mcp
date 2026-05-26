@@ -482,14 +482,31 @@ func (r *Router) Pin(chatID, shimID string, ttl time.Duration) error {
 	return nil
 }
 
-func (r *Router) Unpin(chatID string) {
+// Unpin clears any chat→shim pin for chatID. Reports whether a *live* pin was
+// cleared, so callers can distinguish a real clear from a no-op; an expired
+// entry is deleted as housekeeping but reported as false to match the
+// already-gone semantics RouteInbound applies on expiry. The check and delete
+// are a single critical section to avoid a TOCTOU race against RecordOutbound.
+func (r *Router) Unpin(chatID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.pins[chatID]; ok {
-		delete(r.pins, chatID)
-		slog.Info("router pin cleared", "chat_id", chatID)
+	p, ok := r.pins[chatID]
+	if !ok {
+		return false
 	}
+
+	delete(r.pins, chatID)
+
+	if time.Now().After(p.expiresAt) {
+		slog.Info("router pin expired", "chat_id", chatID)
+
+		return false
+	}
+
+	slog.Info("router pin cleared", "chat_id", chatID)
+
+	return true
 }
 
 // SetLabel updates the runtime label for shimID and fires a NotifyLabelChanged

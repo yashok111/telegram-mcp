@@ -53,6 +53,7 @@ type ShimInfo struct {
 type RouterView interface {
 	Snapshot() []ShimInfo
 	Pin(chatID, shimIDPrefix string, ttl time.Duration) (ShimInfo, error)
+	Unpin(chatID string) bool
 	Evict(shimIDPrefix string) (ShimInfo, error)
 	SetLabel(shimIDPrefix, label string) (ShimInfo, error)
 }
@@ -132,7 +133,8 @@ func (b *Bot) handleUseCommand(chatID, text string) (string, bool) {
 
 	parts := strings.Fields(rest)
 	if len(parts) == 0 {
-		return "Usage: /use \\<shim\\_id\\_prefix\\>\nFind prefixes via /status or /sessions\\.", true
+		// Phrased to cover both /use and its /pin alias, since this helper backs both.
+		return "Usage: /use \\<prefix\\> \\(alias /pin\\)\nFind prefixes via /status or /sessions\\.", true
 	}
 
 	prefix := parts[0]
@@ -150,6 +152,37 @@ func (b *Bot) handleUseCommand(chatID, text string) (string, bool) {
 	// Returned string is MarkdownV2 — caller in bot.go sends with ParseMode "MarkdownV2".
 	return "📌 Pinned " + MdCode(info.IDPrefix) + " \\[" + MdCode(info.Alias) + "\\] " + label +
 		" for " + EscapeMarkdownV2(PinTTL.String()) + "\\. Your messages route here until pin expires or another session takes over\\.", true
+}
+
+// handlePinCommand dispatches /use, its /pin alias, and /unpin to the matching
+// pin helper and forwards the MarkdownV2 reply to the chat. Kept as one handler
+// so the handleCommand switch stays under its gocyclo budget.
+func (b *Bot) handlePinCommand(ctx context.Context, msg telego.Message, cmd string) {
+	chatID := strconv.FormatInt(msg.Chat.ID, 10)
+
+	var reply string
+	if cmd == "unpin" {
+		reply, _ = b.handleUnpinCommand(chatID)
+	} else {
+		reply, _ = b.handleUseCommand(chatID, msg.Text)
+	}
+
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply).WithParseMode("MarkdownV2"))
+}
+
+// handleUnpinCommand clears any chat→shim pin for chatID. Returns (reply, true)
+// so the caller can forward reply verbatim via SendMessage. Returned string is
+// MarkdownV2 — caller in bot.go sends with ParseMode "MarkdownV2".
+func (b *Bot) handleUnpinCommand(chatID string) (string, bool) {
+	if b.router == nil {
+		return "Session switcher is unavailable: no router wired\\.", true
+	}
+
+	if !b.router.Unpin(chatID) {
+		return "No session pin set for this chat\\.", true
+	}
+
+	return "✅ Unpinned\\. Messages now route by the default rules \\(mention / reply / most\\-recent\\)\\.", true
 }
 
 // sendSessions renders the inline-keyboard picker for /sessions.
@@ -179,7 +212,7 @@ func (b *Bot) sendSessions(ctx context.Context, msg telego.Message) {
 	}
 
 	keyboard := tu.InlineKeyboard(rows...)
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Tap a session to pin it as your reply target:").WithReplyMarkup(keyboard))
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "Tap a session to pin it as your reply target — or send /unpin to clear the current pin:").WithReplyMarkup(keyboard))
 }
 
 // pickIdle returns the shim whose IdleFor(now) is largest. Returns ok=false

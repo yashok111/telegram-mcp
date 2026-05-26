@@ -187,7 +187,8 @@ func (b *Bot) Poll(ctx context.Context) error {
 				{Command: "help", Description: "What this bot can do"},
 				{Command: "status", Description: "Pairing + active sessions"},
 				{Command: "sessions", Description: "Pick which CC session to talk to"},
-				{Command: "use", Description: "/use <prefix> — pin a session"},
+				{Command: "use", Description: "/use <prefix> — pin a session (alias: /pin)"},
+				{Command: "unpin", Description: "/unpin — clear this chat's session pin"},
 				{Command: "idle", Description: "Show the most idle session"},
 				{Command: "rules", Description: "Manage auto-approve permission rules"},
 				{Command: "label", Description: "/label <text> — set session label (empty clears)"},
@@ -332,7 +333,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 				"/start — pairing instructions\n"+
 				"/status — pairing + active sessions\n"+
 				"/sessions — pick which CC session to talk to\n"+
-				"/use <prefix> — pin a specific session\n"+
+				"/use <prefix> — pin a specific session (alias: /pin)\n"+
+				"/unpin — clear this chat's session pin\n"+
 				"/idle — show the most idle session\n"+
 				"/rules — list/clear/revoke auto-approve permission rules\n"+
 				"/label <text> — set session label (empty clears)\n"+
@@ -345,9 +347,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 		b.sendStatus(ctx, msg, st, senderID)
 	case "sessions":
 		b.sendSessions(ctx, msg)
-	case "use":
-		reply, _ := b.handleUseCommand(strconv.FormatInt(msg.Chat.ID, 10), msg.Text)
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), reply).WithParseMode("MarkdownV2"))
+	case "use", "pin", "unpin":
+		b.handlePinCommand(ctx, msg, cmd)
 	case "idle":
 		b.sendIdle(ctx, msg)
 	case "rules":

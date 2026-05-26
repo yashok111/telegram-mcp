@@ -604,11 +604,43 @@ func TestRouterUnpin(t *testing.T) {
 	r.Register(&Shim{ID: "s2"})
 	r.RecordOutbound("s1", "chat-1", 0)
 	require.NoError(t, r.Pin("chat-1", "s2", time.Hour))
-	r.Unpin("chat-1")
+	assert.True(t, r.Unpin("chat-1"), "unpin should report the cleared pin")
 
 	got, ok := r.RouteInbound("chat-1")
 	require.True(t, ok)
 	assert.Equal(t, "s1", got.ID)
+}
+
+func TestRouterUnpinNoPin(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+
+	assert.False(t, r.Unpin("chat-1"), "unpin on a chat with no pin is a no-op")
+}
+
+func TestRouterUnpinExpired(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	require.NoError(t, r.Pin("chat-1", "s1", -time.Second)) // already expired
+
+	assert.False(t, r.Unpin("chat-1"), "an expired pin is reported as no-op")
+	assert.False(t, r.Unpin("chat-1"), "the stale entry was still cleaned up")
+}
+
+func TestRouterUnpinWrongChat(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "s1"})
+	r.Register(&Shim{ID: "s2"})
+	r.RecordOutbound("s2", "chat-1", 0)
+	require.NoError(t, r.Pin("chat-1", "s1", time.Hour))
+
+	assert.False(t, r.Unpin("chat-2"), "unpin of a different chat must not clear chat-1's pin")
+
+	got, ok := r.RouteInbound("chat-1")
+	require.True(t, ok)
+	assert.Equal(t, "s1", got.ID, "chat-1 still routes to its pinned shim after wrong-chat unpin")
+
+	assert.True(t, r.Unpin("chat-1"), "chat-1's live pin should still be clearable")
 }
 
 func TestRouterSnapshotPinnedChatsActive(t *testing.T) {

@@ -1179,6 +1179,10 @@ func (a *routerAdapter) Pin(chatID, prefix string, ttl time.Duration) (bot.ShimI
 	return lookupShimInfo(a.r, sh.ID), nil
 }
 
+func (a *routerAdapter) Unpin(chatID string) bool {
+	return a.r.Unpin(chatID)
+}
+
 func (a *routerAdapter) Evict(prefix string) (bot.ShimInfo, error) {
 	sh, err := a.r.ResolveShimByPrefix(prefix)
 	if err != nil {
