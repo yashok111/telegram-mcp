@@ -282,7 +282,7 @@ func TestSpawnRunner_SpawnPostsStartConfirmation(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		for _, s := range fb.sent() {
-			if contains(s, "🚀 Spawn "+id+" started") {
+			if contains(s, "🚀 Spawn "+bot.MdCode(id)) {
 				return true
 			}
 		}
@@ -924,6 +924,7 @@ func TestSpawnRunner_StartFailure_threadedIntoTopic(t *testing.T) {
 	require.Len(t, sends, 1)
 	assert.Contains(t, sends[0].text, "❌ Spawn")
 	assert.Contains(t, sends[0].text, "failed to start")
+	assert.Equal(t, "MarkdownV2", sends[0].opts.ParseMode, "failure reply is MarkdownV2 so the id renders tap-to-copy")
 	assert.Equal(t, 88, sends[0].opts.MessageThreadID, "failure reply lands in the originating topic")
 }
 
@@ -935,7 +936,8 @@ func TestSpawnRunner_SpawnStartConfirmation_threadedIntoTopic(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		for _, s := range fb.sends() {
-			if contains(s.text, "🚀 Spawn "+id+" started") && s.opts.MessageThreadID == 77 {
+			if contains(s.text, "🚀 Spawn "+bot.MdCode(id)) && s.opts.MessageThreadID == 77 &&
+				s.opts.ParseMode == "MarkdownV2" {
 				return true
 			}
 		}

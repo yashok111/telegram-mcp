@@ -364,16 +364,19 @@ func (f *Forum) warnCollision(ctx context.Context, forumChat int64, threadID int
 
 	holderDesc := ""
 	if holderName != "" {
-		holderDesc = " (" + holderName + ")"
+		holderDesc = bot.EscapeMarkdownV2(" (") + bot.MdCode(holderName) + bot.EscapeMarkdownV2(")")
 	}
 
-	text := fmt.Sprintf(
-		"⚠️ Another active session%s is already attached to this %s. "+
-			"Two sessions can't share one Telegram topic, so this is a separate topic for @%s — "+
-			"messages here won't reach the other session.",
-		holderDesc, keySubject, newAlias)
+	// MarkdownV2 so the new session's @alias renders as a tap-to-copy code span;
+	// every literal fragment is escaped because workdir/label-derived text is
+	// special-char heavy.
+	text := bot.EscapeMarkdownV2("⚠️ Another active session") + holderDesc +
+		bot.EscapeMarkdownV2(" is already attached to this "+keySubject+". "+
+			"Two sessions can't share one Telegram topic, so this is a separate topic for ") +
+		bot.MdCode("@"+newAlias) +
+		bot.EscapeMarkdownV2(" — messages here won't reach the other session.")
 
-	if _, err := f.bot.SendMessage(ctx, strconv.FormatInt(forumChat, 10), text, bot.SendOpts{MessageThreadID: threadID}); err != nil {
+	if _, err := f.bot.SendMessage(ctx, strconv.FormatInt(forumChat, 10), text, bot.SendOpts{MessageThreadID: threadID, ParseMode: "MarkdownV2"}); err != nil {
 		slog.Warn("forum: collision warning send failed",
 			"thread_id", threadID, "reuse_key", reuseKey, "err", err)
 	}
