@@ -314,6 +314,46 @@ func TestRunSelf_hookMode_emitsSessionStartJSON(t *testing.T) {
 	assert.Contains(t, payload.HookSpecificOutput.AdditionalContext, "@s3")
 }
 
+func TestRunSelf_hookMode_includesSessionTitle(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CC_PID", "33334")
+	writeFixtureSession(t, dir, 33334)
+
+	var out bytes.Buffer
+
+	code := runSelf(dir, []string{"--hook"}, &out)
+	require.Equal(t, 0, code)
+
+	var payload struct {
+		HookSpecificOutput map[string]any `json:"hookSpecificOutput"`
+	}
+
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	title, ok := payload.HookSpecificOutput["sessionTitle"]
+	require.True(t, ok, "sessionTitle must be present when an alias is registered")
+	assert.Equal(t, "tg:@s3", title)
+}
+
+func TestRunSelf_hookMode_omitsSessionTitleWhenNoAlias(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CC_PID", "33335")
+	// No session file written → no alias → sessionTitle key must be absent so
+	// CC keeps the default title instead of blanking it.
+
+	var out bytes.Buffer
+
+	code := runSelf(dir, []string{"--hook"}, &out)
+	require.Equal(t, 0, code)
+
+	var payload struct {
+		HookSpecificOutput map[string]any `json:"hookSpecificOutput"`
+	}
+
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	_, ok := payload.HookSpecificOutput["sessionTitle"]
+	assert.False(t, ok, "sessionTitle must be omitted when no shim alias is registered")
+}
+
 func TestRunSelf_statusline_emitsCompactAliasTag(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CC_PID", "44444")
