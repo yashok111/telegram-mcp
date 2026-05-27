@@ -47,23 +47,33 @@ func runSelf(stateDir string, argv []string, out io.Writer) int {
 		}
 	}
 
+	// Resolve the CC pid once: the hook path renders both the context text and
+	// the title tag, each of which would otherwise re-walk /proc independently.
+	ccPID := findCCPID()
+	pidFn := func() int { return ccPID }
+
 	// --statusline wins when both flags are passed: statusline output is the
 	// narrower contract (one tag, no newline) and tolerates being chained.
 	if wantStatusline {
-		_, _ = fmt.Fprint(out, renderStatuslineText(stateDir, findCCPID))
+		_, _ = fmt.Fprint(out, renderStatuslineText(stateDir, pidFn))
 		return 0
 	}
 
-	text := renderSelfText(stateDir, findCCPID)
+	text := renderSelfText(stateDir, pidFn)
 
 	if wantHook {
-		payload := map[string]any{
-			"hookSpecificOutput": map[string]any{
-				"hookEventName":     "SessionStart",
-				"additionalContext": text,
-			},
+		hookOut := map[string]any{
+			"hookEventName":     "SessionStart",
+			"additionalContext": text,
 		}
-		_ = json.NewEncoder(out).Encode(payload)
+
+		// Empty title (no alias yet) is omitted so CC keeps its default title
+		// rather than blanking the tab.
+		if title := renderStatuslineText(stateDir, pidFn); title != "" {
+			hookOut["sessionTitle"] = title
+		}
+
+		_ = json.NewEncoder(out).Encode(map[string]any{"hookSpecificOutput": hookOut})
 
 		return 0
 	}
