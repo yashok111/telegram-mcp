@@ -432,6 +432,89 @@ func TestFindCCPID_invalidEnvFallsThroughToWalk(t *testing.T) {
 	_ = findCCPID()
 }
 
+// writeSessionWithSID writes a session snapshot with caller-controlled alias and
+// cc_session_id so the session-id resolution path can be exercised independently
+// of the cc_pid filename.
+func writeSessionWithSID(t *testing.T, dir string, ccPID int, alias, sid string) {
+	t.Helper()
+
+	sessDir := filepath.Join(dir, "sessions")
+	require.NoError(t, os.MkdirAll(sessDir, 0o700))
+
+	payload := map[string]any{
+		"alias":          alias,
+		"shim_id":        "abc123def456",
+		"shim_id_prefix": "abc123de",
+		"cc_pid":         ccPID,
+		"shim_pid":       ccPID + 1,
+		"cc_session_id":  sid,
+		"workdir":        "/home/u/repo",
+		"started_at":     time.Now().UTC().Format(time.RFC3339),
+		"mode":           "shim",
+	}
+
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, strconv.Itoa(ccPID)+".json"), raw, 0o600))
+}
+
+func TestRenderSelfText_resolvesBySessionIDWhenPPIDFails(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "diag-sid")
+	writeFixtureSession(t, dir, 55555) // cc_session_id == "diag-sid"
+
+	// ccPIDFn=0 → the PPID path cannot resolve; only the session-id match can.
+	got := renderSelfText(dir, func() int { return 0 })
+	assert.Contains(t, got, "@s3")
+	assert.Contains(t, got, "/home/u/repo")
+}
+
+func TestRenderSelfText_sessionIDTakesPriorityOverPPID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "sid-B")
+	writeSessionWithSID(t, dir, 100, "sA", "sid-A") // what a wrong PPID walk would pick
+	writeSessionWithSID(t, dir, 200, "sB", "sid-B") // the session env actually points at
+
+	got := renderSelfText(dir, func() int { return 100 })
+	assert.Contains(t, got, "@sB")
+	assert.NotContains(t, got, "@sA")
+}
+
+func TestRenderSelfText_ignoresSessionIDWhenNotUnderCC(t *testing.T) {
+	dir := t.TempDir()
+	// CLAUDECODE unset → the session-id env is not trusted even when present.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "diag-sid")
+	writeFixtureSession(t, dir, 55555)
+
+	got := renderSelfText(dir, func() int { return 0 })
+	assert.Contains(t, got, "no shim alias registered")
+}
+
+func TestRenderStatuslineText_resolvesBySessionID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "diag-sid")
+	writeFixtureSession(t, dir, 55555)
+
+	got := renderStatuslineText(dir, func() int { return 0 })
+	assert.Equal(t, "tg:@s3", got)
+}
+
+func TestRunSelf_textMode_resolvesBySessionIDWithoutPID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "diag-sid")
+	writeFixtureSession(t, dir, 55555)
+
+	var out bytes.Buffer
+
+	code := runSelf(dir, []string{}, &out)
+	require.Equal(t, 0, code)
+	assert.Contains(t, out.String(), "@s3")
+}
+
 func TestReadProcPPID_self(t *testing.T) {
 	pid := os.Getpid()
 	ppid, err := readProcPPID(pid)

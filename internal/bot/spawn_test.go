@@ -232,7 +232,7 @@ func TestHandleSpawnCommand_appliesEffortFromState(t *testing.T) {
 	b.handleSpawnCommand(t.Context(), spawnMsg("/spawn"), runner)
 
 	require.Len(t, runner.spawnCalls, 1)
-	assert.Equal(t, "claude-opus-4-7", runner.spawnCalls[0].Model)
+	assert.Equal(t, "claude-opus-4-8", runner.spawnCalls[0].Model)
 	assert.Equal(t, 16000, runner.spawnCalls[0].ThinkingTokens)
 }
 

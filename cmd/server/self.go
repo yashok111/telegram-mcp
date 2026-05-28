@@ -87,6 +87,14 @@ func runSelf(stateDir string, argv []string, out io.Writer) int {
 // statusline composition. Returns an empty string when no session file exists
 // (pre-Wire race during startup) so the caller can drop the segment silently.
 func renderStatuslineText(stateDir string, ccPIDFn func() int) string {
+	if info, ok := loadSessionByEnv(stateDir); ok {
+		if info.Alias == "" {
+			return ""
+		}
+
+		return "tg:@" + info.Alias
+	}
+
 	ccPID := ccPIDFn()
 	if ccPID <= 0 {
 		return ""
@@ -111,9 +119,15 @@ func renderStatuslineText(stateDir string, ccPIDFn func() int) string {
 	return "tg:@" + info.Alias
 }
 
-// renderSelfText loads the session snapshot keyed by the CC process PID. The
-// ccPIDFn parameter is injected so tests don't need to fork a real CC tree.
+// renderSelfText loads the session snapshot for the current CC session. It
+// prefers an exact CLAUDE_CODE_SESSION_ID match (CC 2.1.154+) and falls back to
+// the cc_pid filename resolved by the PPID walk. The ccPIDFn parameter is
+// injected so tests don't need to fork a real CC tree.
 func renderSelfText(stateDir string, ccPIDFn func() int) string {
+	if info, ok := loadSessionByEnv(stateDir); ok {
+		return formatSelfText(stateDir, info)
+	}
+
 	ccPID := ccPIDFn()
 	if ccPID <= 0 {
 		return "Telegram bridge: no shim alias registered for this session yet."
@@ -131,6 +145,13 @@ func renderSelfText(stateDir string, ccPIDFn func() int) string {
 		return "Telegram bridge: session file present but unreadable."
 	}
 
+	return formatSelfText(stateDir, info)
+}
+
+// formatSelfText renders the agent-facing identity blurb for a resolved session
+// snapshot, appending any live sibling shims. Peer exclusion keys off the
+// snapshot's own cc_pid so it works regardless of how the snapshot was located.
+func formatSelfText(stateDir string, info sessionInfo) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "You are connected to Telegram via shim alias @%s ", info.Alias)
@@ -147,7 +168,7 @@ func renderSelfText(stateDir string, ccPIDFn func() int) string {
 
 	fmt.Fprintf(&b, "When the user writes \"@%s ...\" in Telegram, that addresses YOU specifically.", info.Alias)
 
-	if peers := listLivePeers(stateDir, ccPID); len(peers) > 0 {
+	if peers := listLivePeers(stateDir, info.CCPID); len(peers) > 0 {
 		slices.SortFunc(peers, func(a, b sessionInfo) int { return strings.Compare(a.Alias, b.Alias) })
 
 		parts := make([]string, 0, len(peers))
@@ -181,13 +202,8 @@ func listLivePeers(stateDir string, ownCCPID int) []sessionInfo {
 			continue
 		}
 
-		raw, err := os.ReadFile(filepath.Join(stateDir, "sessions", e.Name()))
-		if err != nil {
-			continue
-		}
-
-		var info sessionInfo
-		if err := json.Unmarshal(raw, &info); err != nil {
+		info, ok := readSessionFile(filepath.Join(stateDir, "sessions", e.Name()))
+		if !ok {
 			continue
 		}
 
@@ -216,6 +232,67 @@ var peerProcAlive = func(pid int) bool {
 	}
 
 	return strings.TrimSpace(string(raw)) == "telegram-mcp"
+}
+
+// ccSessionID returns CC's session id, trusted only when CLAUDECODE confirms we
+// are genuinely running under Claude Code. CC 2.1.154+ sets both CLAUDECODE=1
+// and CLAUDE_CODE_SESSION_ID in the env of stdio MCP subprocesses and hooks;
+// older releases set neither for MCP servers, so this returns "" there and
+// callers fall back to the PPID walk.
+func ccSessionID() string {
+	if os.Getenv("CLAUDECODE") == "" {
+		return ""
+	}
+
+	return os.Getenv("CLAUDE_CODE_SESSION_ID")
+}
+
+// loadSessionByEnv resolves the current session snapshot by matching its
+// cc_session_id against CC's session-id env. Returns ok=false when CC exposes no
+// trusted session id or no snapshot matches — both fall through to the PPID
+// walk. Matching by session id is immune to PID recycling and the fragile
+// comm-prefix heuristic of the walk.
+func loadSessionByEnv(stateDir string) (sessionInfo, bool) {
+	sid := ccSessionID()
+	if sid == "" {
+		return sessionInfo{}, false
+	}
+
+	dir := filepath.Join(stateDir, "sessions")
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return sessionInfo{}, false
+	}
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+
+		info, ok := readSessionFile(filepath.Join(dir, e.Name()))
+		if ok && info.CCSessionID == sid {
+			return info, true
+		}
+	}
+
+	return sessionInfo{}, false
+}
+
+// readSessionFile loads and decodes one session snapshot. Corrupt or unreadable
+// files yield ok=false so callers skip them silently — matching listLivePeers.
+func readSessionFile(path string) (sessionInfo, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return sessionInfo{}, false
+	}
+
+	var info sessionInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return sessionInfo{}, false
+	}
+
+	return info, true
 }
 
 // findCCPID walks the parent chain looking for the first ancestor whose

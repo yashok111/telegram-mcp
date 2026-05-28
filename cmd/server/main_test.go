@@ -16,6 +16,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// CC 2.1.154+ exports CLAUDECODE / CLAUDE_CODE_SESSION_ID into the test
+	// runner's own env. Clear them so session tests only see what they t.Setenv.
+	_ = os.Unsetenv("CLAUDECODE")
+	_ = os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
 	goleak.VerifyTestMain(m,
 		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*HostClient).connsCleaner"),
 		goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*Client).mCleaner"),
