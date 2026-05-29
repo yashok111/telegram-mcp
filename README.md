@@ -42,6 +42,19 @@ Single Go binary. No node/bun runtime. Dies with its parent via
 - **Daemon-spawned sessions (`/spawn`)** — DM `/spawn --in <dir>` and the
   daemon forks a fresh Claude Code client in that directory, hands you back a
   new `@sN` alias to talk to.
+- **Per-chat effort (`/effort`)** — `/effort low|medium|high|xhigh|max` sets
+  the model and thinking-token budget used by future `/spawn` and `/bg` runs
+  from that chat. Persisted across daemon restarts.
+- **Live status feedback** — while the agent works the daemon keeps a
+  "typing…" bubble alive and rotates a reaction emoji on your message; in
+  forum mode each topic carries a pinned header showing the owning session's
+  state (🟢 idle · 🟡 busy · 🔵 awaiting permission · ⚪ disconnected),
+  workdir, label, and uptime.
+- **Admin-agent (optional)** — set `TELEGRAM_ADMIN_ENABLE=1` and the daemon
+  forks a persistent Claude-powered supervisor (`@admin`) that answers
+  operator DMs with full tooling, surfaces anomalies (error bursts, spawn
+  failures), and produces a daily digest. Autonomous reactions are sandboxed
+  to read-only + propose-only.
 - **MarkdownV2 output** — opt-in formatted replies, bold/italic/code/spoiler.
 - **Local-only, single-user** — no webhook, no public ingress, no DB. Long
   polling behind any NAT.
@@ -185,6 +198,10 @@ session — one tab per project, persistent across `/exit`/restart.
   LRU exactly as before. `@all` still broadcasts.
 - **Permission prompts** — for shims with a topic, the prompt card lands
   in the topic next to the tool output that triggered it (not in DM).
+- **Pinned header** — each topic gets a pinned status message the daemon
+  maintains in place: owning alias, state icon (🟢 idle · 🟡 busy ·
+  🔵 awaiting permission · ⚪ disconnected · 🔴 closed), workdir, label,
+  last activity, and uptime. Toggle with `TELEGRAM_TOPIC_HEADER=0`.
 
 ### Persistence and reuse
 
@@ -231,9 +248,14 @@ them; a background sweep calls `deleteForumTopic` after
 
 | Command                | Effect                                                |
 | ---------------------- | ----------------------------------------------------- |
+| `/start`, `/help`      | Intro / command reference.                            |
+| `/status`              | This chat's pinned shim, effort, and daemon health.   |
 | `/sessions`            | Status board of all connected shims.                  |
-| `/use <prefix>`        | Pin this chat to a shim by shim_id prefix.            |
+| `/use <prefix>` / `/pin <prefix>` | Pin this chat to a shim by shim_id prefix. |
+| `/unpin`               | Drop this chat's shim pin.                            |
 | `/label <name>`        | Give your shim an `@<name>` alias.                    |
+| `/effort <level>`      | Set model + thinking budget (`low`…`max`, `show`, `clear`) for future `/spawn`+`/bg`. |
+| `/idle`                | Show how long the daemon has been idle.               |
 | `/rules list`          | Show active auto-approve rules with TTL.              |
 | `/rules clear`         | Drop all rules.                                       |
 | `/rules revoke <id>`   | Drop a single rule.                                   |
@@ -244,14 +266,15 @@ them; a background sweep calls `deleteForumTopic` after
 | `/spawn list`          | List daemon-spawned sessions.                         |
 | `/spawn cancel <id>`   | Terminate a spawn.                                    |
 | `/reaction <emoji>`    | Set the default ack reaction.                         |
+| `/topics`              | DM-only: list every known forum topic (forum mode).   |
 
 ---
 
 ## Persistent daemon (optional)
 
-The daemon auto-spawns on first use and idles out 30 min after the last shim
-disconnects. To keep it alive across reboots, install the user-mode systemd
-unit:
+The daemon auto-spawns on first use and idles out 7 days after the last shim
+disconnects (override with `TELEGRAM_DAEMON_IDLE_EXIT`). To keep it alive
+across reboots, install the user-mode systemd unit:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -281,13 +304,13 @@ State directory: `~/.claude/channels/telegram/` (override with
 | File           | Purpose                                              |
 | -------------- | ---------------------------------------------------- |
 | `.env`         | `TELEGRAM_BOT_TOKEN=...` (chmod 0600).               |
-| `access.json`  | Allowlist, pairing state, group policy, UX prefs. With forum mode: `forum_chat_id`, `topics_by_thread`, `topics_by_reuse_key`, `closed_topics`. |
-| `bot.pid`     | Daemon's PID (comm-checked).                         |
+| `access.json`  | Allowlist, pairing state, group policy, UX prefs, per-chat effort. With forum mode: `forum_chat_id`, `topics_by_thread`, `topics_by_reuse_key`, `closed_topics`. |
 | `daemon.sock`  | IPC socket (0600).                                   |
-| `daemon.pid`   | Daemon's claim PID.                                  |
+| `daemon.pid`   | Daemon's claim PID (comm-checked).                   |
 | `daemon.log`   | Daemon stderr when shim-spawned (else journalctl).   |
-| `inbox/`       | Downloaded attachments.                              |
+| `inbox/`       | Downloaded attachments (swept after `TELEGRAM_INBOX_TTL`). |
 | `sessions/`    | Per-shim session snapshots for `self`.               |
+| `shims/`       | Per-shim log files (when shim-log sink enabled).     |
 
 Knobs (env vars, all optional):
 
@@ -312,6 +335,31 @@ Knobs (env vars, all optional):
 | `TELEGRAM_SPAWN_RATE_PER_HOUR`    | `5`                    | Per-user `/spawn` rate.                  |
 | `TELEGRAM_SPAWN_CLAUDE_BIN`       | auto (see below)       | `/spawn` driver binary.                  |
 | `TELEGRAM_SPAWN_CLAUDE_ARGS`      | auto (see below)       | Args appended after `…_CLAUDE_BIN`.      |
+| `TELEGRAM_FORUM_AUTOSPAWN_DISABLE`| `0` (enabled)          | Disable auto-spawning a session into an unowned forum topic. |
+| `TELEGRAM_FORUM_AUTOSPAWN_COOLDOWN`| `90s`                 | Min interval between auto-spawns into the same topic. |
+| `TELEGRAM_TOPIC_HEADER`           | `1` (on)               | Pinned per-topic status header (forum mode). |
+| `TELEGRAM_TOPIC_HEADER_REFRESH`   | `5s`                   | Min interval between header edits (debounce). |
+| `TELEGRAM_TOPIC_HEADER_TICK`      | `60s`                  | Background uptime/idle re-render cadence. |
+| `TELEGRAM_TYPING_REFRESH`         | `1` (on)               | Set `0` to disable the "typing…" + reaction tracker. |
+| `TELEGRAM_TYPING_TTL`             | `60`                   | Seconds a chat stays pending without an outbound. |
+| `TELEGRAM_TYPING_ROTATION_EMOJIS` | `👀,🤔,✍`              | Reaction cycle while thinking; empty disables rotation. |
+| `TELEGRAM_TYPING_DONE_EMOJI`      | `👌`                   | Reaction swapped in on first reply; `off`/empty suppresses. |
+| `TELEGRAM_INBOX_TTL`              | `168h` (7d)            | Retention for downloaded attachments before sweep. |
+| `TELEGRAM_CORRUPT_TTL`            | `168h` (7d)            | Retention for corrupt/unreadable inbox files.       |
+| `TELEGRAM_SESSIONS_TTL`           | `1h`                   | Retention for stale session snapshots after exit.   |
+| `TELEGRAM_LOG_MAX_BYTES`          | `10485760` (10 MiB)    | `daemon.log` rotation threshold; `0` disables.      |
+| `TELEGRAM_SHIM_LOG_DISABLE`       | `0` (sink on)          | Disable per-shim log files under `shims/`.          |
+| `TELEGRAM_SHIM_LOG_MAX_BYTES`     | `2097152` (2 MiB)      | Per-shim log rotation threshold; `0` disables.      |
+| `TELEGRAM_SHIM_LOG_TTL`           | `168h` (7d)            | Retention for per-shim logs after disconnect.       |
+| `TELEGRAM_ADMIN_ENABLE`           | `0` (off)              | Fork the persistent admin-agent supervisor.         |
+| `TELEGRAM_ADMIN_MODEL`            | claude default         | `--model` for admin-agent invocations.              |
+| `TELEGRAM_ADMIN_DENY_TOOLS`       | — (none)               | Comma-separated admin mutation tools to hard-reject. |
+| `TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR`| `60`                | Global cap on admin-agent mutations per hour.       |
+| `TELEGRAM_ADMIN_PENDING_TTL`      | `5m`                   | How long a Tier-3 owner-confirm request waits.      |
+| `TELEGRAM_ADMIN_SITREP_INTERVAL`  | `24h`                  | Daily digest cadence; `0` disables.                 |
+| `TELEGRAM_ADMIN_ERRBURST_THRESHOLD`| `20`                  | ERROR records in the window that trigger an anomaly; `≤0` disables. |
+| `TELEGRAM_ADMIN_ERRBURST_WINDOW`  | `1m`                   | Sliding window for error-burst counting.            |
+| `TELEGRAM_ADMIN_ERRBURST_COOLDOWN`| `5m`                   | Min interval between error-burst anomaly pings.      |
 
 > **Auto-resolve.** When `TELEGRAM_{SPAWN,BG}_CLAUDE_BIN` is unset the daemon
 > tries `exec.LookPath("claude")` first, then falls back to
@@ -326,6 +374,34 @@ Knobs (env vars, all optional):
 > resolved value is logged at daemon startup as `"spawn claude args resolved"`.
 > Set the env var explicitly if you need to pin a specific channel or pass
 > different flags.
+
+---
+
+## Admin-agent (optional)
+
+Set `TELEGRAM_ADMIN_ENABLE=1` and the daemon fork-execs a persistent
+`telegram-mcp admin-agent` supervisor at boot. It attaches over IPC as a
+reserved `@admin` shim and is a Claude-powered observer of the daemon itself:
+
+- **Operator DMs** that don't match any user shim fall through to `@admin`,
+  which answers with full tooling (read + mutate, tiered by risk).
+- **Anomaly events** — error bursts (`TELEGRAM_ADMIN_ERRBURST_*`), spawn
+  failures, and similar are pushed to the agent, which triages and pings you.
+- **Daily sitrep** — every `TELEGRAM_ADMIN_SITREP_INTERVAL` (default 24h) the
+  agent produces a status digest.
+
+Autonomous reactions (events + sitreps) are sandboxed to **read-only + Tier-3
+propose-only**, so injected content can never drive an unconfirmed mutation;
+only operator-initiated DMs get unrestricted tools. Mutations are globally
+rate-limited (`TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR`, default 60) and a
+`TELEGRAM_ADMIN_DENY_TOOLS` denylist hard-rejects named tools even on owner
+tap. The per-boot `TELEGRAM_ADMIN_TOKEN` secret is generated by the daemon and
+threaded to the agent's tool subprocess — not a user knob.
+
+The agent's per-shim activity (and everything else) is also captured to a
+per-shim log sink under `~/.claude/channels/telegram/shims/<shim_id>.log`
+(`TELEGRAM_SHIM_LOG_*`), so you can inspect one session without grepping the
+combined `daemon.log`.
 
 ---
 
@@ -347,10 +423,9 @@ every shim share one UID. The trust boundary is:
   `claude` inherits the daemon's UID; do not run the daemon as root.
 - **PR_SET_PDEATHSIG** — every shim is anchored to its parent Claude Code
   pid. Killing the editor kills the shim — no leftover processes.
-- **Comm-checked PID claims** — `bot.pid` / `daemon.pid` are only SIGTERMed
-  if `/proc/<pid>/comm` matches `telegram-mcp` (or `bun` for legacy
-  TS-plugin handoff). Prevents PID recycling from killing unrelated
-  processes.
+- **Comm-checked PID claims** — `daemon.pid` is only SIGTERMed if
+  `/proc/<pid>/comm` matches `telegram-mcp` (or `bun` for legacy TS-plugin
+  handoff). Prevents PID recycling from killing unrelated processes.
 
 Webhooks, multi-user/multi-tenant deployments, and shared bot tokens are
 explicitly **out of scope**.
@@ -426,7 +501,7 @@ internal/shim/    per-CC-session process, IPC client
 ```
 
 **Testing:** `goleak` in every package's `TestMain`. ~84% project LOC
-coverage across 1056 tests. No `t.Parallel()` — tests share httptest servers
+coverage across 1179 tests. No `t.Parallel()` — tests share httptest servers
 and env vars. New code without a test gets pushback unless it's wiring in
 `cmd/server`.
 
