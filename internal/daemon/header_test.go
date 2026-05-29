@@ -690,6 +690,25 @@ func TestHeaderManager_MarkActiveDirtySkipsClosed(t *testing.T) {
 	assert.False(t, m.entries[2].dirty, "closed topic is terminal — not re-rendered")
 }
 
+func TestHeaderManager_MarkActiveDirtySkipsDisconnected(t *testing.T) {
+	b := &fakeHeaderBot{}
+	m, _, _ := newTestHeader(t, b, idleIdents(), time.Minute)
+
+	m.mu.Lock()
+	m.entries[1] = &headerEntry{state: HeaderBusy}
+	m.entries[2] = &headerEntry{state: HeaderDisconnected}
+	m.mu.Unlock()
+
+	m.markActiveDirty() // the background uptime tick
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	assert.True(t, m.entries[1].dirty, "active topic re-marked dirty so uptime ages")
+	assert.False(t, m.entries[2].dirty,
+		"disconnected topic is frozen — no live owner, so the uptime tick must not churn an edit every interval")
+}
+
 func TestHeaderManager_ClosedNoHeaderNoSend(t *testing.T) {
 	b := &fakeHeaderBot{}
 	m, _, _ := newTestHeader(t, b, idleIdents(), time.Minute)

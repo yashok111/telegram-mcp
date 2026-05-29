@@ -18,6 +18,7 @@ var permanentChatErrSubstrings = []string{
 	"user is deactivated",         // recipient account deleted
 	"bot is not a member",         // bot not in the target chat
 	"peer_id_invalid",             // invalid / stale peer id
+	"topic_id_invalid",            // forum topic id gone / never existed
 }
 
 // IsPermanentChatError reports whether err is a Telegram failure that will never

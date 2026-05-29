@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/ipc"
 )
 
@@ -92,6 +93,14 @@ type Router struct {
 	// disables. Always called WITHOUT r.mu held — the header manager takes its
 	// own lock, and holding both would invert the lock order taken by a flush.
 	headerHook func(threadID int)
+
+	// aliasStore + sticky enable workdir/label-stable aliases (see
+	// SetStickyAliasStore). sticky mirrors access.State.AliasByKey in memory;
+	// aliasStore is the durable write-through. Both nil → legacy lowest-free
+	// allocation (the default in tests). Guarded by r.mu; aliasStore.Mutate is
+	// only ever called AFTER releasing r.mu (never hold a lock across disk IO).
+	aliasStore *access.Store
+	sticky     map[string]string // reuse-key → alias
 }
 
 type pin struct {
@@ -201,9 +210,8 @@ func (r *Router) SetHeaderHook(fn func(threadID int)) {
 
 func (r *Router) Register(s *Shim) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
-	alias := r.allocAliasForRole(s.Role)
+	alias, mintKey := r.allocStickyAliasLocked(s)
 	s.Alias = alias
 	r.aliases[alias] = s.ID
 	r.shimAlias[s.ID] = alias
@@ -218,6 +226,15 @@ func (r *Router) Register(s *Shim) {
 
 	if s.TopicID > 0 {
 		r.topicOwners[s.TopicID] = s.ID
+	}
+
+	store := r.aliasStore // captured under the lock for the post-unlock persist
+	r.mu.Unlock()
+
+	// Persist a freshly-minted reuse-key→alias binding outside the lock — never
+	// hold r.mu across disk IO. mintKey == "" when nothing new was bound.
+	if mintKey != "" {
+		persistStickyAlias(store, mintKey, alias)
 	}
 }
 

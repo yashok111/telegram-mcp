@@ -22,6 +22,7 @@ func TestIsPermanentChatError(t *testing.T) {
 		{"not a member", errors.New("telego: sendMessage: api: 403 \"Forbidden: bot is not a member of the channel chat\""), true},
 		{"peer id invalid", errors.New("telego: sendMessage: api: 400 \"Bad Request: PEER_ID_INVALID\""), true},
 		{"peer id invalid lowercase", errors.New("api: peer_id_invalid"), true},
+		{"topic id invalid", errors.New("telego: closeForumTopic: api: 400 \"Bad Request: TOPIC_ID_INVALID\""), true},
 		// Transient / recoverable — must NOT be classified permanent.
 		{"flood wait", errors.New("telego: sendMessage: api: 429 \"Too Many Requests: retry after 5\""), false},
 		{"not enough rights", errors.New("telego: sendMessage: api: 400 \"Bad Request: not enough rights to send text messages\""), false},

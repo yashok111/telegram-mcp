@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yakov/telegram-mcp/internal/access"
 	"github.com/yakov/telegram-mcp/internal/bot"
@@ -71,12 +72,20 @@ func (f *Forum) Enabled() bool {
 // churning a new one; two distinct live sessions in the same dir still get
 // separate topics via the lock-collision path (each warned).
 func (f *Forum) resolveReuseKey(shim *Shim) (string, bool) {
-	if shim.Label != "" {
-		return "label:" + shim.Label, true
+	return reuseKeyFor(shim.Label, shim.Workdir)
+}
+
+// reuseKeyFor is the single source of truth for the topic/alias reuse-key
+// scheme: an explicit label wins over the workdir, and an empty result means
+// no stable identity. Shared by Forum.resolveReuseKey (topic reuse) and
+// stickyAliasKey (alias stickiness) so the two can never drift.
+func reuseKeyFor(label, workdir string) (string, bool) {
+	if label != "" {
+		return "label:" + label, true
 	}
 
-	if shim.Workdir != "" {
-		return "workdir:" + shim.Workdir, true
+	if workdir != "" {
+		return "workdir:" + workdir, true
 	}
 
 	return "", false
@@ -170,6 +179,7 @@ func (f *Forum) adoptForcedTopic(ctx context.Context, shim *Shim, forced int) (i
 
 		meta.LockedBy = shim.ID
 		meta.LastShimID = shim.ID
+		meta.ReleasedAt = 0 // adopted — stop the orphan TTL clock
 
 		if st.TopicsByThread == nil {
 			st.TopicsByThread = map[string]access.TopicMeta{}
@@ -274,6 +284,7 @@ func (f *Forum) allocateByReuseKey(ctx context.Context, shim *Shim) (int, error)
 
 		meta.LockedBy = shim.ID
 		meta.LastShimID = shim.ID
+		meta.ReleasedAt = 0 // reattached — stop the orphan TTL clock
 		st.TopicsByThread[tidStr] = meta
 		threadID = tid
 		oldName = meta.Name
@@ -457,6 +468,7 @@ func (f *Forum) ReleaseLock(shimID string) {
 			}
 
 			meta.LockedBy = ""
+			meta.ReleasedAt = time.Now().Unix() // start the orphan TTL clock
 			st.TopicsByThread[tidStr] = meta
 			changed = true
 
@@ -470,17 +482,28 @@ func (f *Forum) ReleaseLock(shimID string) {
 }
 
 // buildTopicName composes the human-visible topic name shown in Telegram's
-// supergroup topic list. Format: `@<alias> — <label or workdir basename>`
-// or just `@<alias>` when neither is available.
+// supergroup topic list. It is the project identity only — the label, or the
+// workdir basename — with NO alias prefix. The alias (@sN) is ephemeral: it is
+// reassigned by connection order and reshuffles across daemon restarts, so
+// baking it into the persistent title makes the list lie about "who is who"
+// for every disconnected topic. The live alias is carried by the pinned header
+// instead, which is always bound to the current owner. When the basename is
+// degenerate it falls back to the raw workdir (e.g. `/`), or to the literal
+// `session` when there is no workdir at all — both alias-independent, so the
+// title never churns when the alias reshuffles.
 func buildTopicName(s *Shim) string {
 	if s.Label != "" {
-		return "@" + s.Alias + " — " + s.Label
+		return s.Label
 	}
 
 	base := filepath.Base(s.Workdir)
 	if base == "" || base == "." || base == "/" {
-		return "@" + s.Alias
+		if s.Workdir != "" {
+			return s.Workdir
+		}
+
+		return "session"
 	}
 
-	return "@" + s.Alias + " — " + base
+	return base
 }
