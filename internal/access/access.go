@@ -69,6 +69,12 @@ type TopicMeta struct {
 	// LockedBy is the currently-attached shim_id; "" means the topic is
 	// available for reuse on the next hello with a matching reuse_key.
 	LockedBy string `json:"locked_by,omitempty"`
+	// ReleasedAt is the unix time the lock was last released (owner
+	// disconnected). Non-zero only while LockedBy=="" — set on release, cleared
+	// to 0 on re-lock. The orphan sweep closes a topic that has sat released
+	// (no shim reattached) past TELEGRAM_TOPIC_ORPHAN_AFTER, so dead topics stop
+	// accumulating across reconnect churn.
+	ReleasedAt int64 `json:"released_at,omitempty"`
 	// HeaderMessageID is the message_id of the pinned topic-header message the
 	// daemon maintains for this topic; 0 when no header has been sent yet.
 	HeaderMessageID int `json:"header_message_id,omitempty"`
@@ -103,6 +109,11 @@ type State struct {
 	ChunkMode       ChunkMode              `json:"chunkMode,omitempty"`
 	Rules           []PermissionRule       `json:"rules,omitempty"`
 	EffortByChat    map[string]string      `json:"effortByChat,omitempty"`
+	// AliasByKey maps a sticky reuse-key (`label:<x>` or `workdir:<path>`) to the
+	// @sN alias bound to it, so a session reattaching to the same project gets the
+	// same alias across reconnects and daemon restarts. Append-mostly; not GC'd —
+	// a stale binding only reserves an alias number, cheap for a single user.
+	AliasByKey map[string]string `json:"alias_by_key,omitempty"`
 	// ForumChatID, when non-zero, enables forum-topics routing: every shim
 	// gets a dedicated topic in this supergroup. Zero = feature off.
 	ForumChatID int64 `json:"forum_chat_id,omitempty"`
@@ -226,6 +237,10 @@ func cloneState(src *State) State {
 
 	if src.EffortByChat != nil {
 		out.EffortByChat = maps.Clone(src.EffortByChat)
+	}
+
+	if src.AliasByKey != nil {
+		out.AliasByKey = maps.Clone(src.AliasByKey)
 	}
 
 	if src.TopicsByReuseKey != nil {

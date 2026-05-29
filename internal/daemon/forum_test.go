@@ -142,8 +142,8 @@ func TestForum_adoptsForcedTopic_untracked(t *testing.T) {
 	assert.Equal(t, "shim-a", meta.LockedBy)
 	assert.Equal(t, 200, meta.ThreadID)
 
-	require.Len(t, fb.editName, 1, "adopted topic labelled with the alias")
-	assert.Equal(t, "@s1 — foo", fb.editName[0])
+	require.Len(t, fb.editName, 1, "adopted topic gets a project-only name pushed")
+	assert.Equal(t, "foo", fb.editName[0])
 }
 
 func TestForum_forcedTopic_priorityOverLabel(t *testing.T) {
@@ -180,8 +180,8 @@ func TestForum_forcedTopic_reusesTrackedFreeTopic(t *testing.T) {
 	assert.Empty(t, fb.createName, "reuses the tracked free topic")
 	assert.Equal(t, "shim-a", store.Load().TopicsByThread["200"].LockedBy)
 
-	require.Len(t, fb.editName, 1, "name diverged @s9→@s1 → resynced")
-	assert.Equal(t, "@s1 — foo", fb.editName[0])
+	require.Len(t, fb.editName, 1, "stored name @s9 — old diverges from project-only → resynced")
+	assert.Equal(t, "foo", fb.editName[0])
 }
 
 func TestForum_forcedTopic_seizesStaleLock(t *testing.T) {
@@ -298,7 +298,7 @@ func TestForum_createsFreshTopic_registersLabelKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Positive(t, threadID)
 	require.Len(t, fb.createName, 1)
-	assert.Equal(t, "@s1 — foo", fb.createName[0])
+	assert.Equal(t, "foo", fb.createName[0])
 
 	st := store.Load()
 	assert.Equal(t, threadID, st.TopicsByReuseKey["label:foo"])
@@ -323,14 +323,15 @@ func TestForum_reusesByLabel_whenLockFree(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first, second, "same label → same thread_id")
 	assert.Len(t, fb.createName, 1, "no fresh topic created on reuse")
-	assert.Len(t, fb.editName, 1, "alias s1→s2 on reuse → name resynced")
+	assert.Empty(t, fb.editName, "alias s1→s2 no longer resyncs — the title is project-only (RC1-A)")
 }
 
-// TestForum_reuseResyncsTopicName covers the alias-migration bug: a topic
-// name is frozen at CreateForumTopic. When the creating shim disconnects and
-// the topic is reused by a shim carrying a different alias, the name must be
-// re-pushed via EditForumTopic so the topic list stays distinguishable.
-func TestForum_reuseResyncsTopicName(t *testing.T) {
+// TestForum_reuseMigratesLegacyName: a topic whose stored name still carries the
+// pre-RC1 "@alias — project" format is resynced to the project-only name on the
+// next reuse, so titles stop showing a stale (and after an alias shuffle, wrong)
+// alias. This is the self-healing migration path for topics created before the
+// alias was dropped from the title.
+func TestForum_reuseMigratesLegacyName(t *testing.T) {
 	f, store, fb := newForumFixture(t, -100123)
 
 	first, err := f.AllocateOrReuse(context.Background(), &Shim{
@@ -338,7 +339,17 @@ func TestForum_reuseResyncsTopicName(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, fb.createName, 1, "topic created")
-	assert.Equal(t, "@s1 — foo", fb.createName[0])
+	assert.Equal(t, "foo", fb.createName[0], "new topics are named by project only")
+
+	// Rewrite the stored name to the legacy "@alias — project" format a pre-RC1
+	// daemon would have persisted.
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		m := st.TopicsByThread[strconv.Itoa(first)]
+		m.Name = "@s1 — foo"
+		st.TopicsByThread[strconv.Itoa(first)] = m
+
+		return true
+	}))
 
 	f.ReleaseLock("shim-old")
 
@@ -349,11 +360,32 @@ func TestForum_reuseResyncsTopicName(t *testing.T) {
 	assert.Equal(t, first, second, "reuse keeps the thread")
 	assert.Len(t, fb.createName, 1, "no fresh topic on reuse")
 
-	require.Len(t, fb.editName, 1, "diverged alias → one EditForumTopic")
-	assert.Equal(t, "@s2 — foo", fb.editName[0], "name resynced to new alias")
+	require.Len(t, fb.editName, 1, "legacy name diverges from project-only → one EditForumTopic")
+	assert.Equal(t, "foo", fb.editName[0], "name resynced to project-only form")
 	assert.Equal(t, second, fb.editThreadID[0], "edit targets the reused thread")
-	assert.Equal(t, "@s2 — foo", store.Load().TopicsByThread[strconv.Itoa(second)].Name,
-		"resynced name persisted")
+	assert.Equal(t, "foo", store.Load().TopicsByThread[strconv.Itoa(second)].Name,
+		"migrated name persisted")
+}
+
+// TestForum_aliasShuffle_noResync: after a daemon restart the same project may
+// reattach under a different @sN. Because the topic name no longer embeds the
+// alias (RC1-A), this must NOT trigger a title edit — the alias lives only in
+// the pinned header.
+func TestForum_aliasShuffle_noResync(t *testing.T) {
+	f, _, fb := newForumFixture(t, -100123)
+
+	_, err := f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-old", Alias: "s2", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+
+	f.ReleaseLock("shim-old")
+
+	_, err = f.AllocateOrReuse(context.Background(), &Shim{
+		ID: "shim-new", Alias: "s5", Workdir: "/projects/foo",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, fb.editName, "alias is not in the title → no EditForumTopic on alias change")
 }
 
 // TestForum_reuseSameAlias_noResync guards against a spurious API call when
@@ -385,6 +417,15 @@ func TestForum_resyncFailure_stillReturnsThread(t *testing.T) {
 		ID: "shim-old", Alias: "s1", Label: "foo", Workdir: "/projects/foo",
 	})
 	require.NoError(t, err)
+
+	// Legacy-format stored name forces a resync attempt on the next reuse.
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		m := st.TopicsByThread[strconv.Itoa(first)]
+		m.Name = "@s1 — foo"
+		st.TopicsByThread[strconv.Itoa(first)] = m
+
+		return true
+	}))
 
 	f.ReleaseLock("shim-old")
 
@@ -705,13 +746,18 @@ func TestForum_createFailure_propagates(t *testing.T) {
 }
 
 func TestBuildTopicName_labelWins(t *testing.T) {
-	assert.Equal(t, "@s1 — foo", buildTopicName(&Shim{Alias: "s1", Label: "foo", Workdir: "/projects/bar"}))
+	assert.Equal(t, "foo", buildTopicName(&Shim{Alias: "s1", Label: "foo", Workdir: "/projects/bar"}),
+		"label is the project identity; alias lives only in the pinned header")
 }
 
 func TestBuildTopicName_workdirBasename(t *testing.T) {
-	assert.Equal(t, "@s1 — bar", buildTopicName(&Shim{Alias: "s1", Workdir: "/projects/bar"}))
+	assert.Equal(t, "bar", buildTopicName(&Shim{Alias: "s1", Workdir: "/projects/bar"}),
+		"workdir basename, no alias prefix")
 }
 
-func TestBuildTopicName_bareAlias_whenWorkdirIsRoot(t *testing.T) {
-	assert.Equal(t, "@s1", buildTopicName(&Shim{Alias: "s1", Workdir: "/"}))
+func TestBuildTopicName_degenerateWorkdir_isAliasIndependent(t *testing.T) {
+	assert.Equal(t, "/", buildTopicName(&Shim{Alias: "s1", Workdir: "/"}),
+		"root workdir falls back to the raw path, not the volatile alias")
+	assert.Equal(t, "session", buildTopicName(&Shim{Alias: "s1", Workdir: ""}),
+		"no workdir at all → stable placeholder, never churns on alias change")
 }

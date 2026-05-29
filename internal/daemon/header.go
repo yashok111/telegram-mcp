@@ -318,15 +318,17 @@ func (m *HeaderManager) flushDirty(ctx context.Context) {
 	}
 }
 
-// markActiveDirty re-marks every non-terminal topic for a render so uptime and
-// idle-for advance on the background tick. Closed topics are terminal and
-// skipped.
+// markActiveDirty re-marks every live-owned topic for a render so uptime and
+// idle-for advance on the background tick. Closed (🔴) and disconnected (⚪)
+// topics have no live owner: their relative-time lines would otherwise change
+// every tick, defeating the content-hash dedup and churning an edit per topic
+// per interval forever. They paint once on the state transition, then freeze.
 func (m *HeaderManager) markActiveDirty() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, e := range m.entries {
-		if e.state != HeaderClosed {
+		if e.state != HeaderClosed && e.state != HeaderDisconnected {
 			e.dirty = true
 		}
 	}

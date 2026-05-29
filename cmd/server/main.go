@@ -121,6 +121,24 @@ func main() {
 	}
 }
 
+// cancelOnSignal installs a SIGINT/SIGTERM/SIGHUP handler that invokes cancel,
+// and returns a stop func the caller defers to release the handler. Extracted
+// so each run* entry point can wire shutdown in one line.
+func cancelOnSignal(ctx context.Context, cancel context.CancelFunc) func() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+	go func() {
+		select {
+		case <-sigs:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	return func() { signal.Stop(sigs) }
+}
+
 func runDaemon(stateDir string) error {
 	var logger *daemonpkg.Logger
 
@@ -158,6 +176,7 @@ func runDaemon(stateDir string) error {
 	store := access.NewStore(stateDir, os.Getenv("TELEGRAM_ACCESS_MODE") == "static")
 
 	router := daemonpkg.NewRouter()
+	router.SetStickyAliasStore(store) // workdir/label-stable @sN across reconnects + restarts
 
 	var typing *daemonpkg.TypingTracker
 	if daemonpkg.TypingEnabled() {
@@ -246,7 +265,8 @@ func runDaemon(stateDir string) error {
 	headerMgr := buildHeaderManager(store, tgBot, router)
 	notifier.SetHeader(headerMgr)
 
-	tgBot.SetTopicCloser(daemonpkg.NewTopicCloser(router, store, tgBot, spawnRunner, headerMgr))
+	topicCloser := daemonpkg.NewTopicCloser(router, store, tgBot, spawnRunner, headerMgr)
+	tgBot.SetTopicCloser(topicCloser)
 
 	d := &daemonpkg.Daemon{
 		StateDir:     stateDir,
@@ -259,6 +279,7 @@ func runDaemon(stateDir string) error {
 		Forum:        daemonpkg.NewForum(store, tgBot, router.IsConnected, spawnRunner.TopicForSpawn),
 		Header:       headerMgr,
 		TopicSweep:   daemonpkg.NewTopicSweep(store, tgBot, resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 14*24*time.Hour), time.Hour),
+		OrphanSweep:  daemonpkg.NewOrphanSweep(store, topicCloser, resolveDurationEnv("TELEGRAM_TOPIC_ORPHAN_AFTER", 7*24*time.Hour), time.Hour),
 		ShimLogs:     shimLogs,
 		ShimsSweep:   daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
 		SpawnRunner:  spawnRunner,
@@ -273,18 +294,8 @@ func runDaemon(stateDir string) error {
 		SessionsTTL:  sessionsTTL,
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
-	defer signal.Stop(sigs)
-
-	go func() {
-		select {
-		case <-sigs:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	stopSignals := cancelOnSignal(ctx, cancel)
+	defer stopSignals()
 
 	var wg sync.WaitGroup
 
@@ -335,8 +346,8 @@ func runDaemon(stateDir string) error {
 		return nil
 	case <-time.After(7 * time.Second):
 		slog.Error("daemon shutdown exceeded 7s deadline, forcing exit")
-		signal.Stop(sigs)
-		os.Exit(1) //nolint:gocritic // signal.Stop is called explicitly above; defer cleanup is the normal path.
+		stopSignals()
+		os.Exit(1) //nolint:gocritic // signal handler stopped explicitly above; defer cleanup is the normal path.
 	}
 
 	return nil

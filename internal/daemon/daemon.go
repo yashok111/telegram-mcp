@@ -25,15 +25,16 @@ type Daemon struct {
 	SocketPath string
 	PidPath    string
 
-	Store      *access.Store
-	Bot        botSurface
-	Router     *Router
-	Typing     *TypingTracker // nil disables typing-refresh goroutine
-	Forum      *Forum         // nil disables forum-topic allocation; required only when ForumChatID is configured
-	Header     *HeaderManager // nil disables pinned topic headers (forum mode only)
-	TopicSweep *TopicSweep    // nil disables periodic closed-topic deletion
-	ShimLogs   *ShimLogs      // nil disables per-shim log files
-	ShimsSweep *ShimsSweep    // nil disables shims/*.log retention sweep
+	Store       *access.Store
+	Bot         botSurface
+	Router      *Router
+	Typing      *TypingTracker // nil disables typing-refresh goroutine
+	Forum       *Forum         // nil disables forum-topic allocation; required only when ForumChatID is configured
+	Header      *HeaderManager // nil disables pinned topic headers (forum mode only)
+	TopicSweep  *TopicSweep    // nil disables periodic closed-topic deletion
+	OrphanSweep *OrphanSweep   // nil disables periodic orphaned-topic closing
+	ShimLogs    *ShimLogs      // nil disables per-shim log files
+	ShimsSweep  *ShimsSweep    // nil disables shims/*.log retention sweep
 
 	// EventBus persists anomaly events and pushes them to the admin-agent.
 	// nil disables event observability entirely.
@@ -238,6 +239,10 @@ func (d *Daemon) startBackgroundWorkers(wg *sync.WaitGroup) {
 
 	if d.TopicSweep != nil {
 		wg.Go(func() { d.TopicSweep.Run(d.dctx) })
+	}
+
+	if d.OrphanSweep != nil {
+		wg.Go(func() { d.OrphanSweep.Run(d.dctx) })
 	}
 
 	if d.Header != nil {
