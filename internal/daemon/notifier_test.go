@@ -580,6 +580,37 @@ func TestNotifier_autoSpawn_skipsWhenOwnerExists(t *testing.T) {
 	assert.Len(t, aSink, 1, "owner shim receives the inbound")
 }
 
+// A message typed into an UNOWNED forum topic whose project already has a live
+// session (owning a DIFFERENT, canonical topic) must route to that session, not
+// fork a duplicate auto-spawn. Reproduces the reboot-corpse-topic bug.
+func TestNotifier_autoSpawn_reroutesToLiveWorkdirOwner(t *testing.T) {
+	r := NewRouter()
+	r.SetForumChatID(forumChatIDInt())
+
+	var aSink []capturedNotify
+
+	owner := newCapturingShim("a", &aSink)
+	owner.Workdir = "/home/yakov/projects/telegram-mcp"
+	r.Register(owner)
+	r.BindTopic("a", 759) // live session owns canonical topic 759
+
+	// Topic 779 is the orphan corpse: same workdir, no owner.
+	store := forumTestStore(t, forumChatIDInt(),
+		map[string]access.TopicMeta{"779": {ThreadID: 779, Workdir: "/home/yakov/projects/telegram-mcp"}}, nil)
+
+	sp := newFakeSpawner()
+	n := NewNotifier(r, store, nil)
+	n.SetAutoSpawn(sp, time.Minute)
+
+	n.DeliverInbound("ping", map[string]string{
+		"chat_id": forumChat, "message_thread_id": "779", "user_id": "42", "user": "yakov",
+	})
+
+	assert.Empty(t, sp.calls(), "live session for the workdir → reroute, never spawn a duplicate")
+	require.Len(t, aSink, 1, "the live workdir owner receives the inbound")
+	assert.Equal(t, "notifications/inbound", aSink[0].method)
+}
+
 func TestNotifier_autoSpawn_disabledWhenNoSpawner(t *testing.T) {
 	r := NewRouter()
 	r.SetForumChatID(forumChatIDInt())

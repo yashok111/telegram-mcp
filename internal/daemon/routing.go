@@ -980,6 +980,49 @@ func (r *Router) forumIsolatesLocked(chatID string, threadID int) bool {
 	return chatID == strconv.FormatInt(r.forumChatID, 10)
 }
 
+// RouteToWorkdirOwner returns a connected non-admin shim already serving
+// workdir, preferring one that owns a forum topic (TopicID > 0) and, among
+// those, the most-recently-connected. It exists so an inbound that lands on an
+// unowned forum topic of a project with a live session is delivered to that
+// session instead of spawning a duplicate (the reply surfaces in the live
+// session's own topic, nudging the user back to the canonical one). Returns
+// (nil, false) for an empty workdir or when no live shim serves it.
+func (r *Router) RouteToWorkdirOwner(workdir string) (*Shim, bool) {
+	if workdir == "" {
+		return nil, false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var fallback *Shim
+
+	for _, id := range r.lru { // most-recent-first
+		s, ok := r.shims[id]
+		if !ok || s.Role == "admin" || s.Workdir != workdir {
+			continue
+		}
+
+		if s.TopicID > 0 {
+			r.recordAssignmentLocked(s.ID)
+
+			return s, true
+		}
+
+		if fallback == nil {
+			fallback = s
+		}
+	}
+
+	if fallback != nil {
+		r.recordAssignmentLocked(fallback.ID)
+
+		return fallback, true
+	}
+
+	return nil, false
+}
+
 // resolveMentionsLocked translates mention tokens into Shim pointers.
 //
 //	@all     → every connected user shim (admin excluded — use @admin explicitly)
