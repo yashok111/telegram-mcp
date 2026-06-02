@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yakov/telegram-mcp/internal/access"
@@ -120,6 +122,102 @@ func (s *OrphanSweep) SweepOnce(ctx context.Context) {
 			slog.Warn("orphan topic sweep: close failed (retry next tick)",
 				"thread_id", tid, "err", err)
 		}
+	}
+}
+
+// CloseDuplicatesOnce closes forum topics that duplicate another topic's
+// workdir. A project's canonical topic is the one bound to its workdir reuse
+// key; spawn/collision topics adopt a topic:<id> key instead. After a crash or
+// reboot the owners of those extra topics never reconnect, so they linger as
+// corpses sharing the canonical topic's project-only title — the user can't
+// tell live from dead, and a message typed into a corpse triggers a redundant
+// auto-spawn. This keeps the canonical topic (a reconnecting shim seizes its
+// stale lock) and closes the duplicates.
+//
+// SAFE ONLY AT STARTUP, before the IPC listener accepts any shim: it assumes no
+// shim is connected, so a lock in the loaded state belongs to a previous daemon
+// life, never a live owner. Do NOT call it on a running daemon — a legitimate
+// second live session in the same workdir would be closed.
+func (s *OrphanSweep) CloseDuplicatesOnce(ctx context.Context) {
+	st := s.store.Load()
+	if st.ForumChatID == 0 || len(st.TopicsByThread) == 0 {
+		return
+	}
+
+	// canonical = topics bound to a workdir/label reuse key. topic:<id> keys are
+	// deliberately excluded — they mark the spawn/collision duplicates we reap.
+	canonical := make(map[int]bool)
+	canonicalForWorkdir := make(map[string]int)
+
+	for key, tid := range st.TopicsByReuseKey {
+		switch {
+		case strings.HasPrefix(key, "workdir:"):
+			canonicalForWorkdir[strings.TrimPrefix(key, "workdir:")] = tid
+			canonical[tid] = true
+		case strings.HasPrefix(key, "label:"):
+			canonical[tid] = true
+		}
+	}
+
+	queued := make(map[int]bool, len(st.ClosedTopics))
+	for _, ct := range st.ClosedTopics {
+		queued[ct.ThreadID] = true
+	}
+
+	var dups []int
+
+	for _, m := range st.TopicsByThread {
+		if m.Workdir == "" || canonical[m.ThreadID] || queued[m.ThreadID] {
+			continue
+		}
+
+		if canon, ok := canonicalForWorkdir[m.Workdir]; ok && canon != m.ThreadID {
+			dups = append(dups, m.ThreadID)
+		}
+	}
+
+	if len(dups) == 0 {
+		return
+	}
+
+	sort.Ints(dups)
+
+	for _, tid := range dups {
+		slog.Info("startup dedup: closing duplicate forum topic (project already has a canonical topic)",
+			"thread_id", tid)
+
+		s.stripReuseKeys(tid)
+
+		if err := s.closer.CloseTopic(ctx, tid); err != nil {
+			if bot.IsPermanentChatError(err) {
+				slog.Info("startup dedup: target already gone — dropping state", "thread_id", tid, "err", err)
+				s.dropState(tid)
+
+				continue
+			}
+
+			slog.Warn("startup dedup: close failed (periodic sweep retries)", "thread_id", tid, "err", err)
+		}
+	}
+}
+
+// stripReuseKeys removes every reuse key pointing at threadID so a later
+// reconnect can't chase a topic that's being closed.
+func (s *OrphanSweep) stripReuseKeys(threadID int) {
+	if err := s.store.Mutate(func(st *access.State) bool {
+		changed := false
+
+		for key, tid := range st.TopicsByReuseKey {
+			if tid == threadID {
+				delete(st.TopicsByReuseKey, key)
+
+				changed = true
+			}
+		}
+
+		return changed
+	}); err != nil {
+		slog.Warn("startup dedup: reuse-key strip save failed", "thread_id", threadID, "err", err)
 	}
 }
 

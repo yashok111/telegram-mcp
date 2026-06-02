@@ -118,3 +118,62 @@ func TestOrphanSweep_permanentErrorDropsState(t *testing.T) {
 	assert.NotContains(t, st.TopicsByThread, "7", "permanently-gone topic dropped from TopicsByThread")
 	assert.NotContains(t, st.TopicsByReuseKey, "workdir:/p/foo", "its reuse key dropped too")
 }
+
+// The reboot-corpse bug: one workdir ends up with its canonical (workdir-key)
+// topic plus a stale spawn topic (topic:<id> key) sharing the same project
+// title. Startup dedup closes the duplicate and keeps the canonical one.
+func TestOrphanSweep_CloseDuplicatesOnce_closesDuplicateKeepsCanonical(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 759, Workdir: "/p/tg", LockedBy: "old-canon"})
+	seedTopic(t, store, access.TopicMeta{ThreadID: 779, Workdir: "/p/tg", LockedBy: "old-spawn"})
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByReuseKey = map[string]int{"workdir:/p/tg": 759, "topic:779": 779}
+
+		return true
+	}))
+
+	c := &fakeOrphanCloser{}
+	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).CloseDuplicatesOnce(context.Background())
+
+	assert.Equal(t, []int{779}, c.closed, "only the non-canonical duplicate is closed")
+
+	st := store.Load()
+	assert.Equal(t, 759, st.TopicsByReuseKey["workdir:/p/tg"], "canonical reuse key untouched")
+	assert.NotContains(t, st.TopicsByReuseKey, "topic:779", "duplicate's reuse key stripped")
+}
+
+// No duplicate to reap: each workdir owns exactly one canonical topic, and a
+// label-keyed topic (admin) is never treated as a duplicate of its workdir.
+func TestOrphanSweep_CloseDuplicatesOnce_noopWithoutDuplicate(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 631, Workdir: "/p/vpn", LockedBy: "x"})
+	seedTopic(t, store, access.TopicMeta{ThreadID: 427, Workdir: "/home/y", Label: "admin", LockedBy: "adm"})
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByReuseKey = map[string]int{"workdir:/p/vpn": 631, "label:admin": 427, "workdir:/home/y": 800}
+
+		return true
+	}))
+
+	c := &fakeOrphanCloser{}
+	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).CloseDuplicatesOnce(context.Background())
+
+	assert.Empty(t, c.closed, "no non-canonical duplicate exists")
+}
+
+func TestOrphanSweep_CloseDuplicatesOnce_skipsForumOff(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.ForumChatID = 0
+		st.TopicsByThread = map[string]access.TopicMeta{
+			"779": {ThreadID: 779, Workdir: "/p/tg"},
+		}
+		st.TopicsByReuseKey = map[string]int{"workdir:/p/tg": 759, "topic:779": 779}
+
+		return true
+	}))
+
+	c := &fakeOrphanCloser{}
+	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).CloseDuplicatesOnce(context.Background())
+
+	assert.Empty(t, c.closed, "forum mode off → no dedup")
+}

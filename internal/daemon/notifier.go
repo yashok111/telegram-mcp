@@ -79,13 +79,17 @@ func (n *Notifier) DeliverInbound(content string, meta map[string]string) {
 
 	targets := n.router.RouteInboundMulti(chatID, content, replyToMsgID, threadID)
 	if len(targets) == 0 {
-		if n.maybeAutoSpawn(chatID, threadID, meta) {
+		if s, ok := n.workdirOwnerForUnownedTopic(chatID, threadID); ok {
+			slog.Info("inbound rerouted to live workdir owner (unowned forum topic)",
+				"chat_id", chatID, "thread_id", threadID, "shim_id", s.ID, "workdir", s.Workdir)
+			targets = []*Shim{s}
+		} else if n.maybeAutoSpawn(chatID, threadID, meta) {
+			return
+		} else {
+			slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "thread_id", threadID, "user", meta["user"])
+
 			return
 		}
-
-		slog.Warn("inbound dropped: no shim connected", "chat_id", chatID, "thread_id", threadID, "user", meta["user"])
-
-		return
 	}
 
 	// Mark chat for typing-refresh BEFORE notifying shims. If the shim is fast
@@ -167,6 +171,26 @@ func (n *Notifier) maybeAutoSpawn(chatID string, threadID int, meta map[string]s
 	}()
 
 	return true
+}
+
+// workdirOwnerForUnownedTopic finds a live shim already serving the workdir of
+// an unowned forum topic. When the user writes in a stale/duplicate topic for a
+// project that still has a live session in its canonical topic (e.g. a corpse
+// topic left by a reboot, sharing the same project-only title), the message
+// should reach that session rather than fork a redundant auto-spawn. Returns
+// false outside a forum topic, for a topic with no recorded workdir, or when no
+// live shim serves that workdir.
+func (n *Notifier) workdirOwnerForUnownedTopic(chatID string, threadID int) (*Shim, bool) {
+	if !n.inForumTopic(chatID, threadID) {
+		return nil, false
+	}
+
+	wd := n.topicWorkdir(threadID)
+	if wd == "" {
+		return nil, false
+	}
+
+	return n.router.RouteToWorkdirOwner(wd)
 }
 
 // inForumTopic reports whether (chatID, threadID) is a real topic in the

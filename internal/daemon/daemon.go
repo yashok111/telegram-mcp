@@ -208,6 +208,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.startBackgroundWorkers(&idleWG)
 
+	// Reap duplicate forum topics left by a crash/reboot BEFORE the listener
+	// accepts any shim — a corpse topic sharing a live project's title would
+	// otherwise swallow a misdirected message into a redundant auto-spawn.
+	if d.OrphanSweep != nil {
+		d.OrphanSweep.CloseDuplicatesOnce(d.dctx)
+	}
+
 	listenErr := server.Listen(d.dctx)
 	d.dcancel()
 	idleWG.Wait()

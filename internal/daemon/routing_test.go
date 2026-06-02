@@ -293,6 +293,40 @@ const forumChat = "-1001234567890"
 
 func forumChatIDInt() int64 { return -1001234567890 }
 
+func TestRouteToWorkdirOwner_prefersTopicOwnerSkipsAdmin(t *testing.T) {
+	r := NewRouter()
+	// Registration order is oldest→newest; lru is most-recent-first.
+	r.Register(&Shim{ID: "no-topic", Workdir: "/wd"})
+	r.Register(&Shim{ID: "admin", Workdir: "/wd", Role: "admin"})
+	r.Register(&Shim{ID: "owner", Workdir: "/wd"})
+	r.BindTopic("owner", 759) // owner now has TopicID > 0
+
+	got, ok := r.RouteToWorkdirOwner("/wd")
+	require.True(t, ok)
+	assert.Equal(t, "owner", got.ID, "a topic-owning shim wins over a topicless one and over admin")
+}
+
+func TestRouteToWorkdirOwner_fallsBackToTopiclessShim(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a", Workdir: "/wd"}) // no topic bound
+
+	got, ok := r.RouteToWorkdirOwner("/wd")
+	require.True(t, ok)
+	assert.Equal(t, "a", got.ID)
+}
+
+func TestRouteToWorkdirOwner_noMatch(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "a", Workdir: "/other"})
+	r.Register(&Shim{ID: "admin-only", Workdir: "/wd", Role: "admin"})
+
+	_, ok := r.RouteToWorkdirOwner("/wd")
+	assert.False(t, ok, "no non-admin shim serves /wd")
+
+	_, ok = r.RouteToWorkdirOwner("")
+	assert.False(t, ok, "empty workdir never matches")
+}
+
 // TestRouteInboundMulti_forumTopicUnowned_doesNotLeak reproduces the reported
 // bug: a message in a forum topic that no live shim owns must not fall through
 // to the chat-keyed fallback (chatOwner/LRU), which would deliver it to a shim
