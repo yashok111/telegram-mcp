@@ -155,6 +155,46 @@ func (s *OrphanSweep) SweepOnce(ctx context.Context) {
 	}
 }
 
+// StampStuckReleasedOnce gives the orphan-TTL clock a start time to topics that
+// have no owner (LockedBy=="") but carry no ReleasedAt — legacy state from
+// before the ReleasedAt field, or a shim that crashed so ReleaseLock never ran.
+// The orphan sweep requires ReleasedAt>0, so without a stamp these linger as
+// immortal zombies. Stamping them with now() enrolls them in the normal TTL:
+// closed after orphanAfter, deleted after the purge TTL.
+//
+// Startup-only: at runtime ReleaseLock always sets ReleasedAt when it clears
+// LockedBy, so the LockedBy==""/ReleasedAt==0 state is only ever loaded from
+// disk at boot. Run before the listener accepts shims — a reconnecting shim
+// re-locks its topic (LockedBy set), excluded by the LockedBy=="" guard.
+func (s *OrphanSweep) StampStuckReleasedOnce() {
+	now := s.now().Unix()
+
+	if err := s.store.Mutate(func(st *access.State) bool {
+		if st.ForumChatID == 0 {
+			return false
+		}
+
+		changed := false
+
+		for tidStr, m := range st.TopicsByThread {
+			if m.LockedBy != "" || m.ReleasedAt != 0 {
+				continue
+			}
+
+			m.ReleasedAt = now
+			st.TopicsByThread[tidStr] = m
+			changed = true
+
+			slog.Info("orphan topic sweep: enrolled stuck unreleased topic into the TTL clock",
+				"thread_id", m.ThreadID)
+		}
+
+		return changed
+	}); err != nil {
+		slog.Warn("orphan topic sweep: stamp stuck topics save failed", "err", err)
+	}
+}
+
 // SweepDuplicates closes forum topics that duplicate another topic's workdir.
 // A project's canonical topic is the one bound to its workdir reuse key;
 // spawn/collision topics carry a topic:<id> key (or none). When a workdir

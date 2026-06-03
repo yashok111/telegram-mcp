@@ -215,6 +215,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// corpses are reaped too; the periodic tick repeats it for runtime-minted
 	// duplicates, then protecting any live concurrent session.
 	if d.OrphanSweep != nil {
+		// Enroll legacy/crash-stuck topics (no owner, no ReleasedAt stamp) into
+		// the orphan TTL so the periodic sweep can eventually reap them.
+		d.OrphanSweep.StampStuckReleasedOnce()
 		d.OrphanSweep.SweepDuplicates(d.dctx)
 	}
 

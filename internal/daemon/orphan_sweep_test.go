@@ -119,6 +119,56 @@ func TestOrphanSweep_permanentErrorDropsState(t *testing.T) {
 	assert.NotContains(t, st.TopicsByReuseKey, "workdir:/p/foo", "its reuse key dropped too")
 }
 
+// A topic with no owner (LockedBy=="") that never got a ReleasedAt stamp —
+// legacy state, or a shim that crashed before ReleaseLock ran — is enrolled in
+// the orphan TTL clock so the sweep can eventually reap it. Without the stamp it
+// is immortal (the sweep requires ReleasedAt>0).
+func TestOrphanSweep_StampStuckReleasedOnce_stampsUnreleasedTopic(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 441, Workdir: "/p/scip", LockedBy: "", ReleasedAt: 0})
+
+	s := NewOrphanSweep(store, &fakeOrphanCloser{}, 24*time.Hour, time.Hour)
+	s.now = func() time.Time { return time.Unix(1000, 0) }
+	s.StampStuckReleasedOnce()
+
+	assert.Equal(t, int64(1000), store.Load().TopicsByThread["441"].ReleasedAt,
+		"stuck unreleased topic enrolled in the orphan TTL clock")
+}
+
+// The stamp touches only stuck topics: a live-locked topic and one already
+// carrying a ReleasedAt are both left alone.
+func TestOrphanSweep_StampStuckReleasedOnce_leavesLockedAndAlreadyStamped(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 1, LockedBy: "live", ReleasedAt: 0}) // locked → skip
+	seedTopic(t, store, access.TopicMeta{ThreadID: 2, LockedBy: "", ReleasedAt: 500})   // stamped → skip
+
+	s := NewOrphanSweep(store, &fakeOrphanCloser{}, 24*time.Hour, time.Hour)
+	s.now = func() time.Time { return time.Unix(1000, 0) }
+	s.StampStuckReleasedOnce()
+
+	st := store.Load()
+	assert.Zero(t, st.TopicsByThread["1"].ReleasedAt, "locked topic not stamped")
+	assert.Equal(t, int64(500), st.TopicsByThread["2"].ReleasedAt, "already-stamped topic untouched")
+}
+
+// End to end: once stamped, the formerly-immortal topic enters the TTL and the
+// normal sweep closes it after orphanAfter elapses.
+func TestOrphanSweep_StampStuckReleasedOnce_thenSweepCloses(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 441, Workdir: "/p/scip", LockedBy: "", ReleasedAt: 0})
+
+	c := &fakeOrphanCloser{}
+	s := NewOrphanSweep(store, c, 24*time.Hour, time.Hour)
+	stampAt := time.Unix(1000, 0)
+	s.now = func() time.Time { return stampAt }
+	s.StampStuckReleasedOnce()
+
+	s.now = func() time.Time { return stampAt.Add(48 * time.Hour) } // past the 24h TTL
+	s.SweepOnce(context.Background())
+
+	assert.Equal(t, []int{441}, c.closed, "stamped topic closed once past the TTL")
+}
+
 // The reboot-corpse bug: one workdir ends up with its canonical (workdir-key)
 // topic plus a stale spawn topic (topic:<id> key) sharing the same project
 // title. At startup (no shim connected → every lock dead) dedup closes the
