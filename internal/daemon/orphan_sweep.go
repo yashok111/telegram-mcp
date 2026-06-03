@@ -30,6 +30,24 @@ type OrphanSweep struct {
 	orphanAfter time.Duration
 	tick        time.Duration
 	now         func() time.Time // test seam
+	// isLive reports whether a shim_id is currently connected. Used by
+	// SweepDuplicates to protect a duplicate topic held by a genuine live
+	// concurrent session. nil (unwired — startup before the listener accepts,
+	// or tests) treats every lock as dead, so dedup still reaps; the daemon
+	// wires Router.IsConnected via SetIsLive.
+	isLive func(shimID string) bool
+}
+
+// SetIsLive wires the liveness oracle SweepDuplicates uses to avoid reaping a
+// duplicate topic still held by a connected shim. Pass Router.IsConnected.
+func (s *OrphanSweep) SetIsLive(f func(shimID string) bool) {
+	s.isLive = f
+}
+
+// liveLocked reports whether lockedBy is a currently-connected shim. An empty
+// lock is never live; an unwired isLive treats the lock as dead (reapable).
+func (s *OrphanSweep) liveLocked(lockedBy string) bool {
+	return lockedBy != "" && s.isLive != nil && s.isLive(lockedBy)
 }
 
 // NewOrphanSweep returns a sweep that ticks at tick and closes topics released
@@ -45,13 +63,21 @@ func NewOrphanSweep(store *access.Store, closer orphanCloser, orphanAfter, tick 
 	}
 }
 
-// Run blocks until ctx is done, sweeping on every tick.
+// Run blocks until ctx is done, sweeping on every tick. Each tick reaps
+// duplicate topics (SweepDuplicates) and, when the orphan TTL is enabled,
+// long-released orphans (SweepOnce). Duplicate reaping is independent of the
+// orphan TTL: disabling the TTL (orphan_after <= 0) keeps idle topics forever
+// but still clears duplicates.
 func (s *OrphanSweep) Run(ctx context.Context) {
-	if s.tick <= 0 || s.orphanAfter <= 0 {
-		slog.Info("orphan topic sweep disabled (tick or orphan_after <= 0)",
-			"tick", s.tick, "orphan_after", s.orphanAfter)
+	if s.tick <= 0 {
+		slog.Info("topic sweep disabled (tick <= 0)", "tick", s.tick)
 
 		return
+	}
+
+	if s.orphanAfter <= 0 {
+		slog.Info("orphan-TTL reap disabled (orphan_after <= 0); duplicate reap still active",
+			"orphan_after", s.orphanAfter)
 	}
 
 	t := time.NewTicker(s.tick)
@@ -62,7 +88,11 @@ func (s *OrphanSweep) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.SweepOnce(ctx)
+			if s.orphanAfter > 0 {
+				s.SweepOnce(ctx)
+			}
+
+			s.SweepDuplicates(ctx)
 		}
 	}
 }
@@ -125,53 +155,70 @@ func (s *OrphanSweep) SweepOnce(ctx context.Context) {
 	}
 }
 
-// CloseDuplicatesOnce closes forum topics that duplicate another topic's
-// workdir. A project's canonical topic is the one bound to its workdir reuse
-// key; spawn/collision topics adopt a topic:<id> key instead. After a crash or
-// reboot the owners of those extra topics never reconnect, so they linger as
-// corpses sharing the canonical topic's project-only title — the user can't
-// tell live from dead, and a message typed into a corpse triggers a redundant
-// auto-spawn. This keeps the canonical topic (a reconnecting shim seizes its
-// stale lock) and closes the duplicates.
+// StampStuckReleasedOnce gives the orphan-TTL clock a start time to topics that
+// have no owner (LockedBy=="") but carry no ReleasedAt — legacy state from
+// before the ReleasedAt field, or a shim that crashed so ReleaseLock never ran.
+// The orphan sweep requires ReleasedAt>0, so without a stamp these linger as
+// immortal zombies. Stamping them with now() enrolls them in the normal TTL:
+// closed after orphanAfter, deleted after the purge TTL.
 //
-// SAFE ONLY AT STARTUP, before the IPC listener accepts any shim: it assumes no
-// shim is connected, so a lock in the loaded state belongs to a previous daemon
-// life, never a live owner. Do NOT call it on a running daemon — a legitimate
-// second live session in the same workdir would be closed.
-func (s *OrphanSweep) CloseDuplicatesOnce(ctx context.Context) {
+// Startup-only: at runtime ReleaseLock always sets ReleasedAt when it clears
+// LockedBy, so the LockedBy==""/ReleasedAt==0 state is only ever loaded from
+// disk at boot. Run before the listener accepts shims — a reconnecting shim
+// re-locks its topic (LockedBy set), excluded by the LockedBy=="" guard.
+func (s *OrphanSweep) StampStuckReleasedOnce() {
+	now := s.now().Unix()
+
+	if err := s.store.Mutate(func(st *access.State) bool {
+		if st.ForumChatID == 0 {
+			return false
+		}
+
+		changed := false
+
+		for tidStr, m := range st.TopicsByThread {
+			if m.LockedBy != "" || m.ReleasedAt != 0 {
+				continue
+			}
+
+			m.ReleasedAt = now
+			st.TopicsByThread[tidStr] = m
+			changed = true
+
+			slog.Info("orphan topic sweep: enrolled stuck unreleased topic into the TTL clock",
+				"thread_id", m.ThreadID)
+		}
+
+		return changed
+	}); err != nil {
+		slog.Warn("orphan topic sweep: stamp stuck topics save failed", "err", err)
+	}
+}
+
+// SweepDuplicates closes forum topics that duplicate another topic's workdir.
+// A project's canonical topic is the one bound to its workdir reuse key;
+// spawn/collision topics carry a topic:<id> key (or none). When a workdir
+// briefly hosts two concurrent sessions the daemon correctly mints a second
+// topic, but once that extra session disconnects its topic lingers as a corpse
+// sharing the canonical topic's project-only title — the user can't tell live
+// from dead, and a message typed into a corpse triggers a redundant auto-spawn.
+// This keeps the canonical topic and closes the released/dead duplicates.
+//
+// Safe on a LIVE daemon: a duplicate still held by a connected shim (a genuine
+// second concurrent session) is skipped via isLive, so only released or
+// crash-orphaned duplicates are reaped. At startup the listener hasn't accepted
+// any shim yet, so every lock reads dead and stale-locked corpses are reaped
+// too. Called both at startup and on every periodic tick.
+func (s *OrphanSweep) SweepDuplicates(ctx context.Context) {
 	st := s.store.Load()
 	if st.ForumChatID == 0 || len(st.TopicsByThread) == 0 {
 		return
 	}
 
-	// canonical = topics bound to a workdir/label reuse key. topic:<id> keys are
-	// deliberately excluded — they mark the spawn/collision duplicates we reap.
-	canonical := make(map[int]bool)
-	canonicalForWorkdir := make(map[string]int)
-
-	for key, tid := range st.TopicsByReuseKey {
-		switch {
-		case strings.HasPrefix(key, "workdir:"):
-			canonicalForWorkdir[strings.TrimPrefix(key, "workdir:")] = tid
-			canonical[tid] = true
-		case strings.HasPrefix(key, "label:"):
-			canonical[tid] = true
-		}
-	}
-
-	queued := make(map[int]bool, len(st.ClosedTopics))
-	for _, ct := range st.ClosedTopics {
-		queued[ct.ThreadID] = true
-	}
-
 	var dups []int
 
 	for _, m := range st.TopicsByThread {
-		if m.Workdir == "" || canonical[m.ThreadID] || queued[m.ThreadID] {
-			continue
-		}
-
-		if canon, ok := canonicalForWorkdir[m.Workdir]; ok && canon != m.ThreadID {
+		if s.isReapableDuplicate(&st, m.ThreadID) {
 			dups = append(dups, m.ThreadID)
 		}
 	}
@@ -183,28 +230,72 @@ func (s *OrphanSweep) CloseDuplicatesOnce(ctx context.Context) {
 	sort.Ints(dups)
 
 	for _, tid := range dups {
-		slog.Info("startup dedup: closing duplicate forum topic (project already has a canonical topic)",
-			"thread_id", tid)
+		// claimDuplicate re-confirms duplicate + not-live-locked status and
+		// strips the reuse keys atomically, so a hello racing the close either
+		// re-locks first (claim bails) or can no longer chase the closing topic.
+		if !s.claimDuplicate(tid) {
+			continue
+		}
 
-		s.stripReuseKeys(tid)
+		slog.Info("dedup: closing duplicate forum topic (project already has a canonical topic)",
+			"thread_id", tid)
 
 		if err := s.closer.CloseTopic(ctx, tid); err != nil {
 			if bot.IsPermanentChatError(err) {
-				slog.Info("startup dedup: target already gone — dropping state", "thread_id", tid, "err", err)
+				slog.Info("dedup: target already gone — dropping state", "thread_id", tid, "err", err)
 				s.dropState(tid)
 
 				continue
 			}
 
-			slog.Warn("startup dedup: close failed (periodic sweep retries)", "thread_id", tid, "err", err)
+			slog.Warn("dedup: close failed (retry next tick)", "thread_id", tid, "err", err)
 		}
 	}
 }
 
-// stripReuseKeys removes every reuse key pointing at threadID so a later
-// reconnect can't chase a topic that's being closed.
-func (s *OrphanSweep) stripReuseKeys(threadID int) {
+// isReapableDuplicate reports whether threadID names a forum topic that shares
+// another (canonical) topic's workdir and is safe to close now: it has a
+// workdir, isn't itself canonical (no workdir:/label: reuse key of its own),
+// isn't already queued for purge, and isn't currently held by a live shim. A
+// different canonical topic must own its workdir — otherwise it's the sole
+// survivor for that project and must be kept.
+func (s *OrphanSweep) isReapableDuplicate(st *access.State, threadID int) bool {
+	m, ok := st.TopicsByThread[strconv.Itoa(threadID)]
+	if !ok || m.Workdir == "" || s.liveLocked(m.LockedBy) {
+		return false
+	}
+
+	for _, ct := range st.ClosedTopics {
+		if ct.ThreadID == threadID {
+			return false // already queued for purge
+		}
+	}
+
+	for key, tid := range st.TopicsByReuseKey {
+		if tid == threadID && (strings.HasPrefix(key, "workdir:") || strings.HasPrefix(key, "label:")) {
+			return false // canonical itself, never a duplicate
+		}
+	}
+
+	canon, ok := st.TopicsByReuseKey["workdir:"+m.Workdir]
+
+	return ok && canon != threadID
+}
+
+// claimDuplicate re-confirms under the store lock that threadID is still a
+// reapable duplicate, then strips every reuse key pointing at it so a racing
+// hello can't reattach to the topic about to close. Returns false when the
+// topic was re-locked by a live shim, became canonical, or vanished since the
+// snapshot — in which case it must NOT be closed. A duplicate with no reuse key
+// of its own is still claimed (nothing to strip): the close + purge-queue runs.
+func (s *OrphanSweep) claimDuplicate(threadID int) bool {
+	claimed := false
+
 	if err := s.store.Mutate(func(st *access.State) bool {
+		if !s.isReapableDuplicate(st, threadID) {
+			return false
+		}
+
 		changed := false
 
 		for key, tid := range st.TopicsByReuseKey {
@@ -215,10 +306,16 @@ func (s *OrphanSweep) stripReuseKeys(threadID int) {
 			}
 		}
 
-		return changed
+		claimed = true
+
+		return changed // persist only if a reuse key was actually removed
 	}); err != nil {
-		slog.Warn("startup dedup: reuse-key strip save failed", "thread_id", threadID, "err", err)
+		slog.Warn("dedup: claim save failed", "thread_id", threadID, "err", err)
+
+		return false
 	}
+
+	return claimed
 }
 
 // claim atomically re-confirms that threadID is still an orphan (released,

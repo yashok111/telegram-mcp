@@ -268,6 +268,11 @@ func runDaemon(stateDir string) error {
 	topicCloser := daemonpkg.NewTopicCloser(router, store, tgBot, spawnRunner, headerMgr)
 	tgBot.SetTopicCloser(topicCloser)
 
+	orphanSweep := daemonpkg.NewOrphanSweep(store, topicCloser, resolveDurationEnv("TELEGRAM_TOPIC_ORPHAN_AFTER", 12*time.Hour), time.Hour)
+	// Wire liveness so periodic duplicate reaping never closes a topic held by a
+	// live concurrent session (only released/dead duplicates are reaped).
+	orphanSweep.SetIsLive(router.IsConnected)
+
 	d := &daemonpkg.Daemon{
 		StateDir:     stateDir,
 		SocketPath:   filepath.Join(stateDir, "daemon.sock"),
@@ -278,8 +283,8 @@ func runDaemon(stateDir string) error {
 		Typing:       typing,
 		Forum:        daemonpkg.NewForum(store, tgBot, router.IsConnected, spawnRunner.TopicForSpawn),
 		Header:       headerMgr,
-		TopicSweep:   daemonpkg.NewTopicSweep(store, tgBot, resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 14*24*time.Hour), time.Hour),
-		OrphanSweep:  daemonpkg.NewOrphanSweep(store, topicCloser, resolveDurationEnv("TELEGRAM_TOPIC_ORPHAN_AFTER", 7*24*time.Hour), time.Hour),
+		TopicSweep:   daemonpkg.NewTopicSweep(store, tgBot, resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 12*time.Hour), time.Hour),
+		OrphanSweep:  orphanSweep,
 		ShimLogs:     shimLogs,
 		ShimsSweep:   daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
 		SpawnRunner:  spawnRunner,
