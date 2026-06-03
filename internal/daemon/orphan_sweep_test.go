@@ -121,8 +121,9 @@ func TestOrphanSweep_permanentErrorDropsState(t *testing.T) {
 
 // The reboot-corpse bug: one workdir ends up with its canonical (workdir-key)
 // topic plus a stale spawn topic (topic:<id> key) sharing the same project
-// title. Startup dedup closes the duplicate and keeps the canonical one.
-func TestOrphanSweep_CloseDuplicatesOnce_closesDuplicateKeepsCanonical(t *testing.T) {
+// title. At startup (no shim connected → every lock dead) dedup closes the
+// duplicate and keeps the canonical one.
+func TestOrphanSweep_SweepDuplicates_closesDuplicateKeepsCanonical(t *testing.T) {
 	store := access.NewStore(t.TempDir(), false)
 	seedTopic(t, store, access.TopicMeta{ThreadID: 759, Workdir: "/p/tg", LockedBy: "old-canon"})
 	seedTopic(t, store, access.TopicMeta{ThreadID: 779, Workdir: "/p/tg", LockedBy: "old-spawn"})
@@ -133,7 +134,7 @@ func TestOrphanSweep_CloseDuplicatesOnce_closesDuplicateKeepsCanonical(t *testin
 	}))
 
 	c := &fakeOrphanCloser{}
-	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).CloseDuplicatesOnce(context.Background())
+	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).SweepDuplicates(context.Background())
 
 	assert.Equal(t, []int{779}, c.closed, "only the non-canonical duplicate is closed")
 
@@ -144,7 +145,7 @@ func TestOrphanSweep_CloseDuplicatesOnce_closesDuplicateKeepsCanonical(t *testin
 
 // No duplicate to reap: each workdir owns exactly one canonical topic, and a
 // label-keyed topic (admin) is never treated as a duplicate of its workdir.
-func TestOrphanSweep_CloseDuplicatesOnce_noopWithoutDuplicate(t *testing.T) {
+func TestOrphanSweep_SweepDuplicates_noopWithoutDuplicate(t *testing.T) {
 	store := access.NewStore(t.TempDir(), false)
 	seedTopic(t, store, access.TopicMeta{ThreadID: 631, Workdir: "/p/vpn", LockedBy: "x"})
 	seedTopic(t, store, access.TopicMeta{ThreadID: 427, Workdir: "/home/y", Label: "admin", LockedBy: "adm"})
@@ -155,12 +156,12 @@ func TestOrphanSweep_CloseDuplicatesOnce_noopWithoutDuplicate(t *testing.T) {
 	}))
 
 	c := &fakeOrphanCloser{}
-	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).CloseDuplicatesOnce(context.Background())
+	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).SweepDuplicates(context.Background())
 
 	assert.Empty(t, c.closed, "no non-canonical duplicate exists")
 }
 
-func TestOrphanSweep_CloseDuplicatesOnce_skipsForumOff(t *testing.T) {
+func TestOrphanSweep_SweepDuplicates_skipsForumOff(t *testing.T) {
 	store := access.NewStore(t.TempDir(), false)
 	require.NoError(t, store.Mutate(func(st *access.State) bool {
 		st.ForumChatID = 0
@@ -173,7 +174,71 @@ func TestOrphanSweep_CloseDuplicatesOnce_skipsForumOff(t *testing.T) {
 	}))
 
 	c := &fakeOrphanCloser{}
-	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).CloseDuplicatesOnce(context.Background())
+	NewOrphanSweep(store, c, 24*time.Hour, time.Hour).SweepDuplicates(context.Background())
 
 	assert.Empty(t, c.closed, "forum mode off → no dedup")
+}
+
+// A duplicate currently held by a live shim (a genuine second concurrent
+// session in the same workdir) is NOT reaped — closing it would kill that
+// session's topic mid-conversation. This is what makes SweepDuplicates safe to
+// run on a live daemon, not just at startup.
+func TestOrphanSweep_SweepDuplicates_keepsLiveLockedDuplicate(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 100, Workdir: "/p/x", LockedBy: "canon-live"})
+	seedTopic(t, store, access.TopicMeta{ThreadID: 101, Workdir: "/p/x", LockedBy: "dup-live"})
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByReuseKey = map[string]int{"workdir:/p/x": 100}
+
+		return true
+	}))
+
+	c := &fakeOrphanCloser{}
+	s := NewOrphanSweep(store, c, 24*time.Hour, time.Hour)
+	s.SetIsLive(func(id string) bool { return id == "dup-live" })
+	s.SweepDuplicates(context.Background())
+
+	assert.Empty(t, c.closed, "a duplicate held by a live shim is left alone")
+}
+
+// Once the duplicate's owner disconnects (lock released), the next sweep closes
+// it within the tick interval instead of waiting out the multi-day orphan TTL.
+func TestOrphanSweep_SweepDuplicates_closesReleasedDuplicate(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 100, Workdir: "/p/x", LockedBy: "canon-live"})
+	seedTopic(t, store, access.TopicMeta{ThreadID: 101, Workdir: "/p/x", LockedBy: "", ReleasedAt: time.Now().Unix()})
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByReuseKey = map[string]int{"workdir:/p/x": 100}
+
+		return true
+	}))
+
+	c := &fakeOrphanCloser{}
+	s := NewOrphanSweep(store, c, 24*time.Hour, time.Hour)
+	s.SetIsLive(func(string) bool { return false })
+	s.SweepDuplicates(context.Background())
+
+	assert.Equal(t, []int{101}, c.closed, "released duplicate closed promptly, not after the 7d TTL")
+	assert.Equal(t, 100, store.Load().TopicsByReuseKey["workdir:/p/x"], "canonical reuse key untouched")
+}
+
+// A duplicate left locked by a shim that never reconnected (crash — ReleaseLock
+// never ran) is still reaped: the lock holder isn't connected, so the topic is
+// dead and unreachable.
+func TestOrphanSweep_SweepDuplicates_closesDeadLockedDuplicate(t *testing.T) {
+	store := access.NewStore(t.TempDir(), false)
+	seedTopic(t, store, access.TopicMeta{ThreadID: 100, Workdir: "/p/x", LockedBy: "canon"})
+	seedTopic(t, store, access.TopicMeta{ThreadID: 101, Workdir: "/p/x", LockedBy: "dead-shim"})
+	require.NoError(t, store.Mutate(func(st *access.State) bool {
+		st.TopicsByReuseKey = map[string]int{"workdir:/p/x": 100}
+
+		return true
+	}))
+
+	c := &fakeOrphanCloser{}
+	s := NewOrphanSweep(store, c, 24*time.Hour, time.Hour)
+	s.SetIsLive(func(string) bool { return false }) // nobody connected
+	s.SweepDuplicates(context.Background())
+
+	assert.Equal(t, []int{101}, c.closed, "dead-locked duplicate reaped (lock holder gone)")
 }
