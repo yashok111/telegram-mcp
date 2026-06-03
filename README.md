@@ -215,9 +215,14 @@ intact. Reuse key priority:
    `$HOME` get fresh topics, not a shared bucket).
 3. Otherwise a fresh topic.
 
-Topics are only deleted via explicit `/topic close`. The daemon queues
-them; a background sweep calls `deleteForumTopic` after
-`TELEGRAM_TOPIC_PURGE_AFTER` (default 14 days).
+Dead topics are reaped automatically. A topic whose owner disconnected
+is closed after `TELEGRAM_TOPIC_ORPHAN_AFTER` (default 12h) of idleness;
+a duplicate topic (a second concurrent session in the same workdir) is
+closed within the hour once its session leaves; `/topic close` does it on
+demand. Closed topics are then deleted by a background sweep after
+`TELEGRAM_TOPIC_PURGE_AFTER` (default 12h) — so a dead topic fully
+disappears within ~24h. Raise either env var to keep topics around longer
+(reattaching to a still-open topic preserves its history).
 
 ### `/topic` commands
 
@@ -322,7 +327,8 @@ Knobs (env vars, all optional):
 | `TELEGRAM_DAEMON_IDLE_EXIT`       | `604800` (7 days)      | Idle exit seconds. `0` or negative disables. |
 | `TELEGRAM_PREFIX_ALIAS`           | `1`                    | Inject `@sN:` source-alias prefix.       |
 | `TELEGRAM_FORUM_CHAT_ID`          | —                      | Supergroup id (`-100…`). Set to enable forum-topic mode. |
-| `TELEGRAM_TOPIC_PURGE_AFTER`      | `336h` (14d)           | Wait before background sweep deletes a `/topic close`d topic. |
+| `TELEGRAM_TOPIC_ORPHAN_AFTER`     | `12h`                  | Idle time before a disconnected topic is auto-closed. `0` disables. |
+| `TELEGRAM_TOPIC_PURGE_AFTER`      | `12h`                  | Wait before background sweep deletes a closed topic. |
 | `TELEGRAM_BG_MAX_PARALLEL`        | `3`                    | Concurrent `/bg` tasks per host.         |
 | `TELEGRAM_BG_TIMEOUT`             | `30m`                  | Hard cap per `/bg` task.                 |
 | `TELEGRAM_BG_DEFAULT_WORKDIR`     | `$HOME`                | Fallback for `/bg --in`.                 |
