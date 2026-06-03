@@ -4,6 +4,8 @@ Claude Code repo instructions for **telegram-mcp** — local Go MCP server bridg
 
 > Operator-facing reference (full env-var defaults, setup, feature walkthroughs) lives in **README.md**. This file holds architecture invariants, gotchas, and "don't do X" rules for editing the code — it deliberately keeps only env-var *names* and points to README for values.
 
+> Project **decision history** — ADRs + upstream (Claude Code changelog) reviews — lives in **Notion**: `HQ ▸ Projects ▸ telegram-mcp ▸ {ADRs, Upstream Reviews}`. After assessing a CC update, log a review entry there; record an architecture call as an ADR. Data-source IDs + the logging convention are in agent memory `notion-decision-log` (kept out of this committed file).
+
 ## Stack
 
 Go **1.26** · `github.com/mark3labs/mcp-go` v0.54 (stdio MCP server) · `github.com/mymmrac/telego` v1.9 (Telegram bot, long-polling) · `log/slog` JSON to stderr · `go.uber.org/goleak` in every test pkg. No DB, no cache — a single daemon owns the bot token; each Claude Code session attaches via a stdio shim.
