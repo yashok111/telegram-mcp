@@ -18,9 +18,12 @@ make test               # go test -race ./...
 make lint               # golangci-lint v2 (built from source w/ Go 1.26)
 make lint-fix
 make check              # lint + test + build (CI gate)
+make deploy             # check + `systemctl --user restart` + post-deploy healthcheck
+make health             # post-deploy runtime checks against the LIVE daemon (exit-coded)
 
 bash scripts/install-skills.sh   # → .agents/skills/ (37 skills, lockfile)
 bash scripts/install-hooks.sh    # → .git/hooks/pre-commit
+bash scripts/healthcheck.sh      # runtime health check; --full prepends `make check`
 ```
 
 `golangci-lint` must be a v2 build with Go 1.26 — prebuilt v2.6 uses Go 1.25 and refuses our go.mod. `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`.

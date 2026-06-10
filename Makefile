@@ -16,7 +16,9 @@ ifeq ($(MEMCAP_OK),yes)
 MEMCAP := systemd-run --user --scope --quiet --collect -p MemoryMax=$(MEM_MAX) -p MemoryHigh=$(MEM_HIGH) --
 endif
 
-.PHONY: build run install clean tidy lint lint-fix test check
+SERVICE ?= telegram-mcp
+
+.PHONY: build run install clean tidy lint lint-fix test check health deploy
 
 build:
 	@mkdir -p bin
@@ -42,6 +44,16 @@ run: build
 install: build
 	@echo "binary: $(PWD)/$(BINARY)"
 	@echo "register with: claude mcp add telegram -s user -- $(PWD)/$(BINARY)"
+
+health:
+	@STATE_DIR="$(STATE_DIR)" BINARY="$(BINARY)" SERVICE="$(SERVICE)" bash scripts/healthcheck.sh
+
+# Rebuild, restart the systemd --user daemon, then run the post-deploy health
+# check. `make check` first so a broken build never reaches the running daemon.
+deploy: check
+	systemctl --user restart $(SERVICE)
+	@sleep 2
+	@STATE_DIR="$(STATE_DIR)" BINARY="$(BINARY)" SERVICE="$(SERVICE)" bash scripts/healthcheck.sh
 
 clean:
 	rm -rf bin
