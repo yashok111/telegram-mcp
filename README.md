@@ -42,9 +42,10 @@ Single Go binary. No node/bun runtime. Dies with its parent via
 - **Daemon-spawned sessions (`/spawn`)** — DM `/spawn --in <dir>` and the
   daemon forks a fresh Claude Code client in that directory, hands you back a
   new `@sN` alias to talk to.
-- **Per-chat effort (`/effort`)** — `/effort low|medium|high|xhigh|max` sets
-  the model and thinking-token budget used by future `/spawn` and `/bg` runs
-  from that chat. Persisted across daemon restarts.
+- **Per-chat effort (`/effort`)** — `/effort low|medium|high|xhigh|max|ultra`
+  sets the model and thinking-token budget used by future `/spawn` and `/bg`
+  runs from that chat (`ultra` = Claude Fable 5). Persisted across daemon
+  restarts.
 - **Live status feedback** — while the agent works the daemon keeps a
   "typing…" bubble alive and rotates a reaction emoji on your message; in
   forum mode each topic carries a pinned header showing the owning session's

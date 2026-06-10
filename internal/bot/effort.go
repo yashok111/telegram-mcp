@@ -24,6 +24,7 @@ const (
 	EffortHigh   EffortLevel = "high"
 	EffortXHigh  EffortLevel = "xhigh"
 	EffortMax    EffortLevel = "max"
+	EffortUltra  EffortLevel = "ultra"
 )
 
 // EffortConfig is the concrete spawn-time payload derived from an EffortLevel.
@@ -38,12 +39,13 @@ var effortConfigs = map[EffortLevel]EffortConfig{
 	EffortHigh:   {Model: "claude-opus-4-8", ThinkingTokens: 16000},
 	EffortXHigh:  {Model: "claude-opus-4-8", ThinkingTokens: 32000},
 	EffortMax:    {Model: "claude-opus-4-8", ThinkingTokens: 64000},
+	EffortUltra:  {Model: "claude-fable-5", ThinkingTokens: 64000},
 }
 
 // AllEfforts returns the levels in deterministic, increasing-effort order so
 // /help and /status reads can render them consistently.
 func AllEfforts() []EffortLevel {
-	return []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+	return []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax, EffortUltra}
 }
 
 // ResolveEffort looks up the spawn config for a level. ok=false when name is
@@ -202,7 +204,7 @@ func formatEffortHelpReply() string {
 	lines := []string{
 		"Usage:",
 		"  /effort                  — show current setting",
-		"  /effort <level>          — set level (low | medium | high | xhigh | max)",
+		"  /effort <level>          — set level (low | medium | high | xhigh | max | ultra)",
 		"  /effort clear            — drop override; fall back to daemon defaults",
 		"",
 		"Levels:",
@@ -211,6 +213,7 @@ func formatEffortHelpReply() string {
 		"  high   — claude-opus-4-8   · thinking 16000",
 		"  xhigh  — claude-opus-4-8   · thinking 32000",
 		"  max    — claude-opus-4-8   · thinking 64000",
+		"  ultra  — claude-fable-5    · thinking 64000",
 		"",
 		"Applies to new /spawn and /bg sessions. Existing shims keep their settings until respawn.",
 	}
