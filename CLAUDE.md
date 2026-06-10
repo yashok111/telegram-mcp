@@ -18,9 +18,12 @@ make test               # go test -race ./...
 make lint               # golangci-lint v2 (built from source w/ Go 1.26)
 make lint-fix
 make check              # lint + test + build (CI gate)
+make deploy             # check + `systemctl --user restart` + post-deploy healthcheck
+make health             # post-deploy runtime checks against the LIVE daemon (exit-coded)
 
 bash scripts/install-skills.sh   # → .agents/skills/ (37 skills, lockfile)
 bash scripts/install-hooks.sh    # → .git/hooks/pre-commit
+bash scripts/healthcheck.sh      # runtime health check; --full prepends `make check`
 ```
 
 `golangci-lint` must be a v2 build with Go 1.26 — prebuilt v2.6 uses Go 1.25 and refuses our go.mod. `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`.
@@ -146,6 +149,8 @@ State icons: 🟢 idle · 🟡 busy · 🔵 awaiting permission · ⚪ disconnec
 - `~/.claude/channels/telegram/sessions/<cc_pid>.json` — per-shim session snapshot for `self`
 
 **Systemd alternative:** install `contrib/systemd/telegram-mcp.service` to keep the daemon alive across reboots and outside any Claude Code session.
+
+**Deploy:** the canonical way to ship a change to the live daemon is `make deploy` — it runs `make check` (so a broken build never reaches the daemon), `systemctl --user restart $(SERVICE)`, then `scripts/healthcheck.sh` to verify the restart. The systemd unit's `ExecStart` points at the repo's `bin/telegram-mcp`, so `make build` alone (which `check` does) is enough to update the binary the unit launches. `make health` runs just the post-deploy checks against a running daemon (binary/unit/process/pid-file/socket/log-errors/shims/access.json; exit-coded). The shim + admin-agent reconnect on their own after the restart; in-flight `/spawn` children are cancelled by `spawnRunner.Stop()` on shutdown.
 
 **Background tasks (`/bg`):** DM `/bg <prompt> [--in <dir>]` runs a one-shot `claude --print --output-format=stream-json --verbose` in the resolved workdir; the daemon edits one progress message every `EditThrottle` then sends the chunked result + cost on completion. `/bg list`, `/bg cancel <id>` (SIGTERM→5s→SIGKILL). `BgRunner.Stop()` runs in `runDaemon`'s defer chain so shutdown cancels in-flight tasks. Code `internal/daemon/bg.go` (`BgRunner` satisfies `bot.BgRunner`); dispatch `internal/bot/bg.go:handleBgCommand`. Env: `TELEGRAM_BG_{MAX_PARALLEL,TIMEOUT,DEFAULT_WORKDIR,RATE_PER_HOUR,CLAUDE_BIN}` — defaults + CLAUDE_BIN auto-resolution in README / `cmd/server.resolveClaudeBin`. Integration test `bg_integration_test.go` (build tag `integration`).
 
