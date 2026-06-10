@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -585,7 +586,11 @@ func TestBgRunner_RunTaskSetsThinkingTokensEnv(t *testing.T) {
 	assert.Contains(t, call.env, "BG_TEST_SENTINEL=present", "must inherit parent env, not replace it")
 }
 
-func TestBgRunner_RunTaskZeroValuesPreserveCurrentBehavior(t *testing.T) {
+func TestBgRunner_RunTaskZeroThinkingStripsCCEnvButInherits(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "sid-from-parent-cc")
+	t.Setenv("BG_ZERO_SENTINEL", "keep-me")
+
 	r, cmder, _ := newRecordingBgRunner(t)
 
 	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{
@@ -603,7 +608,17 @@ func TestBgRunner_RunTaskZeroValuesPreserveCurrentBehavior(t *testing.T) {
 		assert.NotContains(t, a, "--model=", "no --model arg when Model is empty")
 	}
 
-	assert.Empty(t, call.env, "env must be nil/empty when ThinkingTokens is 0")
+	// Even with no MAX_THINKING_TOKENS, the child must not inherit the daemon's
+	// foreign CC session identity — but must still inherit unrelated parent env.
+	require.NotEmpty(t, call.env, "env is now always set so CC vars can be stripped")
+
+	for _, e := range call.env {
+		assert.False(t, strings.HasPrefix(e, "CLAUDECODE="), "must strip inherited CLAUDECODE")
+		assert.False(t, strings.HasPrefix(e, "CLAUDE_CODE_SESSION_ID="), "must strip inherited CLAUDE_CODE_SESSION_ID")
+		assert.False(t, strings.HasPrefix(e, "MAX_THINKING_TOKENS="), "no MAX_THINKING_TOKENS when zero")
+	}
+
+	assert.Contains(t, call.env, "BG_ZERO_SENTINEL=keep-me", "must inherit unrelated parent env")
 }
 
 func TestBgRunner_StartFailureEmitsBgFailed(t *testing.T) {

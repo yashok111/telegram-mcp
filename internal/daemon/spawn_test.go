@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -682,6 +683,44 @@ func TestSpawnRunner_SpawnZeroValuesAreNoOp(t *testing.T) {
 		return len(e) >= 20 && e[:20] == "MAX_THINKING_TOKENS="
 	})
 	assert.False(t, hasThinking, "no MAX_THINKING_TOKENS env when ThinkingTokens is zero")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_StripsParentCCEnv(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "sid-from-parent-cc")
+	t.Setenv("SPAWN_TEST_SENTINEL", "keep-me")
+
+	proc := newFakeSpawnProcess(4247)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+		ClaudeArgs:         []string{"--dangerously-load-development-channels", "plugin:telegram@local-yakov"},
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{
+		Workdir: "/tmp/wd", ChatID: "1", UserID: "u",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	call := cmder.lastCall()
+
+	for _, e := range call.env {
+		assert.False(t, strings.HasPrefix(e, "CLAUDECODE="), "must strip inherited CLAUDECODE")
+		assert.False(t, strings.HasPrefix(e, "CLAUDE_CODE_SESSION_ID="), "must strip inherited CLAUDE_CODE_SESSION_ID")
+	}
+
+	assert.Contains(t, call.env, "SPAWN_TEST_SENTINEL=keep-me", "must inherit unrelated parent env")
 
 	require.NoError(t, r.Cancel(id))
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)

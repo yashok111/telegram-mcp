@@ -356,9 +356,11 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 
 	args = append(args, req.Prompt)
 
-	var env []string
+	// Always strip the inherited CC session identity (see parentCCEnvPrefixes);
+	// the child claude --print must not run under the daemon's foreign session.
+	env := filterEnv(os.Environ(), parentCCEnvPrefixes...)
 	if req.ThinkingTokens > 0 {
-		env = filterEnv(os.Environ(), "MAX_THINKING_TOKENS=")
+		env = filterEnv(env, "MAX_THINKING_TOKENS=")
 		env = append(env, "MAX_THINKING_TOKENS="+strconv.Itoa(req.ThinkingTokens))
 	}
 

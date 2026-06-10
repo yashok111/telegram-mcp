@@ -485,8 +485,9 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 	// back. Daemon then resolves /spawn list → alias mapping via Router lookup.
 	// Filter any pre-existing TELEGRAM_SPAWN_ID so a nested /spawn (operator
 	// daemon spawned by another daemon — extremely rare) can't carry a stale
-	// id through the new child's env.
-	env := filterEnv(os.Environ(), "TELEGRAM_SPAWN_ID=")
+	// id through the new child's env. parentCCEnvPrefixes strips the inherited
+	// CC session identity (see its doc).
+	env := filterEnv(os.Environ(), append([]string{"TELEGRAM_SPAWN_ID="}, parentCCEnvPrefixes...)...)
 	env = append(env, "TELEGRAM_SPAWN_ID="+id)
 
 	args := slices.Clone(r.cfg.ClaudeArgs)
@@ -575,10 +576,22 @@ func (r *SpawnRunner) TopicForSpawn(id string) (int, bool) {
 	return t.topicThreadID, true
 }
 
+// parentCCEnvPrefixes are the Claude Code session-identity env vars that must be
+// stripped before launching a daemon-spawned `claude` (/spawn, /bg). CC stamps
+// CLAUDECODE=1 + CLAUDE_CODE_SESSION_ID into its stdio MCP subprocesses (the
+// shim) since 2.1.154; the shim forks the daemon with os.Environ(), so the
+// daemon — and any child it launches — inherits a FOREIGN session identity.
+// Left in place, the child claude fails to save its transcript / does not appear
+// in --resume (fixed upstream in CC 2.1.170; we strip defensively so it holds on
+// every CC version). Only child launches strip these — cmd/server/self.go reads
+// them legitimately for the shim's own SessionStart correlation.
+var parentCCEnvPrefixes = []string{"CLAUDECODE=", "CLAUDE_CODE_SESSION_ID="}
+
 // filterEnv returns a copy of env with any entry whose key matches one of the
 // prefixes removed. Used to drop a pre-existing TELEGRAM_SPAWN_ID /
-// MAX_THINKING_TOKENS / TELEGRAM_ADMIN_TOKEN before stamping a fresh value, so a
-// nested daemon can't leak a stale value to its child.
+// MAX_THINKING_TOKENS / TELEGRAM_ADMIN_TOKEN / parentCCEnvPrefixes before
+// stamping a fresh value, so a nested daemon can't leak a stale value to its
+// child.
 func filterEnv(env []string, prefixes ...string) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
