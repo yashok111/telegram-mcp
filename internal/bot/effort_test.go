@@ -27,6 +27,8 @@ func TestResolveEffort_knownLevels(t *testing.T) {
 		{name: "high whitespace padded", input: "  high  ", wantModel: "claude-opus-4-8", wantThinkTokens: 16000},
 		{name: "max tab padded", input: "\tmax\t", wantModel: "claude-opus-4-8", wantThinkTokens: 64000},
 		{name: "xhigh uppercase", input: "XHIGH", wantModel: "claude-opus-4-8", wantThinkTokens: 32000},
+		{name: "ultra lowercase", input: "ultra", wantModel: "claude-fable-5", wantThinkTokens: 64000},
+		{name: "ultra uppercase", input: "ULTRA", wantModel: "claude-fable-5", wantThinkTokens: 64000},
 	}
 
 	for _, tt := range tests {
@@ -62,7 +64,7 @@ func TestResolveEffort_unknown(t *testing.T) {
 
 func TestAllEfforts_orderAndCoverage(t *testing.T) {
 	got := AllEfforts()
-	want := []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+	want := []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax, EffortUltra}
 	assert.Equal(t, want, got)
 
 	for _, level := range got {
@@ -93,6 +95,7 @@ func TestParseEffortArgs(t *testing.T) {
 		{name: "high whitespace padded", input: "  high  ", wantSub: EffortSubSet, wantLevel: EffortHigh},
 		{name: "xhigh set", input: "xhigh", wantSub: EffortSubSet, wantLevel: EffortXHigh},
 		{name: "max set", input: "max", wantSub: EffortSubSet, wantLevel: EffortMax},
+		{name: "ultra set", input: "ultra", wantSub: EffortSubSet, wantLevel: EffortUltra},
 		{name: "garbage errors", input: "garbage", wantErr: ErrEffortUnknownLevel},
 		{name: "low extra token errors", input: "low extra", wantErr: ErrEffortUnknownLevel},
 	}
