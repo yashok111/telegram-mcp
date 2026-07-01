@@ -16,6 +16,7 @@ import (
 type MCPSink interface {
 	DeliverInbound(content string, meta map[string]string)
 	ResolvePermission(requestID, behavior string)
+	ResolveAsk(qid string, idx int, user string)
 }
 
 // StatsSink is an optional diagnostic interface — when MCPSink also implements
@@ -204,6 +205,35 @@ func AttachNotifier(c IPCClient, sink MCPSink, w *notifierWorker) {
 			})
 
 			sink.ResolvePermission(p.RequestID, p.Behavior)
+		})
+	})
+}
+
+// AttachAskHandler registers the daemon→shim ask-answered notification. The
+// sink call runs on the worker (off the IPC read loop) so a slow mcp dispatch
+// can't stall daemon↔shim traffic — same discipline as the permission handler.
+// Must be wired at BOTH the initial Wire and the reconnect rewire: missing the
+// rewire silently drops every ask answer after any daemon reconnect.
+func AttachAskHandler(c IPCClient, sink MCPSink, w *notifierWorker) {
+	c.OnNotify(ipc.NotifyAskAnswered, func(_ context.Context, params json.RawMessage) {
+		var p struct {
+			QuestionID string `json:"question_id"`
+			Index      int    `json:"index"`
+			User       string `json:"user"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			slog.Warn("ask answered unmarshal", "err", err)
+			return
+		}
+
+		w.submit("ask_answered", func() {
+			writeDebug("ask_answered", map[string]any{
+				"question_id": p.QuestionID,
+				"index":       p.Index,
+				"pid":         os.Getpid(),
+			})
+
+			sink.ResolveAsk(p.QuestionID, p.Index, p.User)
 		})
 	})
 }

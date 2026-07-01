@@ -446,6 +446,10 @@ func runShim(stateDir string) error {
 		return fmt.Errorf("mcp init: %w", err)
 	}
 
+	askTimeout := resolveAskTimeout()
+	mcpSrv.SetAskConfig(askTimeout, 0, 0) // 0s keep the built-in option/concurrency caps
+	slog.Info("ask tool configured", "timeout", askTimeout)
+
 	sh := &shimpkg.Shim{
 		Client:     client,
 		MCP:        mcpSrv,
@@ -494,6 +498,40 @@ func bindParentDeath() {
 // defaultDaemonIdleTimeout is the daemon's idle-exit window when
 // TELEGRAM_DAEMON_IDLE_EXIT is unset.
 const defaultDaemonIdleTimeout = 7 * 24 * time.Hour
+
+// defaultAskTimeout bounds a blocking `ask` tool call when the operator never
+// taps. Overridable via TELEGRAM_ASK_TIMEOUT.
+const defaultAskTimeout = 5 * time.Minute
+
+// resolveAskTimeout returns the blocking-ask timeout from TELEGRAM_ASK_TIMEOUT
+// (integer seconds). UNLIKE resolveIdleTimeout it NEVER disables: an unbounded
+// ask would hold an mcp-go tool-call worker forever, so a non-positive, empty,
+// or unparseable value falls back to the 5-minute default (one Warn on an
+// unparseable value). Huge values are capped to avoid Duration overflow.
+func resolveAskTimeout() time.Duration {
+	raw, ok := os.LookupEnv("TELEGRAM_ASK_TIMEOUT")
+	if !ok {
+		return defaultAskTimeout
+	}
+
+	secs, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		slog.Warn("invalid TELEGRAM_ASK_TIMEOUT, using default", "value", raw, "default", defaultAskTimeout)
+
+		return defaultAskTimeout
+	}
+
+	if secs <= 0 {
+		return defaultAskTimeout
+	}
+
+	const maxSecs = int64(math.MaxInt64) / int64(time.Second)
+	if secs > maxSecs {
+		secs = maxSecs
+	}
+
+	return time.Duration(secs) * time.Second
+}
 
 // resolveIdleTimeout returns the daemon's idle-exit timeout from
 // TELEGRAM_DAEMON_IDLE_EXIT (seconds). Unset or unparseable → default

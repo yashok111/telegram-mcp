@@ -126,6 +126,55 @@ func TestResolveIdleTimeout_largeSecondsDontOverflow(t *testing.T) {
 	assert.Positive(t, int64(got))
 }
 
+func TestResolveAskTimeout_unsetReturnsDefault(t *testing.T) {
+	_ = os.Unsetenv("TELEGRAM_ASK_TIMEOUT")
+
+	assert.Equal(t, defaultAskTimeout, resolveAskTimeout())
+}
+
+func TestResolveAskTimeout_explicitSeconds(t *testing.T) {
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "90")
+
+	assert.Equal(t, 90*time.Second, resolveAskTimeout())
+}
+
+func TestResolveAskTimeout_zeroNeverDisables(t *testing.T) {
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "0")
+
+	assert.Equal(t, defaultAskTimeout, resolveAskTimeout(), "an unbounded ask would wedge a worker — must fall back to default")
+}
+
+func TestResolveAskTimeout_negativeNeverDisables(t *testing.T) {
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "-5")
+
+	assert.Equal(t, defaultAskTimeout, resolveAskTimeout())
+}
+
+func TestResolveAskTimeout_invalidFallsBackToDefault(t *testing.T) {
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "soon")
+
+	assert.Equal(t, defaultAskTimeout, resolveAskTimeout())
+}
+
+func TestResolveAskTimeout_emptyFallsBackToDefault(t *testing.T) {
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "")
+
+	assert.Equal(t, defaultAskTimeout, resolveAskTimeout())
+}
+
+func TestResolveAskTimeout_trimsWhitespace(t *testing.T) {
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "  45  ")
+
+	assert.Equal(t, 45*time.Second, resolveAskTimeout())
+}
+
+func TestResolveAskTimeout_largeSecondsDontOverflow(t *testing.T) {
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "999999999999")
+
+	got := resolveAskTimeout()
+	assert.Positive(t, int64(got))
+}
+
 func TestApplyForumChatID_envUpdatesAccessJSON(t *testing.T) {
 	dir := t.TempDir()
 	store := access.NewStore(dir, false)

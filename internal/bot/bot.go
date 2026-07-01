@@ -44,6 +44,15 @@ type Notifier interface {
 	// actually executed, plus a human detail for the owner. bot must not import
 	// daemon — this is the seam, mirroring ResolvePermission.
 	ResolveMutation(ctx context.Context, pendingID string, approve bool) (applied bool, detail string)
+	// ResolveAsk delivers the operator's tapped answer to a blocking `ask`
+	// tool call: qid identifies the question, idx the chosen option, user the
+	// tapper's display label. Routing to the asking shim + first-tap-wins is
+	// the daemon's authority; bot must not import daemon — this is the seam,
+	// mirroring ResolvePermission. Returns delivered=false when the qid is
+	// unknown (already answered, or the asking tool already timed out and the
+	// question was cancelled) so the callback can show "expired" instead of a
+	// false success.
+	ResolveAsk(qid string, idx int, user string) (delivered bool)
 }
 
 // PermissionDetails mirrors what mcp.Server stores for "See more" expansion.
@@ -329,7 +338,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg telego.Message) error {
 	case "help":
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID),
 			"Messages you send here route to a paired Claude Code session. "+
-				"Text and photos are forwarded; replies and reactions come back.\n\n"+
+				"Text and photos are forwarded; replies and reactions come back. "+
+				"When the agent needs a decision it can send a multiple-choice question — just tap a button to answer.\n\n"+
 				"/start — pairing instructions\n"+
 				"/status — pairing + active sessions\n"+
 				"/sessions — pick which CC session to talk to\n"+
@@ -854,6 +864,14 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		}
 
 		return b.handleMutationCallback(ctx, q, am[1], am[2] == "confirm")
+	}
+
+	if ak := askCallbackRE.FindStringSubmatch(q.Data); ak != nil {
+		if !b.authorizeCallback(ctx, &q, st) {
+			return nil
+		}
+
+		return b.handleAskCallback(ctx, q, ak[1], ak[2])
 	}
 
 	m := callbackRE.FindStringSubmatch(q.Data)

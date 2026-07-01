@@ -19,6 +19,10 @@ import (
 // request_id that another (still-connected) shim already holds.
 var ErrPermissionIDInUse = errors.New("permission request_id already in use")
 
+// ErrAskIDInUse is returned when a shim registers an `ask` question_id another
+// connected shim already holds. The mcp layer regenerates the qid on this.
+var ErrAskIDInUse = errors.New("ask question_id already in use")
+
 var (
 	ErrShimNotFound        = errors.New("shim not found")
 	ErrAmbiguousShimPrefix = errors.New("shim prefix is ambiguous")
@@ -61,6 +65,7 @@ type Router struct {
 	chatOwners  map[string]string
 	permOwners  map[string]string
 	permDetails map[string]PermDetails
+	askOwners   map[string]string // qid → shim_id (blocking `ask` questions)
 
 	aliases   map[string]string // alias → shim_id
 	shimAlias map[string]string // shim_id → alias  (for O(1) release at Drop)
@@ -177,6 +182,7 @@ func NewRouter() *Router {
 		chatOwners:   map[string]string{},
 		permOwners:   map[string]string{},
 		permDetails:  map[string]PermDetails{},
+		askOwners:    map[string]string{},
 		aliases:      map[string]string{},
 		shimAlias:    map[string]string{},
 		labelIndex:   map[string][]string{},
@@ -289,6 +295,12 @@ func (r *Router) dropLocked(id string) {
 		if owner == id {
 			delete(r.permOwners, pid)
 			delete(r.permDetails, pid)
+		}
+	}
+
+	for qid, owner := range r.askOwners {
+		if owner == id {
+			delete(r.askOwners, qid)
 		}
 	}
 
@@ -1214,6 +1226,65 @@ func (r *Router) LookupPermissionDetails(reqID string) (PermDetails, bool) {
 	d, ok := r.permDetails[reqID]
 
 	return d, ok
+}
+
+// RegisterAsk binds an `ask` question_id to the shim that asked it. Mirrors
+// RegisterPermission: rejects a collision (mcp regenerates) and a vanished shim.
+func (r *Router) RegisterAsk(qid, shimID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.askOwners[qid]; exists {
+		return ErrAskIDInUse
+	}
+
+	if _, ok := r.shims[shimID]; !ok {
+		return ErrShimNotFound
+	}
+
+	r.askOwners[qid] = shimID
+
+	return nil
+}
+
+// RouteAndResolveAsk atomically looks up the shim owning qid AND forgets qid,
+// under a single write lock. This atomicity is the authority for "first tap
+// wins": a second concurrent tap finds no owner (ok=false) and is dropped, so
+// the answer is delivered to the blocked caller exactly once even if the bot
+// fires two callbacks before the UI freeze lands.
+func (r *Router) RouteAndResolveAsk(qid string) (*Shim, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	owner, ok := r.askOwners[qid]
+	if !ok {
+		return nil, false
+	}
+
+	delete(r.askOwners, qid)
+
+	s, ok := r.shims[owner]
+
+	return s, ok
+}
+
+// DropAskIfOwner forgets qid — but only if shimID is its registered owner —
+// called when the asking tool gave up (timeout / ctx cancel) so the entry
+// doesn't leak and a late tap finds no owner. The ownership guard mirrors
+// OwnerOfMessage/edit: any connected shim can invoke bot.askCancel, so a shim
+// must not be able to drop a DIFFERENT shim's in-flight ask. Returns true only
+// when the caller owned the qid and it was removed.
+func (r *Router) DropAskIfOwner(qid, shimID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if owner, ok := r.askOwners[qid]; !ok || owner != shimID {
+		return false
+	}
+
+	delete(r.askOwners, qid)
+
+	return true
 }
 
 // AdminNotify pushes a notification to the connected admin-agent shim. Returns

@@ -49,7 +49,17 @@ const (
 	MethodBotReact                      = "bot.react"
 	MethodBotDownloadFile               = "bot.downloadFile"
 	MethodBotBroadcastPermissionRequest = "bot.broadcastPermissionRequest"
-	MethodDaemonPeers                   = "daemon.peers"
+	// MethodBotAsk asks the operator a multiple-choice question: the daemon
+	// renders an inline keyboard (one button per option) in the shim's chat/
+	// topic and the tapped choice routes back via NotifyAskAnswered. Unlike
+	// permission (CC pushes), the agent initiates and its tool call blocks.
+	MethodBotAsk = "bot.ask"
+	// MethodBotAskCancel tells the daemon to forget a question the shim gave up
+	// on (mcp-side timeout or ctx cancel). The daemon drops the qid→shim binding
+	// so a later tap on the still-visible button resolves to nothing instead of
+	// leaking the entry or firing a bogus header flip.
+	MethodBotAskCancel = "bot.askCancel"
+	MethodDaemonPeers  = "daemon.peers"
 	// MethodAdminSnapshot returns live in-memory daemon state (connected
 	// shims, spawns, bg tasks) to the admin-tools MCP server. Token-gated
 	// per-call; the caller never does hello, so it is not a routable shim.
@@ -63,6 +73,11 @@ const (
 	NotifyInbound            = "notifications/inbound"
 	NotifyPermissionResolved = "notifications/permission/resolved"
 	NotifyLabelChanged       = "notifications/label/changed"
+	// NotifyAskAnswered is the daemon→shim push carrying the operator's tapped
+	// answer to a MethodBotAsk question: {question_id, index, user}. The shim's
+	// AttachAskHandler forwards it to mcp.Server.ResolveAsk, unblocking the
+	// waiting ask tool call.
+	NotifyAskAnswered = "notifications/ask/answered"
 	// NotifyShutdown asks the shim to exit gracefully — daemon fires it
 	// when /topic close kills a non-spawned shim. Shim cancels its run
 	// context, drains the notifier worker, and exits with status 0.

@@ -299,6 +299,34 @@ func (n *Notifier) ResolveMutation(ctx context.Context, pendingID string, approv
 	return n.mutator.Resolve(ctx, pendingID, approve)
 }
 
+// ResolveAsk implements bot.Notifier: routes an operator's tapped answer back
+// to the shim that asked. RouteAndResolveAsk atomically claims the qid so a
+// raced second tap finds nothing and is dropped (first-tap-wins authority).
+func (n *Notifier) ResolveAsk(qid string, idx int, user string) bool {
+	target, ok := n.router.RouteAndResolveAsk(qid)
+	if !ok {
+		// Unknown qid: already answered, or the asking tool timed out and the
+		// question was cancelled. The bot shows "expired" rather than a false
+		// success confirmation.
+		slog.Info("ask answer dropped: shim gone or already resolved", "qid", qid)
+		return false
+	}
+
+	// The agent unblocks and resumes work; flip 🔵 awaiting-input back to 🟡
+	// busy until its next outbound settles the header to 🟢 idle.
+	n.headerState(target.ID, HeaderBusy, "")
+
+	if err := target.Notify(ipc.NotifyAskAnswered, map[string]any{
+		"question_id": qid,
+		"index":       idx,
+		"user":        user,
+	}); err != nil {
+		slog.Error("ask notify failed", "shim_id", target.ID, "qid", qid, "err", err)
+	}
+
+	return true
+}
+
 func (n *Notifier) ResolvePermission(requestID, behavior string) {
 	target, ok := n.router.RoutePermission(requestID)
 	n.router.ResolvePermission(requestID)
