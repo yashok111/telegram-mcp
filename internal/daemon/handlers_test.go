@@ -48,6 +48,8 @@ type fakeBot struct {
 	broadcastPrefix  []string               // prefix per broadcast
 	broadcastTargets []bot.PermissionTarget // resolved target per call
 
+	askSeen []askSeenCall // one per SendAskPrompt call
+
 	chatActions []struct{ chatID, action string }
 
 	mutationConfirms []struct {
@@ -101,6 +103,18 @@ func (b *fakeBot) SendPermissionPrompt(_ context.Context, target bot.PermissionT
 	b.broadcastSeen = append(b.broadcastSeen, reqID)
 	b.broadcastPrefix = append(b.broadcastPrefix, prefix)
 	b.broadcastTargets = append(b.broadcastTargets, target)
+}
+
+type askSeenCall struct {
+	target   bot.PermissionTarget
+	prefix   string
+	qid      string
+	question string
+	options  []string
+}
+
+func (b *fakeBot) SendAskPrompt(_ context.Context, target bot.PermissionTarget, prefix, qid, question string, options []string) {
+	b.askSeen = append(b.askSeen, askSeenCall{target, prefix, qid, question, options})
 }
 
 func (b *fakeBot) BroadcastMutationConfirm(_ context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error) {

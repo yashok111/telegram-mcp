@@ -249,9 +249,17 @@ type noopNotifier struct {
 	delivered []deliveredCall
 	resolved  []resolvedCall
 	mutations []mutationCall
+	asks      []askCall
 
-	mutateApplied bool
-	mutateDetail  string
+	mutateApplied   bool
+	mutateDetail    string
+	askNotDelivered bool // when set, ResolveAsk reports delivered=false
+}
+
+type askCall struct {
+	qid  string
+	idx  int
+	user string
 }
 
 type mutationCall struct {
@@ -288,6 +296,15 @@ func (n *noopNotifier) ResolvePermission(requestID, behavior string) {
 	defer n.mu.Unlock()
 
 	n.resolved = append(n.resolved, resolvedCall{requestID, behavior})
+}
+
+func (n *noopNotifier) ResolveAsk(qid string, idx int, user string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.asks = append(n.asks, askCall{qid, idx, user})
+
+	return !n.askNotDelivered
 }
 
 func (n *noopNotifier) ResolveMutation(_ context.Context, pendingID string, approve bool) (bool, string) {

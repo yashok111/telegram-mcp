@@ -213,6 +213,37 @@ func (a *BotAdapter) BroadcastPermissionRequest(ctx context.Context, requestID, 
 	}
 }
 
+// BroadcastAsk forwards a blocking multiple-choice question to the daemon,
+// which renders the inline keyboard. Implements mcp.BotAPI.BroadcastAsk. A
+// daemon-side qid collision (CodeRequestIDCollision) is translated to
+// bot.ErrAskIDInUse so the mcp handler — which imports bot, not ipc — can
+// errors.Is it and regenerate; every other failure passes through mapErr.
+func (a *BotAdapter) BroadcastAsk(ctx context.Context, qid, question string, options []string, chatID string) error {
+	c := a.Client()
+
+	err := c.Call(ctx, ipc.MethodBotAsk, map[string]any{
+		"question_id": qid, "question": question, "options": options, "chat_id": chatID,
+	}, nil)
+	if err == nil {
+		return nil
+	}
+
+	var rpcErr *ipc.Error
+	if errors.As(err, &rpcErr) && rpcErr.Code == ipc.CodeRequestIDCollision {
+		return bot.ErrAskIDInUse
+	}
+
+	return mapErr(err)
+}
+
+// CancelAsk tells the daemon to forget a question the tool abandoned. Implements
+// mcp.BotAPI.CancelAsk — best-effort, so the daemon dropping the qid is enough.
+func (a *BotAdapter) CancelAsk(ctx context.Context, qid string) error {
+	c := a.Client()
+
+	return mapErr(c.Call(ctx, ipc.MethodBotAskCancel, map[string]any{"question_id": qid}, nil))
+}
+
 func mapErr(err error) error {
 	if err == nil {
 		return nil

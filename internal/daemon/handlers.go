@@ -37,6 +37,7 @@ type botSurface interface {
 	SendChatAction(ctx context.Context, chatID, action string) error
 	DownloadFile(ctx context.Context, fileID string) (string, error)
 	SendPermissionPrompt(ctx context.Context, target bot.PermissionTarget, prefix, requestID, toolName string)
+	SendAskPrompt(ctx context.Context, target bot.PermissionTarget, prefix, qid, question string, options []string)
 	BroadcastMutationConfirm(ctx context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error)
 }
 
@@ -462,6 +463,65 @@ func (h *Handlers) pickPermissionTarget(shimID string) bot.PermissionTarget {
 	return bot.PermissionTarget{}
 }
 
+// HandleAsk renders a blocking multiple-choice question. Mirrors
+// HandleBroadcastPermission: register the qid → shim binding, flip the topic
+// header to 🔵 awaiting-input, resolve the same target as a permission prompt
+// (forum topic or owner DM), and post the inline keyboard. The tapped answer
+// routes back via Notifier.ResolveAsk → NotifyAskAnswered.
+func (h *Handlers) HandleAsk(ctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
+	var p struct {
+		QuestionID string   `json:"question_id"`
+		Question   string   `json:"question"`
+		Options    []string `json:"options"`
+		ChatID     string   `json:"chat_id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &ipc.Error{Code: ipc.CodeInvalidParams, Message: err.Error()}
+	}
+
+	// ChatID is gate-checked mcp-side (access.Allowed) but NOT used for daemon
+	// targeting: pickPermissionTarget derives the render target from server-side
+	// state (forum topic or owner DM), exactly like HandleBroadcastPermission.
+	// So a caller can't redirect the prompt to an arbitrary chat via chat_id.
+	shimID := h.shimID(c)
+	if err := h.router.RegisterAsk(p.QuestionID, shimID); err != nil {
+		slog.Warn("ask register collision", "qid", p.QuestionID, "shim_id", shimID, "err", err)
+		data, _ := json.Marshal(map[string]string{"question_id": p.QuestionID})
+
+		return nil, &ipc.Error{Code: ipc.CodeRequestIDCollision, Message: err.Error(), Data: data}
+	}
+
+	slog.Info("ask registered", "qid", p.QuestionID, "shim_id", shimID, "options", len(p.Options))
+
+	h.headerState(shimID, HeaderPermission, "ask")
+
+	target := h.pickPermissionTarget(shimID)
+	h.bot.SendAskPrompt(ctx, target, h.textPrefixFor(c), p.QuestionID, p.Question, p.Options)
+
+	return map[string]any{}, nil
+}
+
+// HandleAskCancel forgets a question the asking shim gave up on. Drops the
+// qid→shim binding (so a late tap on the still-visible button resolves to
+// nothing and the entry can't leak) and settles the shim's topic header back to
+// 🟡 busy from the 🔵 awaiting-input state the ask put it in.
+func (h *Handlers) HandleAskCancel(_ context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
+	var p struct {
+		QuestionID string `json:"question_id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &ipc.Error{Code: ipc.CodeInvalidParams, Message: err.Error()}
+	}
+
+	shimID := h.shimID(c)
+	if h.router.DropAskIfOwner(p.QuestionID, shimID) {
+		slog.Info("ask cancelled", "qid", p.QuestionID, "shim_id", shimID)
+		h.headerState(shimID, HeaderBusy, "")
+	}
+
+	return map[string]any{}, nil
+}
+
 func (h *Handlers) HandlePeers(_ context.Context, c *ipc.Conn, _ json.RawMessage) (any, *ipc.Error) {
 	callerID := h.shimID(c)
 	snap := h.router.Snapshot()
@@ -492,6 +552,8 @@ func (h *Handlers) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodBotReact, h.HandleReact)
 	s.Handle(ipc.MethodBotDownloadFile, h.HandleDownloadFile)
 	s.Handle(ipc.MethodBotBroadcastPermissionRequest, h.HandleBroadcastPermission)
+	s.Handle(ipc.MethodBotAsk, h.HandleAsk)
+	s.Handle(ipc.MethodBotAskCancel, h.HandleAskCancel)
 	s.Handle(ipc.MethodDaemonPeers, h.HandlePeers)
 	s.Handle(ipc.MethodAdminSnapshot, h.HandleAdminSnapshot)
 	s.Handle(ipc.MethodAdminMutate, h.HandleAdminMutate)

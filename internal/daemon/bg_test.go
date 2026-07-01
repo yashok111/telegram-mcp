@@ -204,6 +204,13 @@ func (b *lockedBot) SendPermissionPrompt(ctx context.Context, target bot.Permiss
 	b.fb.SendPermissionPrompt(ctx, target, prefix, reqID, tool)
 }
 
+func (b *lockedBot) SendAskPrompt(ctx context.Context, target bot.PermissionTarget, prefix, qid, question string, options []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.fb.SendAskPrompt(ctx, target, prefix, qid, question, options)
+}
+
 func (b *lockedBot) BroadcastMutationConfirm(ctx context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -53,6 +53,8 @@ type fakeBot struct {
 	editCalls     []editCall
 	reactCalls    int
 	broadcastIDs  []string
+	askCalls      []askBroadcast
+	askCancels    []string
 	downloadFiles []string
 
 	nextSendID int
@@ -61,6 +63,17 @@ type fakeBot struct {
 	editErr    error
 	reactErr   error
 	downloadFn func(fileID string) (string, error)
+	// askFn, if set, runs synchronously inside BroadcastAsk (with the fake's
+	// mutex NOT held) so a test can simulate an immediate operator tap or an
+	// IPC-level failure. Returning an error skips recording as delivered.
+	askFn func(qid, question string, options []string, chatID string) error
+}
+
+type askBroadcast struct {
+	qid      string
+	question string
+	options  []string
+	chatID   string
 }
 
 func newFakeBot() *fakeBot {
@@ -137,6 +150,30 @@ func (f *fakeBot) BroadcastPermissionRequest(_ context.Context, requestID, _ str
 	defer f.mu.Unlock()
 
 	f.broadcastIDs = append(f.broadcastIDs, requestID)
+}
+
+func (f *fakeBot) BroadcastAsk(_ context.Context, qid, question string, options []string, chatID string) error {
+	if f.askFn != nil {
+		if err := f.askFn(qid, question, options, chatID); err != nil {
+			return err
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.askCalls = append(f.askCalls, askBroadcast{qid, question, options, chatID})
+
+	return nil
+}
+
+func (f *fakeBot) CancelAsk(_ context.Context, qid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.askCancels = append(f.askCancels, qid)
+
+	return nil
 }
 
 type stringError string
@@ -515,6 +552,12 @@ func (b *blockingBot) BroadcastPermissionRequest(ctx context.Context, _, _ strin
 	<-ctx.Done()
 	close(b.cancelled)
 }
+
+func (b *blockingBot) BroadcastAsk(_ context.Context, _, _ string, _ []string, _ string) error {
+	return nil
+}
+
+func (b *blockingBot) CancelAsk(_ context.Context, _ string) error { return nil }
 
 func TestHandlePermissionRequest_dropsAboveCap(t *testing.T) {
 	srv, _, _ := newServerWithAllowlist(t, "123")

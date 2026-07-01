@@ -15,6 +15,13 @@ import (
 type fakeMCP struct {
 	inbound  []inboundCall
 	resolved []resolvedCall
+	asks     []askResolveCall
+}
+
+type askResolveCall struct {
+	qid  string
+	idx  int
+	user string
 }
 
 type inboundCall struct {
@@ -32,6 +39,10 @@ func (f *fakeMCP) DeliverInbound(content string, meta map[string]string) {
 
 func (f *fakeMCP) ResolvePermission(requestID, behavior string) {
 	f.resolved = append(f.resolved, resolvedCall{requestID, behavior})
+}
+
+func (f *fakeMCP) ResolveAsk(qid string, idx int, user string) {
+	f.asks = append(f.asks, askResolveCall{qid, idx, user})
 }
 
 type spyClient struct {

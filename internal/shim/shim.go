@@ -178,6 +178,7 @@ func (s *Shim) Wire(ctx context.Context) error {
 	}
 
 	AttachNotifier(s.Client, s.MCP, s.worker)
+	AttachAskHandler(s.Client, s.MCP, s.worker)
 	AttachLabelHandler(s.Client, s, s.worker)
 	AttachShutdownHandler(s.Client, s, s.worker)
 
@@ -359,6 +360,11 @@ func (s *Shim) reconnectLoop(ctx context.Context) {
 
 		slog.Warn("daemon ipc dropped, reconnecting")
 
+		// A routed ask answer can't arrive while the link is down; fail every
+		// outstanding ask now so the blocked tool call returns promptly (AC6)
+		// instead of waiting out its full timeout.
+		s.MCP.CancelAllAsks("daemon unavailable")
+
 		if !s.reconnectWithBackoff(ctx) {
 			return
 		}
@@ -397,13 +403,20 @@ func (s *Shim) rewire(ctx context.Context, newClient IPCClient) error {
 	ccPID := s.ccPID
 	s.idMu.RUnlock()
 
+	// Attach notification handlers to newClient BEFORE hello — mirroring Wire.
+	// Once hello lands the daemon considers the shim reconnected and may push a
+	// NotifyAskAnswered / permission-resolved / label / shutdown immediately;
+	// registering the handlers first closes the window where such a push would
+	// be silently dropped on reconnect.
+	AttachNotifier(newClient, s.MCP, s.worker)
+	AttachAskHandler(newClient, s.MCP, s.worker)
+	AttachLabelHandler(newClient, s, s.worker)
+	AttachShutdownHandler(newClient, s, s.worker)
+
 	if err := s.hello(ctx, newClient, ccPID); err != nil {
 		return err
 	}
 
-	AttachNotifier(newClient, s.MCP, s.worker)
-	AttachLabelHandler(newClient, s, s.worker)
-	AttachShutdownHandler(newClient, s, s.worker)
 	s.adapter.SwapClient(newClient)
 	s.setClient(newClient)
 

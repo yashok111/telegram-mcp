@@ -171,6 +171,7 @@ Registered in `internal/mcp/mcp.go:registerTools` via `s.srv.AddTool`:
 - `edit_message` — edit a previously-sent message (caption for media, text for plain)
 - `download_attachment` — fetch a file_id from Telegram CDN into `~/.claude/channels/telegram/inbox/`
 - `telegram_peers` — list other shims connected to this daemon (alias, shim_id, workdir, idle_seconds). Used by `@s2 do X` flows where one shim wants to know what's online.
+- `ask` — pose a multiple-choice question (2..10 options) and **block** until the operator taps an inline button; returns the chosen option. Inverts the permission flow (agent initiates, tool call blocks): renders via `bot.SendAskPrompt` in the shim's own topic (same `pickPermissionTarget`), qid-registry (`askOwners`/`RegisterAsk`/`RouteAndResolveAsk`) mirrors the perm trio, answer routes back over `NotifyAskAnswered`. Blocking wait is a buffered cap-1 channel (never `close`d) with `TELEGRAM_ASK_TIMEOUT` bound (never disables) + `maxConcurrentAsk`≤4 (< mcp-go's 5-worker pool); `BroadcastAsk` is itself bounded (30s). On timeout/ctx-cancel the shim fires `MethodBotAskCancel` so the daemon drops `askOwners[qid]` (no leak, no bogus header flip) and a late tap resolves to `delivered=false` → the bot shows "expired" not a false "chose X"; disconnect fails pending asks via `CancelAllAsks`. Code: `internal/mcp/ask.go`, `internal/bot/ask.go`, `internal/daemon` (routing/handlers/notifier), `internal/shim` (botadapter/notifier).
 
 Any change to this surface MUST go through the `mcp-builder` skill — see `Skills` section.
 

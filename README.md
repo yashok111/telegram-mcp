@@ -245,6 +245,7 @@ disappears within ~24h. Raise either env var to keep topics around longer
 | `edit_message`        | Edit a previously-sent message in place.                |
 | `download_attachment` | Fetch a `file_id` into `~/.claude/channels/telegram/inbox/`. |
 | `telegram_peers`      | List other shims connected to this daemon.              |
+| `ask`                 | Ask a multiple-choice question (2–10 inline buttons) and **block** until the operator taps one; returns the chosen option. Times out after `TELEGRAM_ASK_TIMEOUT`. |
 
 ---
 
@@ -326,6 +327,7 @@ Knobs (env vars, all optional):
 | `TELEGRAM_STATE_DIR`              | `~/.claude/channels/telegram` | State root.                       |
 | `TELEGRAM_ACCESS_MODE`            | `dynamic`              | `static` freezes `access.json` at boot. |
 | `TELEGRAM_DAEMON_IDLE_EXIT`       | `604800` (7 days)      | Idle exit seconds. `0` or negative disables. |
+| `TELEGRAM_ASK_TIMEOUT`            | `300` (5 min)          | Seconds the `ask` tool blocks awaiting a tap. Never disables — `0`/negative/unparseable → default. |
 | `TELEGRAM_PREFIX_ALIAS`           | `1`                    | Inject `@sN:` source-alias prefix.       |
 | `TELEGRAM_FORUM_CHAT_ID`          | —                      | Supergroup id (`-100…`). Set to enable forum-topic mode. |
 | `TELEGRAM_TOPIC_ORPHAN_AFTER`     | `12h`                  | Idle time before a disconnected topic is auto-closed. `0` disables. |
