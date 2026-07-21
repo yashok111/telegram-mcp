@@ -18,12 +18,12 @@ func TestResolveEffort_knownLevels(t *testing.T) {
 		wantThinkTokens int
 	}{
 		{name: "low lowercase", input: "low", wantModel: "claude-haiku-4-5", wantThinkTokens: 0},
-		{name: "medium lowercase", input: "medium", wantModel: "claude-sonnet-4-6", wantThinkTokens: 8000},
+		{name: "medium lowercase", input: "medium", wantModel: "claude-sonnet-5", wantThinkTokens: 8000},
 		{name: "high lowercase", input: "high", wantModel: "claude-opus-4-8", wantThinkTokens: 16000},
 		{name: "xhigh lowercase", input: "xhigh", wantModel: "claude-opus-4-8", wantThinkTokens: 32000},
 		{name: "max lowercase", input: "max", wantModel: "claude-opus-4-8", wantThinkTokens: 64000},
 		{name: "high uppercase", input: "HIGH", wantModel: "claude-opus-4-8", wantThinkTokens: 16000},
-		{name: "medium mixed case", input: "MeDiUm", wantModel: "claude-sonnet-4-6", wantThinkTokens: 8000},
+		{name: "medium mixed case", input: "MeDiUm", wantModel: "claude-sonnet-5", wantThinkTokens: 8000},
 		{name: "high whitespace padded", input: "  high  ", wantModel: "claude-opus-4-8", wantThinkTokens: 16000},
 		{name: "max tab padded", input: "\tmax\t", wantModel: "claude-opus-4-8", wantThinkTokens: 64000},
 		{name: "xhigh uppercase", input: "XHIGH", wantModel: "claude-opus-4-8", wantThinkTokens: 32000},

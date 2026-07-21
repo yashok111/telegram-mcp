@@ -132,6 +132,14 @@ func TestResolveAskTimeout_unsetReturnsDefault(t *testing.T) {
 	assert.Equal(t, defaultAskTimeout, resolveAskTimeout())
 }
 
+// Claude Code >= 2.1.212 moves any MCP tool call still running after 120s to
+// the background (CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS), which breaks `ask`'s
+// blocking contract: the model is told to keep working and the tap arrives
+// later as a task notification. The default must resolve before that.
+func TestDefaultAskTimeout_staysBelowMCPAutoBackgroundThreshold(t *testing.T) {
+	assert.Less(t, defaultAskTimeout, mcpAutoBackgroundThreshold)
+}
+
 func TestResolveAskTimeout_explicitSeconds(t *testing.T) {
 	t.Setenv("TELEGRAM_ASK_TIMEOUT", "90")
 
