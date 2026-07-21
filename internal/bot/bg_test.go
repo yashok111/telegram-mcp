@@ -300,7 +300,7 @@ func TestHandleBgCommand_appliesEffortFromState(t *testing.T) {
 	b.handleBgCommand(t.Context(), bgMsg("/bg do work"), runner)
 
 	require.Len(t, runner.spawnCalls, 1)
-	assert.Equal(t, "claude-sonnet-4-6", runner.spawnCalls[0].Model)
+	assert.Equal(t, "claude-sonnet-5", runner.spawnCalls[0].Model)
 	assert.Equal(t, 8000, runner.spawnCalls[0].ThinkingTokens)
 }
 

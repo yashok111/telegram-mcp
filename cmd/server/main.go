@@ -499,9 +499,17 @@ func bindParentDeath() {
 // TELEGRAM_DAEMON_IDLE_EXIT is unset.
 const defaultDaemonIdleTimeout = 7 * 24 * time.Hour
 
+// mcpAutoBackgroundThreshold is Claude Code's auto-background cutoff for MCP
+// tool calls (>= 2.1.212): a call still running past it is detached, the model
+// is told to keep working, and the result arrives later as a task
+// notification — which silently breaks `ask`'s blocking contract. Operators who
+// want a longer wait must raise CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS too.
+const mcpAutoBackgroundThreshold = 2 * time.Minute
+
 // defaultAskTimeout bounds a blocking `ask` tool call when the operator never
-// taps. Overridable via TELEGRAM_ASK_TIMEOUT.
-const defaultAskTimeout = 5 * time.Minute
+// taps. Kept under mcpAutoBackgroundThreshold. Overridable via
+// TELEGRAM_ASK_TIMEOUT.
+const defaultAskTimeout = 110 * time.Second
 
 // resolveAskTimeout returns the blocking-ask timeout from TELEGRAM_ASK_TIMEOUT
 // (integer seconds). UNLIKE resolveIdleTimeout it NEVER disables: an unbounded

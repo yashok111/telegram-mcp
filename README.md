@@ -327,7 +327,7 @@ Knobs (env vars, all optional):
 | `TELEGRAM_STATE_DIR`              | `~/.claude/channels/telegram` | State root.                       |
 | `TELEGRAM_ACCESS_MODE`            | `dynamic`              | `static` freezes `access.json` at boot. |
 | `TELEGRAM_DAEMON_IDLE_EXIT`       | `604800` (7 days)      | Idle exit seconds. `0` or negative disables. |
-| `TELEGRAM_ASK_TIMEOUT`            | `300` (5 min)          | Seconds the `ask` tool blocks awaiting a tap. Never disables — `0`/negative/unparseable → default. |
+| `TELEGRAM_ASK_TIMEOUT`            | `110`                  | Seconds the `ask` tool blocks awaiting a tap. Never disables — `0`/negative/unparseable → default. Kept under Claude Code's 120s MCP auto-background cutoff (CC ≥ 2.1.212): past it CC detaches the call, tells the model to keep working, and delivers the tap as a late task notification. Raise this only together with `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` in the Claude Code session. |
 | `TELEGRAM_PREFIX_ALIAS`           | `1`                    | Inject `@sN:` source-alias prefix.       |
 | `TELEGRAM_FORUM_CHAT_ID`          | —                      | Supergroup id (`-100…`). Set to enable forum-topic mode. |
 | `TELEGRAM_TOPIC_ORPHAN_AFTER`     | `12h`                  | Idle time before a disconnected topic is auto-closed. `0` disables. |

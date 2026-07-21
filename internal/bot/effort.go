@@ -35,7 +35,7 @@ type EffortConfig struct {
 
 var effortConfigs = map[EffortLevel]EffortConfig{
 	EffortLow:    {Model: "claude-haiku-4-5", ThinkingTokens: 0},
-	EffortMedium: {Model: "claude-sonnet-4-6", ThinkingTokens: 8000},
+	EffortMedium: {Model: "claude-sonnet-5", ThinkingTokens: 8000},
 	EffortHigh:   {Model: "claude-opus-4-8", ThinkingTokens: 16000},
 	EffortXHigh:  {Model: "claude-opus-4-8", ThinkingTokens: 32000},
 	EffortMax:    {Model: "claude-opus-4-8", ThinkingTokens: 64000},
@@ -208,12 +208,12 @@ func formatEffortHelpReply() string {
 		"  /effort clear            — drop override; fall back to daemon defaults",
 		"",
 		"Levels:",
-		"  low    — claude-haiku-4-5  · thinking 0",
-		"  medium — claude-sonnet-4-6 · thinking 8000",
-		"  high   — claude-opus-4-8   · thinking 16000",
-		"  xhigh  — claude-opus-4-8   · thinking 32000",
-		"  max    — claude-opus-4-8   · thinking 64000",
-		"  ultra  — claude-fable-5    · thinking 64000",
+		"  low    — claude-haiku-4-5 · thinking 0",
+		"  medium — claude-sonnet-5  · thinking 8000",
+		"  high   — claude-opus-4-8  · thinking 16000",
+		"  xhigh  — claude-opus-4-8  · thinking 32000",
+		"  max    — claude-opus-4-8  · thinking 64000",
+		"  ultra  — claude-fable-5   · thinking 64000",
 		"",
 		"Applies to new /spawn and /bg sessions. Existing shims keep their settings until respawn.",
 	}
