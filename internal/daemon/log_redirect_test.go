@@ -218,6 +218,7 @@ func TestRotateRestoresOnOpenFailure(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("failure injection via chmod is a no-op for root (CI containers)")
 	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.log")
 
