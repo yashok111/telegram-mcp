@@ -157,6 +157,9 @@ func TestTopicCloser_closeForumTopicFailureBubblesUp(t *testing.T) {
 }
 
 func TestTopicCloser_storeMutateFailure_returnsError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("failure injection via chmod is a no-op for root (CI containers)")
+	}
 	// Setup a real store, then chmod its dir read-only so the post-close
 	// Mutate's saveLocked fails on WriteFile. CloseForumTopic still
 	// succeeds (fake bot) — exercising the "closed in TG but queue save

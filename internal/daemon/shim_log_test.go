@@ -100,6 +100,9 @@ func TestShimLogsRotatesOnMaxBytes(t *testing.T) {
 }
 
 func TestShimLogsRotateNilsHandleOnRenameFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("failure injection via chmod is a no-op for root (CI containers)")
+	}
 	dir := t.TempDir()
 
 	sink, err := NewShimLogs(dir, 64)
