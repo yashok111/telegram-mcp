@@ -150,7 +150,7 @@ State icons: 🟢 idle · 🟡 busy · 🔵 awaiting permission · ⚪ disconnec
 
 **Systemd alternative:** install `contrib/systemd/telegram-mcp.service` to keep the daemon alive across reboots and outside any Claude Code session.
 
-**Deploy:** the canonical way to ship a change to the live daemon is `make deploy` — it runs `make check` (so a broken build never reaches the daemon), `systemctl --user restart $(SERVICE)`, then `scripts/healthcheck.sh` to verify the restart. The systemd unit's `ExecStart` points at the repo's `bin/telegram-mcp`, so `make build` alone (which `check` does) is enough to update the binary the unit launches. `make health` runs just the post-deploy checks against a running daemon (binary/unit/process/pid-file/socket/log-errors/shims/access.json; exit-coded). The shim + admin-agent reconnect on their own after the restart; in-flight `/spawn` children are cancelled by `spawnRunner.Stop()` on shutdown.
+**Deploy:** the canonical way to ship a change to the live daemon is `make deploy` — it runs `make check` (so a broken build never reaches the daemon), `systemctl --user restart $(SERVICE)`, then `scripts/healthcheck.sh` to verify the restart. The systemd unit's `ExecStart` points at the repo's `bin/telegram-mcp`, so `make build` alone (which `check` does) is enough to update the binary the unit launches. `make health` runs just the post-deploy checks against a running daemon (binary/unit/process/pid-file/socket/log-errors/shims/access.json; exit-coded). The shim reconnects on its own after the restart; in-flight `/spawn` children are cancelled by `spawnRunner.Stop()` on shutdown.
 
 **Background tasks (`/bg`):** DM `/bg <prompt> [--in <dir>]` runs a one-shot `claude --print --output-format=stream-json --verbose` in the resolved workdir; the daemon edits one progress message every `EditThrottle` then sends the chunked result + cost on completion. `/bg list`, `/bg cancel <id>` (SIGTERM→5s→SIGKILL). `BgRunner.Stop()` runs in `runDaemon`'s defer chain so shutdown cancels in-flight tasks. Code `internal/daemon/bg.go` (`BgRunner` satisfies `bot.BgRunner`); dispatch `internal/bot/bg.go:handleBgCommand`. Env: `TELEGRAM_BG_{MAX_PARALLEL,TIMEOUT,DEFAULT_WORKDIR,RATE_PER_HOUR,CLAUDE_BIN}` — defaults + CLAUDE_BIN auto-resolution in README / `cmd/server.resolveClaudeBin`. Integration test `bg_integration_test.go` (build tag `integration`).
 
@@ -227,7 +227,7 @@ The agent must know its shim alias from turn 1 so `@s2 do X` mentions work witho
 - `internal/daemon/integration_test.go` runs the full triangle: real `ipc.Server`, two real `Shim`s, a fake `botSurface`, and the real `Router`. Exercises reply/mention/affinity routing end-to-end.
 - Tests use `t.TempDir()` + `t.Setenv()` exclusively — no `os.Setenv` survives across tests.
 
-**Coverage (816 tests, ~84% project LOC):** chunk 100% · access 91% · bot 89% · daemon 87% · mcp 85% · ipc 81% · shim 72% · cmd/server 45%. The cmd/server gap is `main.run()` wiring and `Bot.Poll()` (live Telegram) — not worth the scaffolding. Re-check with `go test -count=1 -cover ./...` before claiming a coverage change.
+**Coverage (1359 tests, ~84% project LOC):** chunk 100% · access 93% · bot 89% · mcp 89% · daemon 84% · ipc 83% · shim 79% · cmd/server 46%. The cmd/server gap is `main.run()` wiring and `Bot.Poll()` (live Telegram) — not worth the scaffolding. Re-check with `go test -count=1 -cover ./...` before claiming a coverage change.
 
 ## Rules
 
@@ -254,8 +254,8 @@ The agent must know its shim alias from turn 1 so `@s2 do X` mentions work witho
 
 ### What NOT to do
 
-- Don't import `mcp` from `bot`, or `daemon`/`shim` from each other. Direct internal imports are: `cmd/server` → {`daemon`, `shim`, `mcp`, `bot`, `admin`, `access`, `ipc`}; `daemon` → {`bot`, `access`, `chunk`, `ipc`}; `shim` → {`mcp`, `bot` (for types), `access`, `ipc`}; `mcp` → {`bot` (for types), `access`, `chunk`}; `bot` → {`access`}; `admin` → {`access`, `chunk`, `ipc`}. `access` and `chunk` are leaf utilities — they import no other internal package, and any layer above may import them. The role packages (`daemon`, `shim`, `mcp`, `bot`) must not gain new edges between each other; the existing edges above are the full set.
-- The admin-agent lives in its own package `internal/admin` (8th package). It's a process-role peer of `shim`: speaks IPC to the daemon and never imports `daemon`/`bot`/`mcp`/`shim` (it mirrors `daemon.Event` rather than importing it; a wire-compat test guards the mirror). Only `cmd/server` imports it. Don't add a **9th** internal package — anything new should fit one of the eight, usually `daemon`, `bot`, or `admin`.
+- Don't import `mcp` from `bot`, or `daemon`/`shim` from each other. Direct internal imports are: `cmd/server` → {`daemon`, `shim`, `mcp`, `bot`, `access`, `ipc`}; `daemon` → {`bot`, `access`, `chunk`, `ipc`}; `shim` → {`mcp`, `bot` (for types), `access`, `ipc`}; `mcp` → {`bot` (for types), `access`, `chunk`}; `bot` → {`access`}. `access` and `chunk` are leaf utilities — they import no other internal package, and any layer above may import them. The role packages (`daemon`, `shim`, `mcp`, `bot`) must not gain new edges between each other; the existing edges above are the full set.
+- Don't add an **8th** internal package — anything new should fit one of the seven (`access`, `bot`, `chunk`, `daemon`, `ipc`, `mcp`, `shim`), usually `daemon` or `bot`.
 - Don't reintroduce embedded mode (bot poller inside the shim/CC process). Removed in #16; routing assumes a separate daemon and adding it back means undoing the IPC layer.
 - Don't reintroduce `fmt.Fprintf(os.Stderr, ...)`. slog only.
 - Don't commit `.env`, `bin/`, `bot.pid`, `*.log`, anything under `.claude/channels/telegram/`.
