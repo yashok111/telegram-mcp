@@ -231,3 +231,19 @@ func TestTopicCloser_spawnCancelFailure_continuesClose(t *testing.T) {
 	require.NoError(t, c.CloseTopic(context.Background(), 42), "spawn cancel error is non-fatal")
 	assert.Equal(t, []int{42}, bot.closed, "topic still closed")
 }
+
+// An orphan topic with no owning shim must still reach the purge queue. This is
+// the thread-1769 shape: bot.CloseForumTopic maps Telegram's TOPIC_NOT_MODIFIED
+// to success, and the closer must carry that through to ClosedTopics rather than
+// leaving the topic for the sweep to retry forever.
+func TestCloseTopic_orphanQueuesPurge(t *testing.T) {
+	closer, _, store, b, _ := newCloserFixture(t)
+
+	require.NoError(t, closer.CloseTopic(context.Background(), 42))
+
+	assert.Equal(t, []int{42}, b.closed)
+
+	st := store.Load()
+	require.Len(t, st.ClosedTopics, 1, "the topic must reach the purge queue")
+	assert.Equal(t, 42, st.ClosedTopics[0].ThreadID)
+}

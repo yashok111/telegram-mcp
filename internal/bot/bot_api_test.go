@@ -695,6 +695,18 @@ func TestCloseForumTopic_passesThreadID(t *testing.T) {
 	assert.EqualValues(t, 42, calls[0].params["message_thread_id"])
 }
 
+// TestCloseForumTopic_topicNotModified_isIdempotentSuccess: Telegram answers
+// 400 TOPIC_NOT_MODIFIED when the topic is already closed. That is the caller's
+// desired end state, so it must be success — returning an error strands the
+// topic outside the purge queue and the sweep retries the same close forever.
+func TestCloseForumTopic_topicNotModified_isIdempotentSuccess(t *testing.T) {
+	b, api, _ := newTestBot(t, access.State{})
+	api.errFor["closeForumTopic"] = "Bad Request: TOPIC_NOT_MODIFIED"
+
+	err := b.CloseForumTopic(t.Context(), -100123, 42)
+	require.NoError(t, err, "an already-closed topic is an idempotent success")
+}
+
 func TestDeleteForumTopic_passesThreadID(t *testing.T) {
 	b, api, _ := newTestBot(t, access.State{})
 

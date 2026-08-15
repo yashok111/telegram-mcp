@@ -1402,11 +1402,12 @@ func (b *Bot) EditForumTopic(ctx context.Context, chatID int64, threadID int, na
 	return nil
 }
 
-// isTopicNotModified reports whether err is Telegram's 400 TOPIC_NOT_MODIFIED,
-// which editForumTopic returns when the requested title already equals the
-// current one. There is no telego sentinel for this code, so we match on the
-// API description carried in the error string — that text is Telegram's
-// stable contract for the condition.
+// isTopicNotModified reports whether err is Telegram's 400 TOPIC_NOT_MODIFIED:
+// editForumTopic returns it when the requested title already equals the current
+// one, closeForumTopic when the topic is already closed. Either way the caller's
+// desired state already holds, so it is success. There is no telego sentinel for
+// this code, so we match on the API description carried in the error string —
+// that text is Telegram's stable contract for the condition.
 func isTopicNotModified(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "TOPIC_NOT_MODIFIED")
 }
@@ -1417,7 +1418,15 @@ func (b *Bot) CloseForumTopic(ctx context.Context, chatID int64, threadID int) e
 		ChatID:          tu.ID(chatID),
 		MessageThreadID: threadID,
 	}); err != nil {
+		if isTopicNotModified(err) {
+			slog.Debug("Telegram closeForumTopic: already closed (idempotent)",
+				"chat_id", chatID, "thread_id", threadID)
+
+			return nil
+		}
+
 		slog.Error("Telegram closeForumTopic failed", "chat_id", chatID, "thread_id", threadID, "err", err)
+
 		return fmt.Errorf("close forum topic: %w", err)
 	}
 
