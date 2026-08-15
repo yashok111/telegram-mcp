@@ -29,7 +29,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/yakov/telegram-mcp/internal/access"
-	adminpkg "github.com/yakov/telegram-mcp/internal/admin"
 	"github.com/yakov/telegram-mcp/internal/bot"
 	daemonpkg "github.com/yakov/telegram-mcp/internal/daemon"
 	"github.com/yakov/telegram-mcp/internal/ipc"
@@ -43,8 +42,6 @@ const (
 	modeDaemon mode = iota
 	modeShim
 	modeSelf
-	modeAdmin
-	modeAdminTools
 )
 
 func selectMode(argv []string) mode {
@@ -56,10 +53,6 @@ func selectMode(argv []string) mode {
 			return modeShim
 		case "self":
 			return modeSelf
-		case "admin-agent":
-			return modeAdmin
-		case "admin-tools":
-			return modeAdminTools
 		}
 	}
 
@@ -101,16 +94,6 @@ func main() {
 		bindParentDeath()
 
 		runErr = runShim(stateDir)
-	case modeAdmin:
-		// PR_SET_PDEATHSIG is cleared by setsid in execAdminCommander
-		// (the supervisor forks the admin into its own session). The
-		// supervisor handles restart on daemon death via ctx cancel +
-		// Stop, so skipping the call here keeps semantics honest.
-		runErr = runAdminAgent(stateDir)
-	case modeAdminTools:
-		// Launched by the admin-agent's claude as a stdio MCP server (via
-		// --mcp-config). Lifetime tracks claude closing stdin; no PDEATHSIG.
-		runErr = runAdminTools(stateDir)
 	case modeSelf:
 		// Handled above; included so the switch is exhaustive for linters.
 	}
@@ -215,14 +198,6 @@ func runDaemon(stateDir string) error {
 		notifier.SetAutoSpawn(spawnRunner, resolveDurationEnv("TELEGRAM_FORUM_AUTOSPAWN_COOLDOWN", 90*time.Second))
 	}
 
-	adminSpawner := daemonpkg.NewAdminSpawner(resolveAdminBin(), daemonpkg.NewExecAdminCommander())
-
-	go adminSpawner.Run(ctx)
-
-	defer adminSpawner.Stop()
-
-	adminToken := adminSpawner.Token
-
 	// Anomaly-event bus: persists to <stateDir>/admin/events.jsonl and pushes
 	// NotifyAdminEvent to the connected admin-agent. It is the EventSink for the
 	// gate (handlers), spawn, and bg emit sites; the daemon wires the handlers
@@ -289,7 +264,6 @@ func runDaemon(stateDir string) error {
 		ShimsSweep:   daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
 		SpawnRunner:  spawnRunner,
 		BgRunner:     bgRunner,
-		AdminToken:   adminToken,
 		AdminMutator: adminMutator,
 		EventBus:     eventBus,
 		Sitrep:       sitrep,
@@ -332,12 +306,11 @@ func runDaemon(stateDir string) error {
 
 	go func() {
 		wg.Wait()
-		// Terminate the admin/spawn/bg children inside the 7s-guarded window.
+		// Terminate the spawn/bg children inside the 7s-guarded window.
 		// Their Run goroutines aren't on wg, so relying only on the post-return
 		// defers lets the hard-exit (os.Exit below) race their teardown and
-		// orphan the admin-agent / spawned CCs. These Stops are idempotent, so
-		// the defers remain as backstops for early-return paths.
-		adminSpawner.Stop()
+		// orphan the spawned CCs. These Stops are idempotent, so the defers
+		// remain as backstops for early-return paths.
 		spawnRunner.Stop()
 		bgRunner.Stop()
 		tgBot.Stop()
@@ -357,69 +330,6 @@ func runDaemon(stateDir string) error {
 
 	return nil
 }
-
-// runAdminAgent is the entrypoint for `telegram-mcp admin-agent`. The daemon
-// fork-execs this subcommand at boot when TELEGRAM_ADMIN_ENABLE is set.
-func runAdminAgent(stateDir string) error {
-	socketPath := filepath.Join(stateDir, "daemon.sock")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
-	defer signal.Stop(sigs)
-
-	go func() {
-		select {
-		case <-sigs:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
-	agent := adminpkg.NewAgent(stateDir, socketPath)
-	agent.History = adminpkg.NewHistory(stateDir)
-	agent.Invoker = &adminpkg.Invoker{
-		ClaudeBin:  resolveClaudeBin(),
-		Workdir:    agent.Workdir,
-		Model:      os.Getenv("TELEGRAM_ADMIN_MODEL"),
-		SelfBin:    resolveAdminBin(),
-		Directives: func() string { return adminpkg.LoadDirectives(stateDir) },
-	}
-
-	return agent.Run(ctx)
-}
-
-// runAdminTools runs the admin-agent's read-only MCP tool surface as a stdio
-// server. It is forked by the admin-agent's claude (via --mcp-config), reads the
-// per-boot admin token from the env it inherited through the daemon→agent→claude
-// chain, and reaches live daemon state via the token-gated admin.snapshot IPC
-// method. ServeStdio returns when claude closes stdin.
-func runAdminTools(stateDir string) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
-	defer signal.Stop(sigs)
-
-	go func() {
-		select {
-		case <-sigs:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
-	socketPath := filepath.Join(stateDir, "daemon.sock")
-	ts := adminpkg.NewToolServer(stateDir, socketPath, os.Getenv(daemonpkg.AdminTokenEnv))
-
-	return ts.ServeStdio(ctx)
-}
-
 func runShim(stateDir string) error {
 	socketPath := filepath.Join(stateDir, "daemon.sock")
 
@@ -1156,22 +1066,6 @@ func resolveSpawnPluginSpec() string {
 	})
 
 	return "plugin:telegram@" + cands[0].channel
-}
-
-// resolveAdminBin returns the absolute path to this telegram-mcp binary so
-// AdminSpawner can fork-exec the admin-agent subcommand from the same
-// build. Falls back to argv[0] when /proc/self/exe is unreadable (non-Linux
-// sandboxes); both code paths land at the same binary.
-func resolveAdminBin() string {
-	if p, err := os.Executable(); err == nil {
-		return p
-	}
-
-	if len(os.Args) > 0 {
-		return os.Args[0]
-	}
-
-	return "telegram-mcp"
 }
 
 // resolveClaudeBin finds the `claude` executable when neither

@@ -867,8 +867,8 @@ func indexOf(s, sub string) int {
 }
 
 func TestFilterEnvStripsMultiplePrefixes(t *testing.T) {
-	env := []string{"A=1", "TELEGRAM_BOT_TOKEN=x", "B=2", "TELEGRAM_ADMIN_TOKEN=y", "C=3"}
-	got := filterEnv(env, "TELEGRAM_BOT_TOKEN=", "TELEGRAM_ADMIN_TOKEN=")
+	env := []string{"A=1", "TELEGRAM_BOT_TOKEN=x", "B=2", "TELEGRAM_SPAWN_ID=y", "C=3"}
+	got := filterEnv(env, "TELEGRAM_BOT_TOKEN=", "TELEGRAM_SPAWN_ID=")
 	assert.Equal(t, []string{"A=1", "B=2", "C=3"}, got)
 
 	// Single-prefix call site keeps working (variadic with one arg).

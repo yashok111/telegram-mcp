@@ -589,9 +589,8 @@ var parentCCEnvPrefixes = []string{"CLAUDECODE=", "CLAUDE_CODE_SESSION_ID="}
 
 // filterEnv returns a copy of env with any entry whose key matches one of the
 // prefixes removed. Used to drop a pre-existing TELEGRAM_SPAWN_ID /
-// MAX_THINKING_TOKENS / TELEGRAM_ADMIN_TOKEN / parentCCEnvPrefixes before
-// stamping a fresh value, so a nested daemon can't leak a stale value to its
-// child.
+// MAX_THINKING_TOKENS / parentCCEnvPrefixes before stamping a fresh value, so
+// a nested daemon can't leak a stale value to its child.
 func filterEnv(env []string, prefixes ...string) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
