@@ -43,15 +43,6 @@ type Daemon struct {
 	// interval. nil disables.
 	Sitrep *SitrepTicker
 
-	// SpawnRunner / BgRunner feed the admin.snapshot IPC method. nil omits
-	// that section of the snapshot. Set by cmd/server after the runners exist.
-	SpawnRunner spawnLister
-	BgRunner    bgLister
-
-	// AdminToken authenticates a hello carrying role="admin". Empty
-	// disables the admin-agent path entirely (no shim can claim AdminAlias).
-	AdminToken string
-
 	IdleTimeout time.Duration // 0 disables
 	InboxTTL    time.Duration // 0 disables inbox sweep
 	CorruptTTL  time.Duration // 0 disables access.json.corrupt-* sweep
@@ -85,8 +76,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	handlers := NewHandlers(d.Store, d.Bot, d.Router, d.Typing)
 	handlers.SetShimLogs(d.ShimLogs)
-	handlers.SetAdminToken(d.AdminToken)
-	handlers.SetRunners(d.SpawnRunner, d.BgRunner)
 	handlers.SetHeader(d.Header)
 
 	if d.EventBus != nil {
@@ -120,13 +109,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 		// A shim that exits cleanly sends goodbye first (HandleNotify stamps
 		// metaGoodbye). Absence of the flag means a likely crash — surface it as
-		// an anomaly. The admin-agent itself is excluded: its supervisor restarts
-		// it on every exit, so its disconnects are expected churn, not anomalies.
+		// an anomaly.
 		_, graceful := c.Meta.Load(metaGoodbye)
-		role, _ := c.Meta.Load(metaRole)
-		roleStr, _ := role.(string)
 
-		if d.EventBus != nil && !graceful && roleStr != "admin" {
+		if d.EventBus != nil && !graceful {
 			d.EventBus.Emit(Event{
 				Type:     "shim_disconnected",
 				Severity: "warning",
@@ -155,8 +141,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		ccStr, _ := cc.(string)
 		spawn, _ := c.Meta.Load(metaSpawnID)
 		spawnStr, _ := spawn.(string)
-		role, _ := c.Meta.Load(metaRole)
-		roleStr, _ := role.(string)
 
 		shim := &Shim{
 			ID:          id,
@@ -164,7 +148,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 			Workdir:     wdStr,
 			CCSessionID: ccStr,
 			SpawnID:     spawnStr,
-			Role:        roleStr,
 			Notify:      c.Notify,
 		}
 		d.Router.Register(shim)

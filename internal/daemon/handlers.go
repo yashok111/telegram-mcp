@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -17,7 +16,6 @@ import (
 
 const (
 	metaShimID      = "shim_id"
-	metaRole        = "role"
 	metaLabel       = "label"
 	metaWorkdir     = "workdir"
 	metaCCSessionID = "cc_session_id"
@@ -41,16 +39,13 @@ type botSurface interface {
 }
 
 type Handlers struct {
-	store      *access.Store
-	bot        botSurface
-	router     *Router
-	typing     *TypingTracker
-	shimLogs   *ShimLogs
-	adminToken string
-	spawns     spawnLister
-	bgs        bgLister
-	sink       EventSink
-	header     *HeaderManager
+	store    *access.Store
+	bot      botSurface
+	router   *Router
+	typing   *TypingTracker
+	shimLogs *ShimLogs
+	sink     EventSink
+	header   *HeaderManager
 }
 
 func NewHandlers(store *access.Store, b botSurface, r *Router, typing *TypingTracker) *Handlers {
@@ -66,14 +61,6 @@ func NewHandlers(store *access.Store, b botSurface, r *Router, typing *TypingTra
 // after the goroutine that called SetShimLogs.
 func (h *Handlers) SetShimLogs(logs *ShimLogs) {
 	h.shimLogs = logs
-}
-
-// SetAdminToken wires the per-daemon-boot secret that authenticates a hello
-// claiming role="admin". Passing "" disables role=admin entirely (no shim
-// can claim AdminAlias). Must be called before server.Listen — same
-// synchronization rule as SetShimLogs.
-func (h *Handlers) SetAdminToken(token string) {
-	h.adminToken = token
 }
 
 // SetEventSink wires the anomaly-event sink (nil disables emission). Must be
@@ -154,15 +141,11 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 		Workdir     string `json:"workdir"`
 		CCSessionID string `json:"cc_session_id"`
 		SpawnID     string `json:"spawn_id"`
-		Role        string `json:"role"`
-		AdminToken  string `json:"admin_token"`
 	}
 
 	if err := json.Unmarshal(params, &p); err != nil {
 		slog.Warn("hello params unmarshal failed", "err", err)
 	}
-
-	resolvedRole := h.authorizeRole(p.Role, p.AdminToken)
 
 	buf := make([]byte, 6)
 	_, _ = rand.Read(buf)
@@ -173,7 +156,6 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 	c.Meta.Store(metaWorkdir, p.Workdir)
 	c.Meta.Store(metaCCSessionID, p.CCSessionID)
 	c.Meta.Store(metaSpawnID, p.SpawnID)
-	c.Meta.Store(metaRole, resolvedRole)
 
 	if h.shimLogs != nil {
 		if err := h.shimLogs.Open(id); err != nil {
@@ -184,32 +166,9 @@ func (h *Handlers) HandleHello(_ context.Context, c *ipc.Conn, params json.RawMe
 	slog.Info("hello received",
 		"shim_id", id, "shim_pid", p.ShimPID, "label", p.Label,
 		"workdir", p.Workdir, "cc_session_id", p.CCSessionID,
-		"spawn_id", p.SpawnID, "requested_role", p.Role, "resolved_role", resolvedRole,
-		"daemon_version", DaemonVersion)
+		"spawn_id", p.SpawnID, "daemon_version", DaemonVersion)
 
 	return map[string]any{"shim_id": id, "daemon_version": DaemonVersion}, nil
-}
-
-// authorizeRole verifies a hello's role claim against the per-daemon-boot
-// admin token. Returns the role to bind: "admin" iff the requester both
-// asked for it and presented the matching token; "" otherwise. A bad token
-// downgrades silently to "" so a probe can't tell role=admin even exists.
-//
-// Side effect: warns to slog when an admin claim is rejected so an operator
-// reviewing daemon.log can spot impersonation attempts.
-func (h *Handlers) authorizeRole(requested, presented string) string {
-	if requested != "admin" {
-		return ""
-	}
-
-	if h.adminToken == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(h.adminToken)) != 1 {
-		slog.Warn("hello requested role=admin but token did not match — downgrading to user shim",
-			"presented_len", len(presented), "expected_set", h.adminToken != "")
-
-		return ""
-	}
-
-	return "admin"
 }
 
 func (h *Handlers) HandleSendMessage(ctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
@@ -548,7 +507,6 @@ func (h *Handlers) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodBotAsk, h.HandleAsk)
 	s.Handle(ipc.MethodBotAskCancel, h.HandleAskCancel)
 	s.Handle(ipc.MethodDaemonPeers, h.HandlePeers)
-	s.Handle(ipc.MethodAdminSnapshot, h.HandleAdminSnapshot)
 
 	s.HandleNotify(ipc.MethodGoodbye, func(_ context.Context, c *ipc.Conn, _ json.RawMessage) {
 		c.Meta.Store(metaGoodbye, true)

@@ -58,12 +58,8 @@ const (
 	// on (mcp-side timeout or ctx cancel). The daemon drops the qid→shim binding
 	// so a later tap on the still-visible button resolves to nothing instead of
 	// leaking the entry or firing a bogus header flip.
-	MethodBotAskCancel = "bot.askCancel"
-	MethodDaemonPeers  = "daemon.peers"
-	// MethodAdminSnapshot returns live in-memory daemon state (connected
-	// shims, spawns, bg tasks) to the admin-tools MCP server. Token-gated
-	// per-call; the caller never does hello, so it is not a routable shim.
-	MethodAdminSnapshot = "admin.snapshot"
+	MethodBotAskCancel       = "bot.askCancel"
+	MethodDaemonPeers        = "daemon.peers"
 	NotifyInbound            = "notifications/inbound"
 	NotifyPermissionResolved = "notifications/permission/resolved"
 	NotifyLabelChanged       = "notifications/label/changed"
@@ -89,8 +85,7 @@ const (
 	CodeNotSendable        = -32003
 	CodeAttachmentTooLarge = -32004
 	CodeRequestIDCollision = -32005
-	CodeUnauthorized       = -32006
-	CodeInternal       = -32603 // JSON-RPC reserved
-	CodeMethodNotFound = -32601
-	CodeInvalidParams  = -32602
+	CodeInternal           = -32603 // JSON-RPC reserved
+	CodeMethodNotFound     = -32601
+	CodeInvalidParams      = -32602
 )

@@ -28,10 +28,10 @@ type topicSpawner interface {
 // the right shim over IPC. The bot package doesn't import daemon — it sees
 // only bot.Notifier.
 type Notifier struct {
-	router  *Router
-	store   *access.Store
-	typing  *TypingTracker
-	header  *HeaderManager
+	router *Router
+	store  *access.Store
+	typing *TypingTracker
+	header *HeaderManager
 
 	// Forum auto-spawn: an inbound landing in a forum topic that no shim owns
 	// forks a CC session pinned to that topic instead of dropping the message.
