@@ -299,6 +299,7 @@ func runDaemon(stateDir string) error {
 
 	return nil
 }
+
 func runShim(stateDir string) error {
 	socketPath := filepath.Join(stateDir, "daemon.sock")
 

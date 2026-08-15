@@ -240,7 +240,6 @@ func (d *Daemon) startBackgroundWorkers(wg *sync.WaitGroup) {
 	if d.Typing != nil {
 		wg.Go(func() { d.Typing.Run(d.dctx) })
 	}
-
 }
 
 // headerDisconnect flips the disconnecting shim's topic header to ⚪ before the

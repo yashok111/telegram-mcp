@@ -908,6 +908,7 @@ func (b *Bot) handleMoreCallback(ctx context.Context, q telego.CallbackQuery, re
 
 	return nil
 }
+
 func (b *Bot) addRuleAndResolve(ctx context.Context, q *telego.CallbackQuery, requestID string, action access.RuleAction, ttl time.Duration) {
 	details, ok := b.notifier.LookupPermission(requestID)
 	if !ok || strings.TrimSpace(details.ToolName) == "" {

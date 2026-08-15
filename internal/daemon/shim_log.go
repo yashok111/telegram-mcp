@@ -17,7 +17,7 @@ const DefaultShimLogMaxBytes = 2 * 1024 * 1024
 
 // ShimLogs owns per-shim append-only log files under <stateDir>/shims/.
 // File handles open on Router.Register (via Daemon.openShimLog) and close on
-// disconnect; files remain on disk so admin tooling and the sweep can read or
+// disconnect; files remain on disk so an operator and the sweep can read or
 // delete them after the shim is gone.
 type ShimLogs struct {
 	dir      string
@@ -84,7 +84,7 @@ func (s *ShimLogs) Open(shimID string) error {
 }
 
 // Close releases the file handle for shimID. The file stays on disk so the
-// sweep can age it out and admin tools can still read it. Calling Close on an
+// sweep can age it out and an operator can still read it. Calling Close on an
 // unknown shimID is a no-op.
 func (s *ShimLogs) Close(shimID string) {
 	if s == nil || shimID == "" {

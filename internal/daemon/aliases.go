@@ -7,13 +7,6 @@ import (
 	"github.com/yakov/telegram-mcp/internal/access"
 )
 
-// AdminAlias is the reserved alias for the persistent admin-agent shim. The
-// admin-agent registers via hello with Role="admin"; allocAlias never returns
-// this string because user shims only get "sN" (n>0). Centralizing the
-// literal here keeps routing, mention resolution, and reservation guards
-// referring to the same identifier.
-const AdminAlias = "admin"
-
 // SetStickyAliasStore enables workdir/label-stable aliases. It loads the
 // persisted reuse-key→alias bindings so a session reattaching to the same
 // project gets the SAME @sN across reconnects and daemon restarts, and records
@@ -64,7 +57,6 @@ func stickyAliasKey(s *Shim) string {
 // binding was created and the caller must persist it AFTER releasing r.mu.
 // Caller holds r.mu (write).
 //
-//   - admin role → AdminAlias (never sticky; evicts any prior holder).
 //   - no sticky store wired, or no stable key → legacy lowest-free allocation.
 //   - stable key with a persisted alias that is currently free → reuse it.
 //   - stable key whose persisted alias is held by another live shim (two
@@ -72,10 +64,6 @@ func stickyAliasKey(s *Shim) string {
 //   - stable key with no binding yet → allocate the lowest alias that is neither
 //     live nor reserved by another project, and record the binding to persist.
 func (r *Router) allocStickyAliasLocked(s *Shim) (string, string) {
-	if s.Role == "admin" {
-		return r.allocAliasForRole(s.Role), ""
-	}
-
 	key := stickyAliasKey(s)
 	if key == "" || r.aliasStore == nil {
 		return r.allocAlias(), ""
@@ -152,8 +140,7 @@ func persistStickyAlias(store *access.Store, key, alias string) {
 }
 
 // allocAlias returns the lowest unused positive integer alias of the form "sN".
-// Caller must hold r.mu (write). The "sN" scheme structurally cannot return
-// AdminAlias, so user shims and the admin shim live in disjoint namespaces.
+// Caller must hold r.mu (write).
 func (r *Router) allocAlias() string {
 	return r.allocAliasAvoiding(nil)
 }
