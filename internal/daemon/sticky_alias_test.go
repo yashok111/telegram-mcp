@@ -72,17 +72,6 @@ func TestRouter_StickyAlias_concurrentSameProjectGetDistinct(t *testing.T) {
 	assert.NotEqual(t, a.Alias, b.Alias, "two live sessions in one project must get distinct aliases")
 }
 
-// The admin-agent keeps its reserved AdminAlias regardless of sticky bindings.
-func TestRouter_StickyAlias_adminUnaffected(t *testing.T) {
-	r := NewRouter()
-	r.SetStickyAliasStore(access.NewStore(t.TempDir(), false))
-
-	adm := &Shim{ID: "adm", Role: "admin", Workdir: "/home/yakov"}
-	r.Register(adm)
-
-	assert.Equal(t, AdminAlias, adm.Alias, "admin role keeps its reserved alias, never a sticky sN")
-}
-
 // Without a sticky store wired (the test/default path) the legacy lowest-free
 // allocation is preserved: a freed alias number is recycled by the next shim.
 func TestRouter_StickyAlias_disabledByDefault_recyclesGap(t *testing.T) {

@@ -82,6 +82,9 @@ func (c *TopicCloser) CloseTopic(ctx context.Context, threadID int) error {
 		}
 	}
 
+	// An already-closed topic is not an error: bot.CloseForumTopic maps
+	// Telegram's TOPIC_NOT_MODIFIED to success, so the close falls through to
+	// the purge queue instead of being retried on every sweep tick.
 	if err := c.bot.CloseForumTopic(ctx, st.ForumChatID, threadID); err != nil {
 		return fmt.Errorf("close topic %d: %w", threadID, err)
 	}

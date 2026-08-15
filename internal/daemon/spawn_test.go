@@ -86,10 +86,6 @@ func (b *recordingBot) SendAskPrompt(_ context.Context, _ bot.PermissionTarget, 
 func (b *recordingBot) SendPermissionPrompt(_ context.Context, _ bot.PermissionTarget, _, _, _ string) {
 }
 
-func (b *recordingBot) BroadcastMutationConfirm(_ context.Context, _ bot.PermissionTarget, _, _ string) (int, error) {
-	return 0, nil
-}
-
 func (b *recordingBot) sent() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -801,59 +797,6 @@ func TestSpawnRunner_SpawnDedupesThinkingTokensEnv(t *testing.T) {
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
 }
 
-func TestSpawnRunner_CrashedProcessEmitsSpawnCrashedEvent(t *testing.T) {
-	waitCh := make(chan error, 1)
-	proc := &fakeSpawnProcess{
-		pid:     7777,
-		waitCh:  waitCh,
-		closeCh: make(chan struct{}),
-		signal:  func(_ os.Signal) error { return nil },
-		closeFn: func() error { return nil },
-	}
-	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
-		return proc, nil
-	}}
-
-	r := NewSpawnRunnerWithDeps(SpawnConfig{
-		MaxParallel:        1,
-		RatePerHourPerUser: 99,
-		HardTimeout:        time.Minute,
-	}, newRecordingBot(100), cmder)
-
-	sink := &recordingSink{}
-	r.SetEventSink(sink)
-
-	_, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", Workdir: "/x"})
-	require.NoError(t, err)
-
-	waitCh <- errors.New("exit status 1")
-
-	require.Eventually(t, func() bool {
-		return sink.typeCount("spawn_crashed") == 1
-	}, 3*time.Second, 20*time.Millisecond)
-}
-
-func TestSpawnRunner_SweepIdle_EmitsSpawnIdleKilledEvent(t *testing.T) {
-	r := NewSpawnRunner(SpawnConfig{
-		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
-	})
-
-	sink := &recordingSink{}
-	r.SetEventSink(sink)
-
-	id, err := r.reserveSlot("u", 0)
-	require.NoError(t, err)
-
-	r.mu.Lock()
-	r.tasks[id].info.StartedAt = time.Now().Add(-2 * time.Hour)
-	r.tasks[id].cancel = func() {}
-	r.mu.Unlock()
-
-	r.sweepIdle(time.Now())
-
-	assert.Equal(t, 1, sink.typeCount("spawn_idle_killed"))
-}
-
 func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
 
 func indexOf(s, sub string) int {
@@ -867,8 +810,8 @@ func indexOf(s, sub string) int {
 }
 
 func TestFilterEnvStripsMultiplePrefixes(t *testing.T) {
-	env := []string{"A=1", "TELEGRAM_BOT_TOKEN=x", "B=2", "TELEGRAM_ADMIN_TOKEN=y", "C=3"}
-	got := filterEnv(env, "TELEGRAM_BOT_TOKEN=", "TELEGRAM_ADMIN_TOKEN=")
+	env := []string{"A=1", "TELEGRAM_BOT_TOKEN=x", "B=2", "TELEGRAM_SPAWN_ID=y", "C=3"}
+	got := filterEnv(env, "TELEGRAM_BOT_TOKEN=", "TELEGRAM_SPAWN_ID=")
 	assert.Equal(t, []string{"A=1", "B=2", "C=3"}, got)
 
 	// Single-prefix call site keeps working (variadic with one arg).
@@ -988,4 +931,39 @@ func TestSpawnRunner_SpawnStartConfirmation_threadedIntoTopic(t *testing.T) {
 	}, time.Second, 20*time.Millisecond, "start confirmation must land in the originating topic")
 
 	cancelAndDrain(t, r, id)
+}
+
+// The non-zero-exit branch lost its only coverage when the anomaly EventBus was
+// removed. Assert the observable outcome instead: the slot is released and the
+// task leaves List() with a failed terminal status.
+func TestSpawnRunner_CrashedProcessReleasesSlot(t *testing.T) {
+	waitCh := make(chan error, 1)
+	proc := &fakeSpawnProcess{
+		pid:     7777,
+		waitCh:  waitCh,
+		closeCh: make(chan struct{}),
+		signal:  func(_ os.Signal) error { return nil },
+		closeFn: func() error { return nil },
+	}
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, newRecordingBot(100), cmder)
+
+	_, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", Workdir: "/x"})
+	require.NoError(t, err)
+
+	waitCh <- errors.New("exit status 1")
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+
+	// The freed slot must be reusable — a crash that leaked it would block the
+	// next /spawn with ErrTooManySpawnTasks.
+	_, err = r.reserveSlot("u2", 0)
+	require.NoError(t, err)
 }

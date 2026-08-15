@@ -28,11 +28,10 @@ type topicSpawner interface {
 // the right shim over IPC. The bot package doesn't import daemon — it sees
 // only bot.Notifier.
 type Notifier struct {
-	router  *Router
-	store   *access.Store
-	typing  *TypingTracker
-	mutator *AdminMutator
-	header  *HeaderManager
+	router *Router
+	store  *access.Store
+	typing *TypingTracker
+	header *HeaderManager
 
 	// Forum auto-spawn: an inbound landing in a forum topic that no shim owns
 	// forks a CC session pinned to that topic instead of dropping the message.
@@ -272,12 +271,6 @@ func (n *Notifier) LookupPermission(requestID string) (bot.PermissionDetails, bo
 	}, true
 }
 
-// SetMutator wires the admin mutation engine so owner ✅/❌ taps resolve over
-// the bot → Notifier seam (bot must not import daemon). nil → ResolveMutation
-// reports the feature is off. Set in cmd/server before Poll, same as the bot's
-// notifier wiring.
-func (n *Notifier) SetMutator(m *AdminMutator) { n.mutator = m }
-
 // SetHeader wires the topic-header manager (nil disables header state updates).
 // Called once at daemon wiring before Poll, so the write happens-before any
 // DeliverInbound/ResolvePermission.
@@ -287,16 +280,6 @@ func (n *Notifier) SetHeader(m *HeaderManager) { n.header = m }
 // shimID. No-op when headers are off or the shim has no forum topic.
 func (n *Notifier) headerState(shimID string, st HeaderState, tool string) {
 	setShimHeaderState(n.header, n.router, shimID, st, tool)
-}
-
-// ResolveMutation implements bot.Notifier: routes an owner confirm tap to the
-// AdminMutator. The bot already gate-authenticated the tapper.
-func (n *Notifier) ResolveMutation(ctx context.Context, pendingID string, approve bool) (bool, string) {
-	if n.mutator == nil {
-		return false, "admin mutations are not enabled on this daemon"
-	}
-
-	return n.mutator.Resolve(ctx, pendingID, approve)
 }
 
 // ResolveAsk implements bot.Notifier: routes an operator's tapped answer back

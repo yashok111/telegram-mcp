@@ -11,9 +11,8 @@ import (
 )
 
 // ShimsSweep ages out per-shim log files in <stateDir>/shims/. The daemon
-// closes a file when its shim disconnects but the file stays on disk so admin
-// tooling can read it after the fact and operators can grep historical
-// activity. Without a sweep that directory grows forever on a long-running
+// closes a file when its shim disconnects but the file stays on disk so
+// operators can read it after the fact and grep historical activity. Without a sweep that directory grows forever on a long-running
 // daemon.
 //
 // Removal criteria — all three must hold:

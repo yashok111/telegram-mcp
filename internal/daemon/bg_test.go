@@ -211,13 +211,6 @@ func (b *lockedBot) SendAskPrompt(ctx context.Context, target bot.PermissionTarg
 	b.fb.SendAskPrompt(ctx, target, prefix, qid, question, options)
 }
 
-func (b *lockedBot) BroadcastMutationConfirm(ctx context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.fb.BroadcastMutationConfirm(ctx, target, pendingID, summary)
-}
-
 func (b *lockedBot) SendChatAction(ctx context.Context, chatID, action string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -628,124 +621,6 @@ func TestBgRunner_RunTaskZeroThinkingStripsCCEnvButInherits(t *testing.T) {
 	assert.Contains(t, call.env, "BG_ZERO_SENTINEL=keep-me", "must inherit unrelated parent env")
 }
 
-func TestBgRunner_StartFailureEmitsBgFailed(t *testing.T) {
-	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
-		return nil, errors.New("exec not found")
-	}}
-	fb := newLockedBot()
-	fb.setSendRet(42, nil)
-
-	r := NewBgRunnerWithDeps(BgConfig{
-		MaxParallel:        1,
-		RatePerHourPerUser: 99,
-		EditThrottle:       50 * time.Millisecond,
-		Timeout:            time.Second,
-	}, fb, cmder)
-
-	sink := &recordingSink{}
-	r.SetEventSink(sink)
-
-	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
-	require.NoError(t, err)
-
-	require.Eventually(t, func() bool { return sink.typeCount("bg_failed") == 1 }, 2*time.Second, 20*time.Millisecond)
-}
-
-func TestBgRunner_StreamFailureEmitsBgFailed(t *testing.T) {
-	pr, pw := io.Pipe()
-	stderrR, stderrW := io.Pipe()
-	waitCh := make(chan error, 1)
-
-	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
-		return &fakeProcess{
-			stdout: pr,
-			stderr: stderrR,
-			waitCh: waitCh,
-			signal: func(os.Signal) error { return nil },
-		}, nil
-	}}
-	fb := newLockedBot()
-	fb.setSendRet(55, nil)
-
-	r := NewBgRunnerWithDeps(BgConfig{
-		MaxParallel:        1,
-		RatePerHourPerUser: 99,
-		EditThrottle:       50 * time.Millisecond,
-		Timeout:            5 * time.Second,
-	}, fb, cmder)
-
-	sink := &recordingSink{}
-	r.SetEventSink(sink)
-
-	_, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
-	require.NoError(t, err)
-
-	go func() {
-		defer pw.Close()
-		defer stderrW.Close()
-	}()
-
-	waitCh <- nil
-
-	require.Eventually(t, func() bool { return sink.typeCount("bg_failed") == 1 }, 2*time.Second, 20*time.Millisecond)
-}
-
-func TestBgRunner_CancelDoesNotEmitBgFailed(t *testing.T) {
-	pr, pw := io.Pipe()
-	stderrR, stderrW := io.Pipe()
-	waitCh := make(chan error, 1)
-
-	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
-		return &fakeProcess{
-			stdout: pr,
-			stderr: stderrR,
-			waitCh: waitCh,
-			signal: func(os.Signal) error { return nil },
-		}, nil
-	}}
-	fb := newLockedBot()
-	fb.setSendRet(77, nil)
-
-	r := NewBgRunnerWithDeps(BgConfig{
-		MaxParallel:        1,
-		RatePerHourPerUser: 99,
-		EditThrottle:       50 * time.Millisecond,
-		Timeout:            5 * time.Second,
-	}, fb, cmder)
-
-	sink := &recordingSink{}
-	r.SetEventSink(sink)
-
-	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
-	require.NoError(t, err)
-
-	// Cancel, then make the stream error out as a consequence of the kill. This
-	// reliably drives the doneCh branch with ctx already cancelled — the exact
-	// path that had no guard and emitted a false bg_failed before the fix.
-	require.NoError(t, r.Cancel(id))
-
-	go func() {
-		_ = pw.CloseWithError(errors.New("killed"))
-		_ = stderrW.Close()
-	}()
-
-	waitCh <- errors.New("signal: killed")
-
-	// Whichever select branch wins, a cancelled task must terminate WITHOUT
-	// emitting bg_failed (the false-anomaly the ctx.Err() guard prevents).
-	require.Eventually(t, func() bool {
-		for _, ti := range r.List() {
-			if ti.ID == id {
-				return false
-			}
-		}
-
-		return true
-	}, 2*time.Second, 20*time.Millisecond, "cancelled task must reach a terminal state")
-
-	assert.Equal(t, 0, sink.typeCount("bg_failed"), "cancelled task must not emit bg_failed")
-}
-
 func TestBgRunner_RunTaskDedupesThinkingTokensEnv(t *testing.T) {
 	t.Setenv("MAX_THINKING_TOKENS", "5000")
 
@@ -773,4 +648,108 @@ func TestBgRunner_RunTaskDedupesThinkingTokensEnv(t *testing.T) {
 
 	assert.Equal(t, 1, matches, "exactly one MAX_THINKING_TOKENS entry expected; parent's value must be filtered before append")
 	assert.Contains(t, call.env, "MAX_THINKING_TOKENS=16000", "the request-supplied value must win")
+}
+
+// The bg failure paths lost their only coverage when the anomaly EventBus was
+// removed (the old tests asserted on emitted events). These assert the
+// user-visible outcome instead: the final message edit and the released slot.
+func TestBgRunner_StartFailureReportsFailure(t *testing.T) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return nil, errors.New("exec not found")
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(42, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            time.Second,
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, fb.lastEditedText(), "❌ Task "+bot.MdCode(id))
+	assert.Contains(t, fb.lastEditedText(), "failed to start")
+}
+
+func TestBgRunner_StreamFailureReportsFailure(t *testing.T) {
+	pr, pw := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	waitCh := make(chan error, 1)
+
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return &fakeProcess{
+			stdout: pr,
+			stderr: stderrR,
+			waitCh: waitCh,
+			signal: func(os.Signal) error { return nil },
+		}, nil
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(55, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            5 * time.Second,
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	go func() {
+		defer pw.Close()
+		defer stderrW.Close()
+	}()
+
+	waitCh <- nil
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, fb.lastEditedText(), "❌ Task "+bot.MdCode(id), "a stream that ends with no result is a failure")
+}
+
+// A cancelled task must terminate as cancelled, never as failed — the ctx.Err()
+// guard in finalizeStreamFailure. The stream errors *because* the process was
+// killed, so select may pick doneCh over ctx.Done in that race.
+func TestBgRunner_CancelReportsCancelledNotFailed(t *testing.T) {
+	pr, pw := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	waitCh := make(chan error, 1)
+
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return &fakeProcess{
+			stdout: pr,
+			stderr: stderrR,
+			waitCh: waitCh,
+			signal: func(os.Signal) error { return nil },
+		}, nil
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(77, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            5 * time.Second,
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+	require.NoError(t, r.Cancel(id))
+
+	go func() {
+		_ = pw.CloseWithError(errors.New("killed"))
+		_ = stderrW.Close()
+	}()
+
+	waitCh <- errors.New("signal: killed")
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, fb.lastEditedText(), "🛑 Task "+bot.MdCode(id), "cancellation must not be reported as a failure")
+	assert.NotContains(t, fb.lastEditedText(), "❌")
 }

@@ -29,7 +29,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/yakov/telegram-mcp/internal/access"
-	adminpkg "github.com/yakov/telegram-mcp/internal/admin"
 	"github.com/yakov/telegram-mcp/internal/bot"
 	daemonpkg "github.com/yakov/telegram-mcp/internal/daemon"
 	"github.com/yakov/telegram-mcp/internal/ipc"
@@ -43,8 +42,6 @@ const (
 	modeDaemon mode = iota
 	modeShim
 	modeSelf
-	modeAdmin
-	modeAdminTools
 )
 
 func selectMode(argv []string) mode {
@@ -56,10 +53,6 @@ func selectMode(argv []string) mode {
 			return modeShim
 		case "self":
 			return modeSelf
-		case "admin-agent":
-			return modeAdmin
-		case "admin-tools":
-			return modeAdminTools
 		}
 	}
 
@@ -101,16 +94,6 @@ func main() {
 		bindParentDeath()
 
 		runErr = runShim(stateDir)
-	case modeAdmin:
-		// PR_SET_PDEATHSIG is cleared by setsid in execAdminCommander
-		// (the supervisor forks the admin into its own session). The
-		// supervisor handles restart on daemon death via ctx cancel +
-		// Stop, so skipping the call here keeps semantics honest.
-		runErr = runAdminAgent(stateDir)
-	case modeAdminTools:
-		// Launched by the admin-agent's claude as a stdio MCP server (via
-		// --mcp-config). Lifetime tracks claude closing stdin; no PDEATHSIG.
-		runErr = runAdminTools(stateDir)
 	case modeSelf:
 		// Handled above; included so the switch is exhaustive for linters.
 	}
@@ -215,40 +198,6 @@ func runDaemon(stateDir string) error {
 		notifier.SetAutoSpawn(spawnRunner, resolveDurationEnv("TELEGRAM_FORUM_AUTOSPAWN_COOLDOWN", 90*time.Second))
 	}
 
-	adminSpawner := daemonpkg.NewAdminSpawner(resolveAdminBin(), daemonpkg.NewExecAdminCommander())
-
-	go adminSpawner.Run(ctx)
-
-	defer adminSpawner.Stop()
-
-	adminToken := adminSpawner.Token
-
-	// Anomaly-event bus: persists to <stateDir>/admin/events.jsonl and pushes
-	// NotifyAdminEvent to the connected admin-agent. It is the EventSink for the
-	// gate (handlers), spawn, and bg emit sites; the daemon wires the handlers
-	// sink itself, so only the runner sinks are set here.
-	eventBus := daemonpkg.NewEventBus(daemonpkg.NewEventLog(stateDir), router.AdminNotify)
-	spawnRunner.SetEventSink(eventBus)
-	bgRunner.SetEventSink(eventBus)
-
-	// Error-burst detector: a slog handler that taps ERROR records into the bus.
-	// Disabled when threshold <= 0. Wrapping the current default makes it
-	// outermost so it counts every record before the shim-log fan-out delegates.
-	if th, win, cd, ok := resolveErrorBurstConfig(); ok {
-		slog.SetDefault(slog.New(daemonpkg.NewErrorBurstHandler(slog.Default().Handler(), eventBus, th, win, cd)))
-	}
-
-	// Daily sitrep: a daemon-side ticker that pings the admin-agent to produce an
-	// owner digest. AdminNotify no-ops when no admin is connected. `=0` disables.
-	sitrep := daemonpkg.NewSitrepTicker(
-		resolveDurationEnv("TELEGRAM_ADMIN_SITREP_INTERVAL", 24*time.Hour),
-		func() {
-			router.AdminNotify(ipc.NotifyAdminSitrep, map[string]any{"ts": time.Now().UTC().Format(time.RFC3339)})
-		},
-	)
-
-	adminMutator := wireAdminMutator(notifier, stateDir, store, router, tgBot, spawnRunner, bgRunner)
-
 	idleTimeout := resolveIdleTimeout()
 
 	inboxTTL := resolveDurationEnv("TELEGRAM_INBOX_TTL", 7*24*time.Hour)
@@ -274,29 +223,23 @@ func runDaemon(stateDir string) error {
 	orphanSweep.SetIsLive(router.IsConnected)
 
 	d := &daemonpkg.Daemon{
-		StateDir:     stateDir,
-		SocketPath:   filepath.Join(stateDir, "daemon.sock"),
-		PidPath:      filepath.Join(stateDir, "daemon.pid"),
-		Store:        store,
-		Bot:          tgBot,
-		Router:       router,
-		Typing:       typing,
-		Forum:        daemonpkg.NewForum(store, tgBot, router.IsConnected, spawnRunner.TopicForSpawn),
-		Header:       headerMgr,
-		TopicSweep:   daemonpkg.NewTopicSweep(store, tgBot, resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 12*time.Hour), time.Hour),
-		OrphanSweep:  orphanSweep,
-		ShimLogs:     shimLogs,
-		ShimsSweep:   daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
-		SpawnRunner:  spawnRunner,
-		BgRunner:     bgRunner,
-		AdminToken:   adminToken,
-		AdminMutator: adminMutator,
-		EventBus:     eventBus,
-		Sitrep:       sitrep,
-		IdleTimeout:  idleTimeout,
-		InboxTTL:     inboxTTL,
-		CorruptTTL:   corruptTTL,
-		SessionsTTL:  sessionsTTL,
+		StateDir:    stateDir,
+		SocketPath:  filepath.Join(stateDir, "daemon.sock"),
+		PidPath:     filepath.Join(stateDir, "daemon.pid"),
+		Store:       store,
+		Bot:         tgBot,
+		Router:      router,
+		Typing:      typing,
+		Forum:       daemonpkg.NewForum(store, tgBot, router.IsConnected, spawnRunner.TopicForSpawn),
+		Header:      headerMgr,
+		TopicSweep:  daemonpkg.NewTopicSweep(store, tgBot, resolveDurationEnv("TELEGRAM_TOPIC_PURGE_AFTER", 12*time.Hour), time.Hour),
+		OrphanSweep: orphanSweep,
+		ShimLogs:    shimLogs,
+		ShimsSweep:  daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
+		IdleTimeout: idleTimeout,
+		InboxTTL:    inboxTTL,
+		CorruptTTL:  corruptTTL,
+		SessionsTTL: sessionsTTL,
 	}
 
 	stopSignals := cancelOnSignal(ctx, cancel)
@@ -332,12 +275,11 @@ func runDaemon(stateDir string) error {
 
 	go func() {
 		wg.Wait()
-		// Terminate the admin/spawn/bg children inside the 7s-guarded window.
+		// Terminate the spawn/bg children inside the 7s-guarded window.
 		// Their Run goroutines aren't on wg, so relying only on the post-return
 		// defers lets the hard-exit (os.Exit below) race their teardown and
-		// orphan the admin-agent / spawned CCs. These Stops are idempotent, so
-		// the defers remain as backstops for early-return paths.
-		adminSpawner.Stop()
+		// orphan the spawned CCs. These Stops are idempotent, so the defers
+		// remain as backstops for early-return paths.
 		spawnRunner.Stop()
 		bgRunner.Stop()
 		tgBot.Stop()
@@ -356,68 +298,6 @@ func runDaemon(stateDir string) error {
 	}
 
 	return nil
-}
-
-// runAdminAgent is the entrypoint for `telegram-mcp admin-agent`. The daemon
-// fork-execs this subcommand at boot when TELEGRAM_ADMIN_ENABLE is set.
-func runAdminAgent(stateDir string) error {
-	socketPath := filepath.Join(stateDir, "daemon.sock")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
-	defer signal.Stop(sigs)
-
-	go func() {
-		select {
-		case <-sigs:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
-	agent := adminpkg.NewAgent(stateDir, socketPath)
-	agent.History = adminpkg.NewHistory(stateDir)
-	agent.Invoker = &adminpkg.Invoker{
-		ClaudeBin:  resolveClaudeBin(),
-		Workdir:    agent.Workdir,
-		Model:      os.Getenv("TELEGRAM_ADMIN_MODEL"),
-		SelfBin:    resolveAdminBin(),
-		Directives: func() string { return adminpkg.LoadDirectives(stateDir) },
-	}
-
-	return agent.Run(ctx)
-}
-
-// runAdminTools runs the admin-agent's read-only MCP tool surface as a stdio
-// server. It is forked by the admin-agent's claude (via --mcp-config), reads the
-// per-boot admin token from the env it inherited through the daemon→agent→claude
-// chain, and reaches live daemon state via the token-gated admin.snapshot IPC
-// method. ServeStdio returns when claude closes stdin.
-func runAdminTools(stateDir string) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
-	defer signal.Stop(sigs)
-
-	go func() {
-		select {
-		case <-sigs:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
-	socketPath := filepath.Join(stateDir, "daemon.sock")
-	ts := adminpkg.NewToolServer(stateDir, socketPath, os.Getenv(daemonpkg.AdminTokenEnv))
-
-	return ts.ServeStdio(ctx)
 }
 
 func runShim(stateDir string) error {
@@ -608,42 +488,6 @@ func resolveDurationEnv(name string, def time.Duration) time.Duration {
 	return d
 }
 
-// resolveErrorBurstConfig reads the error-burst detector tuning from env.
-// Returns ok=false (detector disabled) when the threshold is <= 0. Defaults:
-// 20 ERROR records within a 1m window trigger a burst event, rate-limited to
-// once per 5m cooldown.
-func resolveErrorBurstConfig() (threshold int, window, cooldown time.Duration, ok bool) {
-	threshold = 20
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_ERRBURST_THRESHOLD"); raw != "" {
-		n, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil {
-			slog.Warn("invalid TELEGRAM_ADMIN_ERRBURST_THRESHOLD, using default", "value", raw, "default", threshold)
-		} else {
-			threshold = n
-		}
-	}
-
-	if threshold <= 0 {
-		return 0, 0, 0, false
-	}
-
-	// A zero/negative window would evict every stamp on each record (cutoff ==
-	// now), silently neutering the detector while ok stays true. Clamp both to
-	// their defaults — threshold is the only intended disable knob.
-	window = resolveDurationEnv("TELEGRAM_ADMIN_ERRBURST_WINDOW", time.Minute)
-	if window <= 0 {
-		window = time.Minute
-	}
-
-	cooldown = resolveDurationEnv("TELEGRAM_ADMIN_ERRBURST_COOLDOWN", 5*time.Minute)
-	if cooldown <= 0 {
-		cooldown = 5 * time.Minute
-	}
-
-	return threshold, window, cooldown, true
-}
-
 // spawnIdleLookup walks the live Router snapshot to find the shim paired with a
 // given spawn_id. Used by SpawnRunner.Run to enforce TELEGRAM_SPAWN_IDLE_TIMEOUT.
 func spawnIdleLookup(router *daemonpkg.Router) func(string) (time.Duration, bool) {
@@ -658,70 +502,6 @@ func spawnIdleLookup(router *daemonpkg.Router) func(string) (time.Duration, bool
 
 		return 0, false
 	}
-}
-
-// wireAdminMutator builds the PR-3 admin mutation engine from env config and
-// wires the owner-tap resolve seam (notifier.SetMutator). Returned for the
-// Daemon.AdminMutator field. Extracted from runDaemon to keep it under funlen.
-func wireAdminMutator(notifier *daemonpkg.Notifier, stateDir string, store *access.Store, router *daemonpkg.Router, b *bot.Bot, spawn *daemonpkg.SpawnRunner, bg *daemonpkg.BgRunner) *daemonpkg.AdminMutator {
-	denyTools, mutateRate, pendingTTL := resolveAdminMutateConfig()
-
-	m := daemonpkg.NewAdminMutator(daemonpkg.AdminMutateConfig{
-		Store:       store,
-		Router:      router,
-		Bot:         b,
-		Spawns:      spawn,
-		Bgs:         bg,
-		Pending:     daemonpkg.NewPendingStore(stateDir),
-		Audit:       daemonpkg.NewAdminAudit(stateDir, daemonpkg.DefaultAdminAuditMaxBytes),
-		Denylist:    denyTools,
-		RatePerHour: mutateRate,
-		PendingTTL:  pendingTTL,
-	})
-	notifier.SetMutator(m)
-
-	return m
-}
-
-// resolveAdminMutateConfig reads the admin-mutation tuning from env. Defaults:
-// no denylist, 60 mutations/hour, 5-minute pending-confirm TTL.
-//
-//   - TELEGRAM_ADMIN_DENY_TOOLS: csv of tool names hard-disabled (rejected
-//     before tier logic — even owner-tap is unavailable for a denied tool).
-//   - TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR: global cap (single admin). <=0 /
-//     invalid → default.
-//   - TELEGRAM_ADMIN_PENDING_TTL: how long a Tier-3 confirm waits before
-//     expiring. `=0` or invalid keeps the default (AC1), unlike disable-style
-//     envs — a confirm must always have a finite TTL.
-func resolveAdminMutateConfig() (denyTools []string, ratePerHour int, pendingTTL time.Duration) {
-	ratePerHour = 60
-	pendingTTL = 5 * time.Minute
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_DENY_TOOLS"); raw != "" {
-		for t := range strings.SplitSeq(raw, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				denyTools = append(denyTools, t)
-			}
-		}
-	}
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR"); raw != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
-			ratePerHour = n
-		} else {
-			slog.Warn("invalid TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR, using default", "value", raw, "default", ratePerHour)
-		}
-	}
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_PENDING_TTL"); raw != "" {
-		if d, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil && d > 0 {
-			pendingTTL = d
-		} else {
-			slog.Warn("invalid or zero TELEGRAM_ADMIN_PENDING_TTL, keeping default", "value", raw, "default", pendingTTL)
-		}
-	}
-
-	return denyTools, ratePerHour, pendingTTL
 }
 
 // applyForumChatID reads TELEGRAM_FORUM_CHAT_ID at daemon startup and merges
@@ -1156,22 +936,6 @@ func resolveSpawnPluginSpec() string {
 	})
 
 	return "plugin:telegram@" + cands[0].channel
-}
-
-// resolveAdminBin returns the absolute path to this telegram-mcp binary so
-// AdminSpawner can fork-exec the admin-agent subcommand from the same
-// build. Falls back to argv[0] when /proc/self/exe is unreadable (non-Linux
-// sandboxes); both code paths land at the same binary.
-func resolveAdminBin() string {
-	if p, err := os.Executable(); err == nil {
-		return p
-	}
-
-	if len(os.Args) > 0 {
-		return os.Args[0]
-	}
-
-	return "telegram-mcp"
 }
 
 // resolveClaudeBin finds the `claude` executable when neither

@@ -38,12 +38,6 @@ type Notifier interface {
 	DeliverInbound(content string, meta map[string]string)
 	LookupPermission(requestID string) (PermissionDetails, bool)
 	ResolvePermission(requestID, behavior string)
-	// ResolveMutation applies (approve=true) or discards (approve=false) a
-	// pending admin Tier-3 mutation identified by pendingID, on the owner's
-	// gate-authenticated ✅/❌ tap. Returns applied=true only when a mutation
-	// actually executed, plus a human detail for the owner. bot must not import
-	// daemon — this is the seam, mirroring ResolvePermission.
-	ResolveMutation(ctx context.Context, pendingID string, approve bool) (applied bool, detail string)
 	// ResolveAsk delivers the operator's tapped answer to a blocking `ask`
 	// tool call: qid identifies the question, idx the chosen option, user the
 	// tapper's display label. Routing to the asking shim + first-tap-wins is
@@ -785,12 +779,6 @@ func (b *Bot) fetchFile(ctx context.Context, fileID, uniqueHint string) (string,
 // text-reply path so unpaired group members can't decide permissions.
 var callbackRE = regexp.MustCompile(`^perm:(allow|deny|more|atool1h|atoolall|dtoolall):([a-km-z]{5})$`)
 
-// amCallbackRE matches admin-mutation confirm taps: "am:<pending_id>:confirm"
-// / "am:<pending_id>:cancel". pending_id is hex from PendingStore; the {1,64}
-// bound caps length (Telegram callback_data is ≤64 bytes anyway) so oversized
-// data never reaches the store.
-var amCallbackRE = regexp.MustCompile(`^am:([0-9a-f]{1,64}):(confirm|cancel)$`)
-
 func (b *Bot) onCallback(ctx *th.Context, q telego.CallbackQuery) error {
 	return b.handleCallback(ctx, q)
 }
@@ -807,22 +795,6 @@ func (b *Bot) authorizeCallback(ctx context.Context, q *telego.CallbackQuery, st
 	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
 		CallbackQueryID: q.ID, Text: "Not authorized.",
 	})
-
-	return false
-}
-
-// isOwnerID reports whether userID is the owner — the first allowlist entry
-// that parses as an int64, matching the single-user assumption the daemon's
-// ownerTarget / pickPermissionTarget use. Admin-mutation confirms are
-// owner-only even though other allowlisted users may answer permission prompts.
-func isOwnerID(allowFrom []string, userID int64) bool {
-	for _, raw := range allowFrom {
-		// First POSITIVE id is the owner (matches the daemon's
-		// firstParseableChatID): a group id is negative and never the owner.
-		if id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && id > 0 {
-			return id == userID
-		}
-	}
 
 	return false
 }
@@ -844,26 +816,6 @@ func (b *Bot) handleCallback(ctx context.Context, q telego.CallbackQuery) error 
 		}
 
 		return b.handleSessCallback(ctx, q, sm[1], sm[2])
-	}
-
-	if am := amCallbackRE.FindStringSubmatch(q.Data); am != nil {
-		if !b.authorizeCallback(ctx, &q, st) {
-			return nil
-		}
-
-		// Admin mutations are owner-only: unlike permission prompts (any
-		// allowlisted user may answer), a config change confirmed to the owner's
-		// DM must not be approvable by a second allowlisted user.
-		if !isOwnerID(st.AllowFrom, q.From.ID) {
-			slog.Warn("admin confirm denied: tapper is not the owner", "user_id", q.From.ID)
-			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-				CallbackQueryID: q.ID, Text: "Owner only.",
-			})
-
-			return nil
-		}
-
-		return b.handleMutationCallback(ctx, q, am[1], am[2] == "confirm")
 	}
 
 	if ak := askCallbackRE.FindStringSubmatch(q.Data); ak != nil {
@@ -955,43 +907,6 @@ func (b *Bot) handleMoreCallback(ctx context.Context, q telego.CallbackQuery, re
 	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
 
 	return nil
-}
-
-// handleMutationCallback resolves an admin Tier-3 confirm tap. The tapper was
-// already gate-authenticated in handleCallback. It calls ResolveMutation (which
-// applies or discards daemon-side), answers the toast, and rewrites the prompt
-// with the outcome — dropping the buttons so the same mutation can't resolve
-// twice (the daemon's PendingStore.Take also enforces at-most-once).
-func (b *Bot) handleMutationCallback(ctx context.Context, q telego.CallbackQuery, pendingID string, approve bool) error {
-	applied, detail := b.notifier.ResolveMutation(ctx, pendingID, approve)
-
-	slog.Info("admin mutation callback", "pending_id", pendingID, "approve", approve, "applied", applied, "user_id", q.From.ID)
-
-	toast, outcome := mutationOutcomeLabels(approve, applied, detail)
-
-	_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
-		CallbackQueryID: q.ID,
-		Text:            toast,
-	})
-
-	if msg, ok := q.Message.(*telego.Message); ok && msg != nil && msg.Text != "" {
-		_, _ = b.api.EditMessageText(ctx, tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID, msg.Text+"\n\n"+outcome))
-	}
-
-	return nil
-}
-
-// mutationOutcomeLabels renders the short callback toast and the longer message
-// suffix for a resolved admin mutation.
-func mutationOutcomeLabels(approve, applied bool, detail string) (toast, outcome string) {
-	switch {
-	case !approve:
-		return "🚫 Cancelled", "🚫 " + detail
-	case applied:
-		return "✅ Applied", "✅ Applied: " + detail
-	default:
-		return "⚠️ Not applied", "⚠️ " + detail
-	}
 }
 
 func (b *Bot) addRuleAndResolve(ctx context.Context, q *telego.CallbackQuery, requestID string, action access.RuleAction, ttl time.Duration) {
@@ -1487,11 +1402,12 @@ func (b *Bot) EditForumTopic(ctx context.Context, chatID int64, threadID int, na
 	return nil
 }
 
-// isTopicNotModified reports whether err is Telegram's 400 TOPIC_NOT_MODIFIED,
-// which editForumTopic returns when the requested title already equals the
-// current one. There is no telego sentinel for this code, so we match on the
-// API description carried in the error string — that text is Telegram's
-// stable contract for the condition.
+// isTopicNotModified reports whether err is Telegram's 400 TOPIC_NOT_MODIFIED:
+// editForumTopic returns it when the requested title already equals the current
+// one, closeForumTopic when the topic is already closed. Either way the caller's
+// desired state already holds, so it is success. There is no telego sentinel for
+// this code, so we match on the API description carried in the error string —
+// that text is Telegram's stable contract for the condition.
 func isTopicNotModified(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "TOPIC_NOT_MODIFIED")
 }
@@ -1502,7 +1418,15 @@ func (b *Bot) CloseForumTopic(ctx context.Context, chatID int64, threadID int) e
 		ChatID:          tu.ID(chatID),
 		MessageThreadID: threadID,
 	}); err != nil {
+		if isTopicNotModified(err) {
+			slog.Debug("Telegram closeForumTopic: already closed (idempotent)",
+				"chat_id", chatID, "thread_id", threadID)
+
+			return nil
+		}
+
 		slog.Error("Telegram closeForumTopic failed", "chat_id", chatID, "thread_id", threadID, "err", err)
+
 		return fmt.Errorf("close forum topic: %w", err)
 	}
 
@@ -1611,43 +1535,6 @@ func (b *Bot) SendPermissionPrompt(ctx context.Context, target PermissionTarget,
 	if _, err := b.api.SendMessage(ctx, p); err != nil {
 		slog.Error("permission_request send failed", "chat_id", target.ChatID, "thread_id", target.ThreadID, "err", err)
 	}
-}
-
-// BroadcastMutationConfirm posts an admin-mutation confirmation prompt with
-// ✅ Confirm / ❌ Cancel inline buttons to target, returning the sent
-// message_id so the daemon can edit it on resolve/expiry. summary is the full
-// human-readable description of the pending mutation (tool + resolved args) so
-// the owner is never blind-tapping a pending_id. Rendered as plain text (no
-// parse mode) so a user-controlled summary fragment can't inject markdown.
-//
-// Callback data is "am:<pendingID>:confirm" / "am:<pendingID>:cancel"; the
-// owner tap is gate-authenticated in handleCallback before it resolves.
-func (b *Bot) BroadcastMutationConfirm(ctx context.Context, target PermissionTarget, pendingID, summary string) (int, error) {
-	if target.ChatID == 0 {
-		return 0, errors.New("no target chat for mutation confirm")
-	}
-
-	text := "🛠 Admin action awaiting your approval:\n\n" + summary
-
-	keyboard := tu.InlineKeyboard(tu.InlineKeyboardRow(
-		tu.InlineKeyboardButton("✅ Confirm").WithCallbackData("am:"+pendingID+":confirm"),
-		tu.InlineKeyboardButton("❌ Cancel").WithCallbackData("am:"+pendingID+":cancel"),
-	))
-
-	p := tu.Message(tu.ID(target.ChatID), text).WithReplyMarkup(keyboard)
-	if target.ThreadID > 0 {
-		p = p.WithMessageThreadID(target.ThreadID)
-	}
-
-	m, err := b.api.SendMessage(ctx, p)
-	if err != nil {
-		slog.Error("mutation confirm send failed", "chat_id", target.ChatID, "thread_id", target.ThreadID, "err", err)
-		return 0, fmt.Errorf("send mutation confirm: %w", err)
-	}
-
-	slog.Info("mutation confirm sent", "chat_id", target.ChatID, "message_id", m.MessageID, "pending_id", pendingID)
-
-	return m.MessageID, nil
 }
 
 // groupAnonymousBotID is Telegram's well-known stand-in user that authors all

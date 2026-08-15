@@ -293,17 +293,16 @@ const forumChat = "-1001234567890"
 
 func forumChatIDInt() int64 { return -1001234567890 }
 
-func TestRouteToWorkdirOwner_prefersTopicOwnerSkipsAdmin(t *testing.T) {
+func TestRouteToWorkdirOwner_prefersTopicOwner(t *testing.T) {
 	r := NewRouter()
 	// Registration order is oldest→newest; lru is most-recent-first.
 	r.Register(&Shim{ID: "no-topic", Workdir: "/wd"})
-	r.Register(&Shim{ID: "admin", Workdir: "/wd", Role: "admin"})
 	r.Register(&Shim{ID: "owner", Workdir: "/wd"})
 	r.BindTopic("owner", 759) // owner now has TopicID > 0
 
 	got, ok := r.RouteToWorkdirOwner("/wd")
 	require.True(t, ok)
-	assert.Equal(t, "owner", got.ID, "a topic-owning shim wins over a topicless one and over admin")
+	assert.Equal(t, "owner", got.ID, "a topic-owning shim wins over a topicless one")
 }
 
 func TestRouteToWorkdirOwner_fallsBackToTopiclessShim(t *testing.T) {
@@ -318,10 +317,10 @@ func TestRouteToWorkdirOwner_fallsBackToTopiclessShim(t *testing.T) {
 func TestRouteToWorkdirOwner_noMatch(t *testing.T) {
 	r := NewRouter()
 	r.Register(&Shim{ID: "a", Workdir: "/other"})
-	r.Register(&Shim{ID: "admin-only", Workdir: "/wd", Role: "admin"})
+	r.Register(&Shim{ID: "other", Workdir: "/elsewhere"})
 
 	_, ok := r.RouteToWorkdirOwner("/wd")
-	assert.False(t, ok, "no non-admin shim serves /wd")
+	assert.False(t, ok, "no shim serves /wd")
 
 	_, ok = r.RouteToWorkdirOwner("")
 	assert.False(t, ok, "empty workdir never matches")
@@ -1274,4 +1273,22 @@ func TestRouterSetLabelPushesNotify(t *testing.T) {
 	m, ok := gotParams.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "x", m["label"])
+}
+
+func TestRouteInbound_DMFallsThroughToUserShim(t *testing.T) {
+	r := NewRouter()
+	r.Register(&Shim{ID: "user1", Notify: func(string, any) error { return nil }})
+
+	got, ok := r.RouteInbound("4242")
+
+	require.True(t, ok, "a DM with no pin and no owner must reach the only connected shim")
+	assert.Equal(t, "user1", got.ID)
+}
+
+func TestRouteInbound_DMWithNoShimsFails(t *testing.T) {
+	r := NewRouter()
+
+	_, ok := r.RouteInbound("4242")
+
+	assert.False(t, ok, "no connected shims means the message is dropped, not parked")
 }
