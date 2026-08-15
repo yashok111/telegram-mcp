@@ -656,8 +656,8 @@ func TestHandleHelloOpensShimLogBeforeReturn(t *testing.T) {
 // ipc.Server.notifyHandlers is unexported; Register takes *ipc.Server (not an
 // interface), so the registered closure cannot be extracted or intercepted in
 // this package's tests without either a live unix socket or an export_test.go
-// shim that the task scope doesn't allow. Exercised end-to-end by
-// integration_test.go, which drives a full daemon round-trip over the socket.
+// shim that the task scope doesn't allow. No surviving test drives it, so the
+// graceful-vs-crash classification in Daemon.OnDisconnect is uncovered.
 
 func TestHandleHelloRecordsWorkdirAndSession(t *testing.T) {
 	h, _, _, _ := newHandlersFixture(t)

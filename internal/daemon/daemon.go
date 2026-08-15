@@ -98,11 +98,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 		// A shim that exits cleanly sends goodbye first (HandleNotify stamps
 		// metaGoodbye). Absence of the flag means a likely crash.
-		if _, graceful := c.Meta.Load(metaGoodbye); !graceful {
+		_, graceful := c.Meta.Load(metaGoodbye)
+		if !graceful {
 			slog.Warn("shim disconnected without goodbye (possible crash)", "shim_id", id)
 		}
 
-		slog.Info("shim disconnected", "shim_id", id)
+		slog.Info("shim disconnected", "shim_id", id, "graceful", graceful)
 	})
 
 	server.Handle(ipc.MethodHello, func(hctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {

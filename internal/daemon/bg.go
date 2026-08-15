@@ -537,8 +537,8 @@ func (r *BgRunner) finalizeFailure(ctx context.Context, chatID string, msgID int
 }
 
 // finalizeCancelled finalizes a task that ended because ctx was cancelled
-// (timeout or /bg cancel). It does NOT emit bg_failed — cancellation is an
-// expected terminal state, not an anomaly. Shared by the ctx.Done() branch and
+// (timeout or /bg cancel). It reports BgStatusCancelled, never BgStatusFailed —
+// cancellation is an expected terminal state. Shared by the ctx.Done() branch and
 // the doneCh branch's ctx-cancelled guard (the stream can error *because* the
 // process was killed, and select may pick doneCh over ctx.Done in that race).
 func (r *BgRunner) finalizeCancelled(ctx context.Context, chatID string, msgID int, id string, startedAt time.Time) {
@@ -549,7 +549,7 @@ func (r *BgRunner) finalizeCancelled(ctx context.Context, chatID string, msgID i
 
 // finalizeStreamFailure routes a terminal stream outcome (error, or no result
 // event) to the cancelled or failed path depending on whether ctx was
-// cancelled. A cancellation never emits bg_failed. Extracted from runTask so it
+// cancelled. A cancellation is never reported as a failure. Extracted from runTask so it
 // stays under the cyclomatic-complexity cap.
 func (r *BgRunner) finalizeStreamFailure(ctx context.Context, chatID string, msgID int, id string, startedAt time.Time, err error, stderrTail string) {
 	if ctx.Err() != nil {

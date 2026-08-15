@@ -932,3 +932,38 @@ func TestSpawnRunner_SpawnStartConfirmation_threadedIntoTopic(t *testing.T) {
 
 	cancelAndDrain(t, r, id)
 }
+
+// The non-zero-exit branch lost its only coverage when the anomaly EventBus was
+// removed. Assert the observable outcome instead: the slot is released and the
+// task leaves List() with a failed terminal status.
+func TestSpawnRunner_CrashedProcessReleasesSlot(t *testing.T) {
+	waitCh := make(chan error, 1)
+	proc := &fakeSpawnProcess{
+		pid:     7777,
+		waitCh:  waitCh,
+		closeCh: make(chan struct{}),
+		signal:  func(_ os.Signal) error { return nil },
+		closeFn: func() error { return nil },
+	}
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+	}, newRecordingBot(100), cmder)
+
+	_, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", Workdir: "/x"})
+	require.NoError(t, err)
+
+	waitCh <- errors.New("exit status 1")
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+
+	// The freed slot must be reusable — a crash that leaked it would block the
+	// next /spawn with ErrTooManySpawnTasks.
+	_, err = r.reserveSlot("u2", 0)
+	require.NoError(t, err)
+}

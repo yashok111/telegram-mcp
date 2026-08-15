@@ -649,3 +649,107 @@ func TestBgRunner_RunTaskDedupesThinkingTokensEnv(t *testing.T) {
 	assert.Equal(t, 1, matches, "exactly one MAX_THINKING_TOKENS entry expected; parent's value must be filtered before append")
 	assert.Contains(t, call.env, "MAX_THINKING_TOKENS=16000", "the request-supplied value must win")
 }
+
+// The bg failure paths lost their only coverage when the anomaly EventBus was
+// removed (the old tests asserted on emitted events). These assert the
+// user-visible outcome instead: the final message edit and the released slot.
+func TestBgRunner_StartFailureReportsFailure(t *testing.T) {
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return nil, errors.New("exec not found")
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(42, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            time.Second,
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, fb.lastEditedText(), "❌ Task "+bot.MdCode(id))
+	assert.Contains(t, fb.lastEditedText(), "failed to start")
+}
+
+func TestBgRunner_StreamFailureReportsFailure(t *testing.T) {
+	pr, pw := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	waitCh := make(chan error, 1)
+
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return &fakeProcess{
+			stdout: pr,
+			stderr: stderrR,
+			waitCh: waitCh,
+			signal: func(os.Signal) error { return nil },
+		}, nil
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(55, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            5 * time.Second,
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	go func() {
+		defer pw.Close()
+		defer stderrW.Close()
+	}()
+
+	waitCh <- nil
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, fb.lastEditedText(), "❌ Task "+bot.MdCode(id), "a stream that ends with no result is a failure")
+}
+
+// A cancelled task must terminate as cancelled, never as failed — the ctx.Err()
+// guard in finalizeStreamFailure. The stream errors *because* the process was
+// killed, so select may pick doneCh over ctx.Done in that race.
+func TestBgRunner_CancelReportsCancelledNotFailed(t *testing.T) {
+	pr, pw := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	waitCh := make(chan error, 1)
+
+	cmder := &fakeCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (Process, error) {
+		return &fakeProcess{
+			stdout: pr,
+			stderr: stderrR,
+			waitCh: waitCh,
+			signal: func(os.Signal) error { return nil },
+		}, nil
+	}}
+	fb := newLockedBot()
+	fb.setSendRet(77, nil)
+
+	r := NewBgRunnerWithDeps(BgConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		EditThrottle:       50 * time.Millisecond,
+		Timeout:            5 * time.Second,
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.BgSpawnRequest{Prompt: "x", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+	require.NoError(t, r.Cancel(id))
+
+	go func() {
+		_ = pw.CloseWithError(errors.New("killed"))
+		_ = stderrW.Close()
+	}()
+
+	waitCh <- errors.New("signal: killed")
+
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, fb.lastEditedText(), "🛑 Task "+bot.MdCode(id), "cancellation must not be reported as a failure")
+	assert.NotContains(t, fb.lastEditedText(), "❌")
+}
