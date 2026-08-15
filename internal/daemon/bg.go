@@ -62,7 +62,6 @@ type BgRunner struct {
 	mu      sync.Mutex
 	tasks   map[string]*bgTask
 	perUser map[string][]time.Time
-	sink    EventSink
 }
 
 var (
@@ -209,24 +208,6 @@ func (r *BgRunner) reserveSlot(userID string) (string, error) {
 	return id, nil
 }
 
-// SetEventSink wires the anomaly-event sink (nil disables emission).
-func (r *BgRunner) SetEventSink(s EventSink) {
-	r.mu.Lock()
-	r.sink = s
-	r.mu.Unlock()
-}
-
-// emit sends e if a sink is wired (reads under lock; Emit is non-blocking).
-func (r *BgRunner) emit(e Event) {
-	r.mu.Lock()
-	sink := r.sink
-	r.mu.Unlock()
-
-	if sink != nil {
-		sink.Emit(e)
-	}
-}
-
 func (r *BgRunner) releaseSlot(id string, finalStatus BgTaskStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -366,8 +347,8 @@ func (r *BgRunner) runTask(ctx context.Context, cancel context.CancelFunc, id st
 
 	proc, err := r.cmd.Start(ctx, workdir, r.cfg.ClaudeBin, args, env)
 	if err != nil {
+		slog.Warn("bg task failed to start", "task_id", id, "err", err)
 		r.editFinal(ctx, req.ChatID, progressMsgID, id, bgStartFailedMsg(id, err), 0)
-		r.emit(Event{Type: "bg_failed", Severity: "warning", Subject: id, Detail: fmt.Sprintf("failed to start: %v", err)})
 		r.releaseSlot(id, BgStatusFailed)
 
 		return
@@ -551,7 +532,7 @@ func (r *BgRunner) finalizeFailure(ctx context.Context, chatID string, msgID int
 		}
 	}
 
-	r.emit(Event{Type: "bg_failed", Severity: "warning", Subject: id, Detail: err.Error()})
+	slog.Warn("bg task failed", "task_id", id, "err", err)
 	r.releaseSlot(id, BgStatusFailed)
 }
 

@@ -198,30 +198,6 @@ func runDaemon(stateDir string) error {
 		notifier.SetAutoSpawn(spawnRunner, resolveDurationEnv("TELEGRAM_FORUM_AUTOSPAWN_COOLDOWN", 90*time.Second))
 	}
 
-	// Anomaly-event bus: persists to <stateDir>/admin/events.jsonl and pushes
-	// NotifyAdminEvent to the connected admin-agent. It is the EventSink for the
-	// gate (handlers), spawn, and bg emit sites; the daemon wires the handlers
-	// sink itself, so only the runner sinks are set here.
-	eventBus := daemonpkg.NewEventBus(daemonpkg.NewEventLog(stateDir), router.AdminNotify)
-	spawnRunner.SetEventSink(eventBus)
-	bgRunner.SetEventSink(eventBus)
-
-	// Error-burst detector: a slog handler that taps ERROR records into the bus.
-	// Disabled when threshold <= 0. Wrapping the current default makes it
-	// outermost so it counts every record before the shim-log fan-out delegates.
-	if th, win, cd, ok := resolveErrorBurstConfig(); ok {
-		slog.SetDefault(slog.New(daemonpkg.NewErrorBurstHandler(slog.Default().Handler(), eventBus, th, win, cd)))
-	}
-
-	// Daily sitrep: a daemon-side ticker that pings the admin-agent to produce an
-	// owner digest. AdminNotify no-ops when no admin is connected. `=0` disables.
-	sitrep := daemonpkg.NewSitrepTicker(
-		resolveDurationEnv("TELEGRAM_ADMIN_SITREP_INTERVAL", 24*time.Hour),
-		func() {
-			router.AdminNotify(ipc.NotifyAdminSitrep, map[string]any{"ts": time.Now().UTC().Format(time.RFC3339)})
-		},
-	)
-
 	idleTimeout := resolveIdleTimeout()
 
 	inboxTTL := resolveDurationEnv("TELEGRAM_INBOX_TTL", 7*24*time.Hour)
@@ -260,8 +236,6 @@ func runDaemon(stateDir string) error {
 		OrphanSweep: orphanSweep,
 		ShimLogs:    shimLogs,
 		ShimsSweep:  daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
-		EventBus:    eventBus,
-		Sitrep:      sitrep,
 		IdleTimeout: idleTimeout,
 		InboxTTL:    inboxTTL,
 		CorruptTTL:  corruptTTL,
@@ -511,42 +485,6 @@ func resolveDurationEnv(name string, def time.Duration) time.Duration {
 	}
 
 	return d
-}
-
-// resolveErrorBurstConfig reads the error-burst detector tuning from env.
-// Returns ok=false (detector disabled) when the threshold is <= 0. Defaults:
-// 20 ERROR records within a 1m window trigger a burst event, rate-limited to
-// once per 5m cooldown.
-func resolveErrorBurstConfig() (threshold int, window, cooldown time.Duration, ok bool) {
-	threshold = 20
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_ERRBURST_THRESHOLD"); raw != "" {
-		n, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil {
-			slog.Warn("invalid TELEGRAM_ADMIN_ERRBURST_THRESHOLD, using default", "value", raw, "default", threshold)
-		} else {
-			threshold = n
-		}
-	}
-
-	if threshold <= 0 {
-		return 0, 0, 0, false
-	}
-
-	// A zero/negative window would evict every stamp on each record (cutoff ==
-	// now), silently neutering the detector while ok stays true. Clamp both to
-	// their defaults — threshold is the only intended disable knob.
-	window = resolveDurationEnv("TELEGRAM_ADMIN_ERRBURST_WINDOW", time.Minute)
-	if window <= 0 {
-		window = time.Minute
-	}
-
-	cooldown = resolveDurationEnv("TELEGRAM_ADMIN_ERRBURST_COOLDOWN", 5*time.Minute)
-	if cooldown <= 0 {
-		cooldown = 5 * time.Minute
-	}
-
-	return threshold, window, cooldown, true
 }
 
 // spawnIdleLookup walks the live Router snapshot to find the shim paired with a

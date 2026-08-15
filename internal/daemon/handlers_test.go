@@ -652,33 +652,12 @@ func TestHandleHelloOpensShimLogBeforeReturn(t *testing.T) {
 	assert.Contains(t, string(raw), `"probe":1`, "open handle must be writable")
 }
 
-func TestGateDeniedEmitsUnauthorizedDMEvent(t *testing.T) {
-	h, _, _, _ := newHandlersFixture(t)
-	sink := &recordingSink{}
-	h.SetEventSink(sink)
-
-	rpcErr := h.gate("999")
-	require.NotNil(t, rpcErr)
-	assert.Equal(t, ipc.CodeNotAllowlisted, rpcErr.Code)
-	assert.Equal(t, 1, sink.typeCount("unauthorized_dm"))
-}
-
-func TestGateAllowedDoesNotEmitEvent(t *testing.T) {
-	h, _, _, _ := newHandlersFixture(t)
-	sink := &recordingSink{}
-	h.SetEventSink(sink)
-
-	rpcErr := h.gate("123")
-	assert.Nil(t, rpcErr)
-	assert.Equal(t, 0, sink.typeCount("unauthorized_dm"))
-}
-
 // TestGoodbyeNotifyStampsMetaFlag — skipped at unit level.
 // ipc.Server.notifyHandlers is unexported; Register takes *ipc.Server (not an
 // interface), so the registered closure cannot be extracted or intercepted in
 // this package's tests without either a live unix socket or an export_test.go
-// shim that the task scope doesn't allow. Covered by Wave 3 integration test
-// (admin_ipc_test.go) which drives a full daemon round-trip over the socket.
+// shim that the task scope doesn't allow. Exercised end-to-end by
+// integration_test.go, which drives a full daemon round-trip over the socket.
 
 func TestHandleHelloRecordsWorkdirAndSession(t *testing.T) {
 	h, _, _, _ := newHandlersFixture(t)

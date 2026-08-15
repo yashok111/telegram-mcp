@@ -797,59 +797,6 @@ func TestSpawnRunner_SpawnDedupesThinkingTokensEnv(t *testing.T) {
 	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
 }
 
-func TestSpawnRunner_CrashedProcessEmitsSpawnCrashedEvent(t *testing.T) {
-	waitCh := make(chan error, 1)
-	proc := &fakeSpawnProcess{
-		pid:     7777,
-		waitCh:  waitCh,
-		closeCh: make(chan struct{}),
-		signal:  func(_ os.Signal) error { return nil },
-		closeFn: func() error { return nil },
-	}
-	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
-		return proc, nil
-	}}
-
-	r := NewSpawnRunnerWithDeps(SpawnConfig{
-		MaxParallel:        1,
-		RatePerHourPerUser: 99,
-		HardTimeout:        time.Minute,
-	}, newRecordingBot(100), cmder)
-
-	sink := &recordingSink{}
-	r.SetEventSink(sink)
-
-	_, err := r.Spawn(context.Background(), bot.SpawnRequest{ChatID: "1", UserID: "u", Workdir: "/x"})
-	require.NoError(t, err)
-
-	waitCh <- errors.New("exit status 1")
-
-	require.Eventually(t, func() bool {
-		return sink.typeCount("spawn_crashed") == 1
-	}, 3*time.Second, 20*time.Millisecond)
-}
-
-func TestSpawnRunner_SweepIdle_EmitsSpawnIdleKilledEvent(t *testing.T) {
-	r := NewSpawnRunner(SpawnConfig{
-		MaxParallel: 5, RatePerHourPerUser: 99, HardTimeout: time.Hour, IdleTimeout: time.Hour,
-	})
-
-	sink := &recordingSink{}
-	r.SetEventSink(sink)
-
-	id, err := r.reserveSlot("u", 0)
-	require.NoError(t, err)
-
-	r.mu.Lock()
-	r.tasks[id].info.StartedAt = time.Now().Add(-2 * time.Hour)
-	r.tasks[id].cancel = func() {}
-	r.mu.Unlock()
-
-	r.sweepIdle(time.Now())
-
-	assert.Equal(t, 1, sink.typeCount("spawn_idle_killed"))
-}
-
 func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
 
 func indexOf(s, sub string) int {

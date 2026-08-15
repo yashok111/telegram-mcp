@@ -36,13 +36,6 @@ type Daemon struct {
 	ShimLogs    *ShimLogs      // nil disables per-shim log files
 	ShimsSweep  *ShimsSweep    // nil disables shims/*.log retention sweep
 
-	// EventBus persists anomaly events and pushes them to the admin-agent.
-	// nil disables event observability entirely.
-	EventBus *EventBus
-	// Sitrep fires the daily owner-digest trigger to the admin-agent on an
-	// interval. nil disables.
-	Sitrep *SitrepTicker
-
 	IdleTimeout time.Duration // 0 disables
 	InboxTTL    time.Duration // 0 disables inbox sweep
 	CorruptTTL  time.Duration // 0 disables access.json.corrupt-* sweep
@@ -78,10 +71,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	handlers.SetShimLogs(d.ShimLogs)
 	handlers.SetHeader(d.Header)
 
-	if d.EventBus != nil {
-		handlers.SetEventSink(d.EventBus)
-	}
-
 	handlers.Register(server)
 
 	server.OnDisconnect(func(c *ipc.Conn) {
@@ -108,20 +97,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 
 		// A shim that exits cleanly sends goodbye first (HandleNotify stamps
-		// metaGoodbye). Absence of the flag means a likely crash — surface it as
-		// an anomaly.
-		_, graceful := c.Meta.Load(metaGoodbye)
-
-		if d.EventBus != nil && !graceful {
-			d.EventBus.Emit(Event{
-				Type:     "shim_disconnected",
-				Severity: "warning",
-				Subject:  id,
-				Detail:   "shim disconnected without goodbye (possible crash)",
-			})
+		// metaGoodbye). Absence of the flag means a likely crash.
+		if _, graceful := c.Meta.Load(metaGoodbye); !graceful {
+			slog.Warn("shim disconnected without goodbye (possible crash)", "shim_id", id)
 		}
 
-		slog.Info("shim disconnected", "shim_id", id, "graceful", graceful)
+		slog.Info("shim disconnected", "shim_id", id)
 	})
 
 	server.Handle(ipc.MethodHello, func(hctx context.Context, c *ipc.Conn, params json.RawMessage) (any, *ipc.Error) {
@@ -260,13 +241,6 @@ func (d *Daemon) startBackgroundWorkers(wg *sync.WaitGroup) {
 		wg.Go(func() { d.Typing.Run(d.dctx) })
 	}
 
-	if d.EventBus != nil {
-		wg.Go(func() { d.EventBus.Run(d.dctx) })
-	}
-
-	if d.Sitrep != nil {
-		wg.Go(func() { d.Sitrep.Run(d.dctx) })
-	}
 }
 
 // headerDisconnect flips the disconnecting shim's topic header to ⚪ before the

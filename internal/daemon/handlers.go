@@ -44,7 +44,6 @@ type Handlers struct {
 	router   *Router
 	typing   *TypingTracker
 	shimLogs *ShimLogs
-	sink     EventSink
 	header   *HeaderManager
 }
 
@@ -63,11 +62,6 @@ func (h *Handlers) SetShimLogs(logs *ShimLogs) {
 	h.shimLogs = logs
 }
 
-// SetEventSink wires the anomaly-event sink (nil disables emission). Must be
-// called before server.Listen — same unsynchronized-write rule as
-// SetShimLogs/SetAdminToken.
-func (h *Handlers) SetEventSink(s EventSink) { h.sink = s }
-
 // SetHeader wires the topic-header manager (nil disables header state updates).
 // Must be called before server.Listen — same unsynchronized-write rule as
 // SetShimLogs/SetAdminToken.
@@ -78,12 +72,6 @@ func (h *Handlers) SetHeader(m *HeaderManager) { h.header = m }
 // topic.
 func (h *Handlers) headerState(shimID string, st HeaderState, tool string) {
 	setShimHeaderState(h.header, h.router, shimID, st, tool)
-}
-
-func (h *Handlers) emit(e Event) {
-	if h.sink != nil {
-		h.sink.Emit(e)
-	}
 }
 
 func (h *Handlers) shimID(c *ipc.Conn) string {
@@ -127,7 +115,6 @@ func (h *Handlers) gate(chatID string) *ipc.Error {
 	}
 
 	slog.Warn("gate denied: chat not allowlisted", "chat_id", chatID)
-	h.emit(Event{Type: "unauthorized_dm", Severity: "warning", Subject: chatID, Detail: "chat not allowlisted (ipc handler gate)"})
 
 	data, _ := json.Marshal(map[string]string{"chat_id": chatID})
 
