@@ -72,10 +72,6 @@ const (
 	// when /topic close kills a non-spawned shim. Shim cancels its run
 	// context, drains the notifier worker, and exits with status 0.
 	NotifyShutdown = "notifications/shutdown"
-	// NotifyAdminEvent is a daemon→admin-agent push for an anomaly event.
-	NotifyAdminEvent = "notifications/admin/event"
-	// NotifyAdminSitrep is a daemon→admin-agent push for a daily sitrep trigger.
-	NotifyAdminSitrep = "notifications/admin/sitrep"
 )
 
 // Custom error codes (JSON-RPC reserves -32000..-32099 for application errors).

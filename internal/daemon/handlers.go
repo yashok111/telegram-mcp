@@ -64,7 +64,7 @@ func (h *Handlers) SetShimLogs(logs *ShimLogs) {
 
 // SetHeader wires the topic-header manager (nil disables header state updates).
 // Must be called before server.Listen — same unsynchronized-write rule as
-// SetShimLogs/SetAdminToken.
+// SetShimLogs.
 func (h *Handlers) SetHeader(m *HeaderManager) { h.header = m }
 
 // headerState pushes a lifecycle-state change to the topic header owned by the
