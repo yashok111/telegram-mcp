@@ -194,13 +194,13 @@ func TestOrphanSweep_SweepDuplicates_closesDuplicateKeepsCanonical(t *testing.T)
 }
 
 // No duplicate to reap: each workdir owns exactly one canonical topic, and a
-// label-keyed topic (admin) is never treated as a duplicate of its workdir.
+// label-keyed topic is never treated as a duplicate of its workdir.
 func TestOrphanSweep_SweepDuplicates_noopWithoutDuplicate(t *testing.T) {
 	store := access.NewStore(t.TempDir(), false)
 	seedTopic(t, store, access.TopicMeta{ThreadID: 631, Workdir: "/p/vpn", LockedBy: "x"})
-	seedTopic(t, store, access.TopicMeta{ThreadID: 427, Workdir: "/home/y", Label: "admin", LockedBy: "adm"})
+	seedTopic(t, store, access.TopicMeta{ThreadID: 427, Workdir: "/home/y", Label: "ops", LockedBy: "opsshim"})
 	require.NoError(t, store.Mutate(func(st *access.State) bool {
-		st.TopicsByReuseKey = map[string]int{"workdir:/p/vpn": 631, "label:admin": 427, "workdir:/home/y": 800}
+		st.TopicsByReuseKey = map[string]int{"workdir:/p/vpn": 631, "label:ops": 427, "workdir:/home/y": 800}
 
 		return true
 	}))

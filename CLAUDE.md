@@ -227,7 +227,7 @@ The agent must know its shim alias from turn 1 so `@s2 do X` mentions work witho
 - `internal/daemon/integration_test.go` runs the full triangle: real `ipc.Server`, two real `Shim`s, a fake `botSurface`, and the real `Router`. Exercises reply/mention/affinity routing end-to-end.
 - Tests use `t.TempDir()` + `t.Setenv()` exclusively — no `os.Setenv` survives across tests.
 
-**Coverage (1359 tests, ~84% project LOC):** chunk 100% · access 93% · bot 89% · mcp 89% · daemon 84% · ipc 83% · shim 79% · cmd/server 46%. The cmd/server gap is `main.run()` wiring and `Bot.Poll()` (live Telegram) — not worth the scaffolding. Re-check with `go test -count=1 -cover ./...` before claiming a coverage change.
+**Coverage (1365 tests, ~84% project LOC):** chunk 100% · access 93% · bot 89% · mcp 89% · daemon 84% · ipc 83% · shim 79% · cmd/server 46%. The cmd/server gap is `main.run()` wiring and `Bot.Poll()` (live Telegram) — not worth the scaffolding. Re-check with `go test -count=1 -cover ./...` before claiming a coverage change.
 
 ## Rules
 
