@@ -86,10 +86,6 @@ func (b *recordingBot) SendAskPrompt(_ context.Context, _ bot.PermissionTarget, 
 func (b *recordingBot) SendPermissionPrompt(_ context.Context, _ bot.PermissionTarget, _, _, _ string) {
 }
 
-func (b *recordingBot) BroadcastMutationConfirm(_ context.Context, _ bot.PermissionTarget, _, _ string) (int, error) {
-	return 0, nil
-}
-
 func (b *recordingBot) sent() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()

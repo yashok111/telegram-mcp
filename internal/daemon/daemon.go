@@ -52,10 +52,6 @@ type Daemon struct {
 	// disables the admin-agent path entirely (no shim can claim AdminAlias).
 	AdminToken string
 
-	// AdminMutator backs the admin.mutate IPC method (Tier-2 auto-apply /
-	// Tier-3 owner-confirm). nil disables admin mutations entirely.
-	AdminMutator *AdminMutator
-
 	IdleTimeout time.Duration // 0 disables
 	InboxTTL    time.Duration // 0 disables inbox sweep
 	CorruptTTL  time.Duration // 0 disables access.json.corrupt-* sweep
@@ -91,7 +87,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	handlers.SetShimLogs(d.ShimLogs)
 	handlers.SetAdminToken(d.AdminToken)
 	handlers.SetRunners(d.SpawnRunner, d.BgRunner)
-	handlers.SetMutator(d.AdminMutator)
 	handlers.SetHeader(d.Header)
 
 	if d.EventBus != nil {
@@ -288,10 +283,6 @@ func (d *Daemon) startBackgroundWorkers(wg *sync.WaitGroup) {
 
 	if d.Sitrep != nil {
 		wg.Go(func() { d.Sitrep.Run(d.dctx) })
-	}
-
-	if d.AdminMutator != nil {
-		wg.Go(func() { d.AdminMutator.Run(d.dctx) })
 	}
 }
 

@@ -222,8 +222,6 @@ func runDaemon(stateDir string) error {
 		},
 	)
 
-	adminMutator := wireAdminMutator(notifier, stateDir, store, router, tgBot, spawnRunner, bgRunner)
-
 	idleTimeout := resolveIdleTimeout()
 
 	inboxTTL := resolveDurationEnv("TELEGRAM_INBOX_TTL", 7*24*time.Hour)
@@ -264,7 +262,6 @@ func runDaemon(stateDir string) error {
 		ShimsSweep:   daemonpkg.NewShimsSweep(filepath.Join(stateDir, "shims"), shimLogs, shimLogTTL, time.Hour),
 		SpawnRunner:  spawnRunner,
 		BgRunner:     bgRunner,
-		AdminMutator: adminMutator,
 		EventBus:     eventBus,
 		Sitrep:       sitrep,
 		IdleTimeout:  idleTimeout,
@@ -568,70 +565,6 @@ func spawnIdleLookup(router *daemonpkg.Router) func(string) (time.Duration, bool
 
 		return 0, false
 	}
-}
-
-// wireAdminMutator builds the PR-3 admin mutation engine from env config and
-// wires the owner-tap resolve seam (notifier.SetMutator). Returned for the
-// Daemon.AdminMutator field. Extracted from runDaemon to keep it under funlen.
-func wireAdminMutator(notifier *daemonpkg.Notifier, stateDir string, store *access.Store, router *daemonpkg.Router, b *bot.Bot, spawn *daemonpkg.SpawnRunner, bg *daemonpkg.BgRunner) *daemonpkg.AdminMutator {
-	denyTools, mutateRate, pendingTTL := resolveAdminMutateConfig()
-
-	m := daemonpkg.NewAdminMutator(daemonpkg.AdminMutateConfig{
-		Store:       store,
-		Router:      router,
-		Bot:         b,
-		Spawns:      spawn,
-		Bgs:         bg,
-		Pending:     daemonpkg.NewPendingStore(stateDir),
-		Audit:       daemonpkg.NewAdminAudit(stateDir, daemonpkg.DefaultAdminAuditMaxBytes),
-		Denylist:    denyTools,
-		RatePerHour: mutateRate,
-		PendingTTL:  pendingTTL,
-	})
-	notifier.SetMutator(m)
-
-	return m
-}
-
-// resolveAdminMutateConfig reads the admin-mutation tuning from env. Defaults:
-// no denylist, 60 mutations/hour, 5-minute pending-confirm TTL.
-//
-//   - TELEGRAM_ADMIN_DENY_TOOLS: csv of tool names hard-disabled (rejected
-//     before tier logic — even owner-tap is unavailable for a denied tool).
-//   - TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR: global cap (single admin). <=0 /
-//     invalid → default.
-//   - TELEGRAM_ADMIN_PENDING_TTL: how long a Tier-3 confirm waits before
-//     expiring. `=0` or invalid keeps the default (AC1), unlike disable-style
-//     envs — a confirm must always have a finite TTL.
-func resolveAdminMutateConfig() (denyTools []string, ratePerHour int, pendingTTL time.Duration) {
-	ratePerHour = 60
-	pendingTTL = 5 * time.Minute
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_DENY_TOOLS"); raw != "" {
-		for t := range strings.SplitSeq(raw, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				denyTools = append(denyTools, t)
-			}
-		}
-	}
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR"); raw != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
-			ratePerHour = n
-		} else {
-			slog.Warn("invalid TELEGRAM_ADMIN_MUTATE_RATE_PER_HOUR, using default", "value", raw, "default", ratePerHour)
-		}
-	}
-
-	if raw := os.Getenv("TELEGRAM_ADMIN_PENDING_TTL"); raw != "" {
-		if d, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil && d > 0 {
-			pendingTTL = d
-		} else {
-			slog.Warn("invalid or zero TELEGRAM_ADMIN_PENDING_TTL, keeping default", "value", raw, "default", pendingTTL)
-		}
-	}
-
-	return denyTools, ratePerHour, pendingTTL
 }
 
 // applyForumChatID reads TELEGRAM_FORUM_CHAT_ID at daemon startup and merges

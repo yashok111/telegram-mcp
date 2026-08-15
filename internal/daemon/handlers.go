@@ -38,7 +38,6 @@ type botSurface interface {
 	DownloadFile(ctx context.Context, fileID string) (string, error)
 	SendPermissionPrompt(ctx context.Context, target bot.PermissionTarget, prefix, requestID, toolName string)
 	SendAskPrompt(ctx context.Context, target bot.PermissionTarget, prefix, qid, question string, options []string)
-	BroadcastMutationConfirm(ctx context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error)
 }
 
 type Handlers struct {
@@ -51,7 +50,6 @@ type Handlers struct {
 	spawns     spawnLister
 	bgs        bgLister
 	sink       EventSink
-	mutator    *AdminMutator
 	header     *HeaderManager
 }
 
@@ -82,11 +80,6 @@ func (h *Handlers) SetAdminToken(token string) {
 // called before server.Listen — same unsynchronized-write rule as
 // SetShimLogs/SetAdminToken.
 func (h *Handlers) SetEventSink(s EventSink) { h.sink = s }
-
-// SetMutator wires the admin mutation engine (nil disables admin.mutate). Must
-// be called before server.Listen — same unsynchronized-write rule as
-// SetShimLogs/SetAdminToken.
-func (h *Handlers) SetMutator(m *AdminMutator) { h.mutator = m }
 
 // SetHeader wires the topic-header manager (nil disables header state updates).
 // Must be called before server.Listen — same unsynchronized-write rule as
@@ -556,7 +549,6 @@ func (h *Handlers) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodBotAskCancel, h.HandleAskCancel)
 	s.Handle(ipc.MethodDaemonPeers, h.HandlePeers)
 	s.Handle(ipc.MethodAdminSnapshot, h.HandleAdminSnapshot)
-	s.Handle(ipc.MethodAdminMutate, h.HandleAdminMutate)
 
 	s.HandleNotify(ipc.MethodGoodbye, func(_ context.Context, c *ipc.Conn, _ json.RawMessage) {
 		c.Meta.Store(metaGoodbye, true)

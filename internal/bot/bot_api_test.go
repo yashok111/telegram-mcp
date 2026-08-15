@@ -248,11 +248,8 @@ type noopNotifier struct {
 	mu        sync.Mutex
 	delivered []deliveredCall
 	resolved  []resolvedCall
-	mutations []mutationCall
 	asks      []askCall
 
-	mutateApplied   bool
-	mutateDetail    string
 	askNotDelivered bool // when set, ResolveAsk reports delivered=false
 }
 
@@ -260,11 +257,6 @@ type askCall struct {
 	qid  string
 	idx  int
 	user string
-}
-
-type mutationCall struct {
-	pendingID string
-	approve   bool
 }
 
 type deliveredCall struct {
@@ -305,15 +297,6 @@ func (n *noopNotifier) ResolveAsk(qid string, idx int, user string) bool {
 	n.asks = append(n.asks, askCall{qid, idx, user})
 
 	return !n.askNotDelivered
-}
-
-func (n *noopNotifier) ResolveMutation(_ context.Context, pendingID string, approve bool) (bool, string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	n.mutations = append(n.mutations, mutationCall{pendingID, approve})
-
-	return n.mutateApplied, n.mutateDetail
 }
 
 // ===== outbound API methods =====

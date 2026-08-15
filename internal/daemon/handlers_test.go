@@ -51,13 +51,6 @@ type fakeBot struct {
 	askSeen []askSeenCall // one per SendAskPrompt call
 
 	chatActions []struct{ chatID, action string }
-
-	mutationConfirms []struct {
-		target             bot.PermissionTarget
-		pendingID, summary string
-	}
-	confirmRetID  int
-	confirmRetErr error
 }
 
 func (b *fakeBot) SendMessage(_ context.Context, chatID, text string, opts bot.SendOpts) (int, error) {
@@ -115,15 +108,6 @@ type askSeenCall struct {
 
 func (b *fakeBot) SendAskPrompt(_ context.Context, target bot.PermissionTarget, prefix, qid, question string, options []string) {
 	b.askSeen = append(b.askSeen, askSeenCall{target, prefix, qid, question, options})
-}
-
-func (b *fakeBot) BroadcastMutationConfirm(_ context.Context, target bot.PermissionTarget, pendingID, summary string) (int, error) {
-	b.mutationConfirms = append(b.mutationConfirms, struct {
-		target             bot.PermissionTarget
-		pendingID, summary string
-	}{target, pendingID, summary})
-
-	return b.confirmRetID, b.confirmRetErr
 }
 
 func newHandlersFixture(t *testing.T) (*Handlers, *fakeBot, *Router, *access.Store) {

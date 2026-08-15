@@ -634,46 +634,6 @@ func (r *Router) ResolveShimByPrefix(prefix string) (*Shim, error) {
 	return found, nil
 }
 
-// ResolveShim resolves an admin-supplied target to a single connected shim,
-// trying an exact alias match first (e.g. "s2", "admin") then a unique shim_id
-// prefix. Alias wins over a shim_id that merely starts with the same text.
-// Empty target, no match → ErrShimNotFound; multiple prefix matches →
-// ErrAmbiguousShimPrefix. Used by the admin mutate tools (label/pin/evict).
-func (r *Router) ResolveShim(target string) (*Shim, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if target == "" {
-		return nil, ErrShimNotFound
-	}
-
-	if id, ok := r.aliases[target]; ok {
-		if s, ok := r.shims[id]; ok {
-			return s, nil
-		}
-	}
-
-	// Prefix scan inlined rather than delegating to ResolveShimByPrefix: that
-	// method takes its own RLock, and sync.RWMutex is not reentrant.
-	var found *Shim
-
-	for id, s := range r.shims {
-		if strings.HasPrefix(id, target) {
-			if found != nil {
-				return nil, ErrAmbiguousShimPrefix
-			}
-
-			found = s
-		}
-	}
-
-	if found == nil {
-		return nil, ErrShimNotFound
-	}
-
-	return found, nil
-}
-
 // IsConnected reports whether a shim with the given id is currently
 // registered. Forum uses it to tell a live topic-lock holder from a stale
 // one (an id left on disk by a holder that disconnected, or by a prior
