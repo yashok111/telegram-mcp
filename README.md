@@ -41,10 +41,16 @@ Single Go binary. No node/bun runtime. Dies with its parent via
   final answer when done. Per-user rate limits, hard timeouts, cancellation.
 - **Daemon-spawned sessions (`/spawn`)** — DM `/spawn --in <dir>` and the
   daemon forks a fresh Claude Code client in that directory, hands you back a
-  new `@sN` alias to talk to.
+  new `@sN` alias to talk to. The directory must already be trusted by Claude
+  Code (opened interactively once): the daemon answers only the dev-channels
+  consent splash, never the workspace-trust prompt, so a spawn in a
+  never-opened directory sits at that prompt until the idle sweep reaps it.
+  Spawned sessions get Claude Code's 120s MCP auto-background cutoff lifted
+  (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0`) and a 10-minute `ask` bound.
 - **Per-chat effort (`/effort`)** — `/effort low|medium|high|xhigh|max|ultra`
   sets the model and thinking-token budget used by future `/spawn` and `/bg`
-  runs from that chat (`ultra` = Claude Fable 5). Persisted across daemon
+  runs from that chat (`high`…`max` = Claude Opus 5, `ultra` = Claude Fable
+  5.1). Persisted across daemon
   restarts.
 - **Live status feedback** — while the agent works the daemon keeps a
   "typing…" bubble alive and rotates a reaction emoji on your message; in
@@ -322,7 +328,7 @@ Knobs (env vars, all optional):
 | `TELEGRAM_STATE_DIR`              | `~/.claude/channels/telegram` | State root.                       |
 | `TELEGRAM_ACCESS_MODE`            | `dynamic`              | `static` freezes `access.json` at boot. |
 | `TELEGRAM_DAEMON_IDLE_EXIT`       | `604800` (7 days)      | Idle exit seconds. `0` or negative disables. |
-| `TELEGRAM_ASK_TIMEOUT`            | `110`                  | Seconds the `ask` tool blocks awaiting a tap. Never disables — `0`/negative/unparseable → default. Kept under Claude Code's 120s MCP auto-background cutoff (CC ≥ 2.1.212): past it CC detaches the call, tells the model to keep working, and delivers the tap as a late task notification. Raise this only together with `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` in the Claude Code session. |
+| `TELEGRAM_ASK_TIMEOUT`            | `110`                  | Seconds the `ask` tool blocks awaiting a tap. Never disables — `0`/negative/unparseable → default. Kept under Claude Code's 120s MCP auto-background cutoff (CC ≥ 2.1.212): past it CC detaches the call, tells the model to keep working, and delivers the tap as a late task notification. Raise this only together with `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` in the Claude Code session (`0` disables the cutoff). Daemon-spawned (`/spawn`) sessions get both stamped automatically (`600` + `0`) unless the daemon's own env sets them. |
 | `TELEGRAM_PREFIX_ALIAS`           | `1`                    | Inject `@sN:` source-alias prefix.       |
 | `TELEGRAM_FORUM_CHAT_ID`          | —                      | Supergroup id (`-100…`). Set to enable forum-topic mode. |
 | `TELEGRAM_TOPIC_ORPHAN_AFTER`     | `12h`                  | Idle time before a disconnected topic is auto-closed. `0` disables. |
