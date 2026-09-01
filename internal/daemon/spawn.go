@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"slices"
@@ -80,6 +79,11 @@ type SpawnCommander interface {
 	Start(ctx context.Context, workdir, bin string, args, env []string) (SpawnProcess, error)
 }
 
+const (
+	spawnPtyCols = 160
+	spawnPtyRows = 48
+)
+
 type execSpawnCommander struct{}
 
 func NewExecSpawnCommander() SpawnCommander { return execSpawnCommander{} }
@@ -93,6 +97,12 @@ func (execSpawnCommander) Start(ctx context.Context, workdir, bin string, args, 
 		return nil, fmt.Errorf("pty new: %w", err)
 	}
 
+	// Wide enough that the consent label renders on one line — the gate
+	// matches it as a contiguous byte string.
+	if err := p.Resize(spawnPtyCols, spawnPtyRows); err != nil {
+		slog.Warn("spawn pty resize failed", "err", err)
+	}
+
 	cmd := p.CommandContext(ctx, bin, args...)
 	cmd.Dir = workdir
 	cmd.Env = env
@@ -102,31 +112,12 @@ func (execSpawnCommander) Start(ctx context.Context, workdir, bin string, args, 
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
 
-	// Drain pty output to /dev/null so the kernel buffer never fills — would
-	// otherwise block claude's TUI writes and stall the session. The Read
-	// loop exits on Close (master fd closed) via io.EOF.
-	go func() { _, _ = io.Copy(io.Discard, p) }()
-
-	// Press Enter into the pty a handful of times to dismiss claude's
-	// `--dangerously-load-development-channels` consent prompt (default option
-	// "1. I am using this for local development" is preselected). Without
-	// this the spawned CC sits at the consent screen forever, the telegram
-	// plugin never loads, and no shim ever connects back to the daemon.
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-
-		for range 6 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, err := p.Write([]byte("\r")); err != nil {
-					return
-				}
-			}
-		}
-	}()
+	// Drain pty output so the kernel buffer never fills — would otherwise
+	// block claude's TUI writes and stall the session — and answer the
+	// `--dangerously-load-development-channels` consent splash when (and only
+	// when) it is drawn; see consentGate. The loop exits on Close (master fd
+	// closed) via io.EOF.
+	go drainPty(p, newConsentGate(), cmd.Process.Pid)
 
 	return &execSpawnProcess{cmd: cmd, pty: p}, nil
 }
@@ -478,6 +469,12 @@ func (r *SpawnRunner) Spawn(ctx context.Context, req bot.SpawnRequest) (string, 
 		env = append(env, "MAX_THINKING_TOKENS="+strconv.Itoa(req.ThinkingTokens))
 	}
 
+	for _, kv := range spawnChildEnvDefaults {
+		if !envHasKey(env, kv.key+"=") {
+			env = append(env, kv.key+"="+kv.value)
+		}
+	}
+
 	// Detached from caller's ctx — /spawn outlives the bot's request scope.
 	// HardTimeout is the only built-in cap; Cancel/Stop also flow here.
 	taskCtx, cancel := context.WithTimeout(context.Background(), r.cfg.HardTimeout)
@@ -564,6 +561,23 @@ func (r *SpawnRunner) TopicForSpawn(id string) (int, bool) {
 // every CC version). Only child launches strip these — cmd/server/self.go reads
 // them legitimately for the shim's own SessionStart correlation.
 var parentCCEnvPrefixes = []string{"CLAUDECODE=", "CLAUDE_CODE_SESSION_ID="}
+
+// spawnChildEnvDefaults are stamped into a spawned CC's env unless the
+// daemon's own env already carries the key (operator override wins).
+//
+// A daemon-spawned session is driven only from Telegram, so a blocking `ask`
+// there may legitimately wait far longer than CC's 120s MCP auto-background
+// cutoff (CC ≥2.1.212), which is what bounds user-launched shims at 110s.
+// CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0 disables the cutoff for the child, and
+// the shim inherits the widened TELEGRAM_ASK_TIMEOUT (seconds) through CC.
+var spawnChildEnvDefaults = []struct{ key, value string }{
+	{"CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "0"},
+	{"TELEGRAM_ASK_TIMEOUT", "600"},
+}
+
+func envHasKey(env []string, prefix string) bool {
+	return slices.ContainsFunc(env, func(e string) bool { return startsWith(e, prefix) })
+}
 
 // filterEnv returns a copy of env with any entry whose key matches one of the
 // prefixes removed. Used to drop a pre-existing TELEGRAM_SPAWN_ID /

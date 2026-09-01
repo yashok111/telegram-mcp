@@ -967,3 +967,63 @@ func TestSpawnRunner_CrashedProcessReleasesSlot(t *testing.T) {
 	_, err = r.reserveSlot("u2", 0)
 	require.NoError(t, err)
 }
+
+func TestSpawnRunner_LiftsMCPAutoBackgroundInChild(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "")
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "")
+	require.NoError(t, os.Unsetenv("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"))
+	require.NoError(t, os.Unsetenv("TELEGRAM_ASK_TIMEOUT"))
+
+	proc := newFakeSpawnProcess(4248)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{Workdir: "/tmp/wd", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	call := cmder.lastCall()
+	assert.Contains(t, call.env, "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0", "spawned CC must not auto-background a blocking ask")
+	assert.Contains(t, call.env, "TELEGRAM_ASK_TIMEOUT=600", "spawned shim's ask bound widens once the cutoff is lifted")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnRunner_OperatorEnvWinsOverChildDefaults(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "300000")
+	t.Setenv("TELEGRAM_ASK_TIMEOUT", "240")
+
+	proc := newFakeSpawnProcess(4249)
+	cmder := &fakeSpawnCommander{startFn: func(_ context.Context, _, _ string, _, _ []string) (SpawnProcess, error) {
+		return proc, nil
+	}}
+	fb := newRecordingBot(100)
+
+	r := NewSpawnRunnerWithDeps(SpawnConfig{
+		MaxParallel:        1,
+		RatePerHourPerUser: 99,
+		HardTimeout:        time.Minute,
+		ClaudeBin:          "/usr/local/bin/claude",
+	}, fb, cmder)
+
+	id, err := r.Spawn(context.Background(), bot.SpawnRequest{Workdir: "/tmp/wd", ChatID: "1", UserID: "u"})
+	require.NoError(t, err)
+
+	call := cmder.lastCall()
+	assert.Contains(t, call.env, "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=300000")
+	assert.NotContains(t, call.env, "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0")
+	assert.Contains(t, call.env, "TELEGRAM_ASK_TIMEOUT=240")
+	assert.NotContains(t, call.env, "TELEGRAM_ASK_TIMEOUT=600")
+
+	require.NoError(t, r.Cancel(id))
+	require.Eventually(t, func() bool { return len(r.List()) == 0 }, 3*time.Second, 20*time.Millisecond)
+}
