@@ -19,16 +19,16 @@ func TestResolveEffort_knownLevels(t *testing.T) {
 	}{
 		{name: "low lowercase", input: "low", wantModel: "claude-haiku-4-5", wantThinkTokens: 0},
 		{name: "medium lowercase", input: "medium", wantModel: "claude-sonnet-5", wantThinkTokens: 8000},
-		{name: "high lowercase", input: "high", wantModel: "claude-opus-4-8", wantThinkTokens: 16000},
-		{name: "xhigh lowercase", input: "xhigh", wantModel: "claude-opus-4-8", wantThinkTokens: 32000},
-		{name: "max lowercase", input: "max", wantModel: "claude-opus-4-8", wantThinkTokens: 64000},
-		{name: "high uppercase", input: "HIGH", wantModel: "claude-opus-4-8", wantThinkTokens: 16000},
+		{name: "high lowercase", input: "high", wantModel: "claude-opus-5", wantThinkTokens: 16000},
+		{name: "xhigh lowercase", input: "xhigh", wantModel: "claude-opus-5", wantThinkTokens: 32000},
+		{name: "max lowercase", input: "max", wantModel: "claude-opus-5", wantThinkTokens: 64000},
+		{name: "high uppercase", input: "HIGH", wantModel: "claude-opus-5", wantThinkTokens: 16000},
 		{name: "medium mixed case", input: "MeDiUm", wantModel: "claude-sonnet-5", wantThinkTokens: 8000},
-		{name: "high whitespace padded", input: "  high  ", wantModel: "claude-opus-4-8", wantThinkTokens: 16000},
-		{name: "max tab padded", input: "\tmax\t", wantModel: "claude-opus-4-8", wantThinkTokens: 64000},
-		{name: "xhigh uppercase", input: "XHIGH", wantModel: "claude-opus-4-8", wantThinkTokens: 32000},
-		{name: "ultra lowercase", input: "ultra", wantModel: "claude-fable-5", wantThinkTokens: 64000},
-		{name: "ultra uppercase", input: "ULTRA", wantModel: "claude-fable-5", wantThinkTokens: 64000},
+		{name: "high whitespace padded", input: "  high  ", wantModel: "claude-opus-5", wantThinkTokens: 16000},
+		{name: "max tab padded", input: "\tmax\t", wantModel: "claude-opus-5", wantThinkTokens: 64000},
+		{name: "xhigh uppercase", input: "XHIGH", wantModel: "claude-opus-5", wantThinkTokens: 32000},
+		{name: "ultra lowercase", input: "ultra", wantModel: "claude-fable-5-1", wantThinkTokens: 64000},
+		{name: "ultra uppercase", input: "ULTRA", wantModel: "claude-fable-5-1", wantThinkTokens: 64000},
 	}
 
 	for _, tt := range tests {
@@ -150,7 +150,7 @@ func TestHandleEffortCommand_setPersists(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, text, "Effort set to")
 	assert.Contains(t, text, "high")
-	assert.Contains(t, text, "claude-opus-4-8")
+	assert.Contains(t, text, "claude-opus-5")
 	assert.Equal(t, "MarkdownV2", calls[0].params["parse_mode"])
 }
 
@@ -218,7 +218,7 @@ func TestRenderEffortLine(t *testing.T) {
 			name:    "valid stored level renders model + thinking",
 			st:      access.State{EffortByChat: map[string]string{"42": "high"}},
 			chatID:  "42",
-			wantSub: "claude-opus-4-8",
+			wantSub: "claude-opus-5",
 		},
 		{
 			name:    "unknown stored level surfaces clear-with hint",
